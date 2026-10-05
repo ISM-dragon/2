@@ -1,0 +1,52 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Center Group within 66dp safe zone (21..87) -->
+    <group
+        android:translateX="0"
+        android:translateY="0">
+        <!-- Building Silhouette Left (Cyan) -->
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M28,45 L42,45 L42,78 L28,78 Z" />
+        <!-- Building Windows Left -->
+        <path
+            android:fillColor="#0B132B"
+            android:pathData="M32,50 h4 v4 h-4 Z M32,58 h4 v4 h-4 Z M32,66 h4 v4 h-4 Z" />
+
+        <!-- Main Real Estate Gable / House Center (Pure White) -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M54,28 L78,48 L73,48 L73,78 L35,78 L35,48 L30,48 Z" />
+
+        <!-- High-Rise Tower Right (Deep Navy Accent) -->
+        <path
+            android:fillColor="#94A3B8"
+            android:pathData="M66,38 L80,38 L80,78 L66,78 Z" />
+        <!-- High-Rise Windows -->
+        <path
+            android:fillColor="#0F172A"
+            android:pathData="M70,44 h4 v3 h-4 Z M70,52 h4 v3 h-4 Z M70,60 h4 v3 h-4 Z M70,68 h4 v3 h-4 Z" />
+
+        <!-- Center Door/Core in House -->
+        <path
+            android:fillColor="#0F172A"
+            android:pathData="M50,62 L58,62 L58,78 L50,78 Z" />
+
+        <!-- Roof Peak Accent (Cyan Line) -->
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M54,34 L68,46 L65,49 L54,40 L43,49 L40,46 Z" />
+
+        <!-- AI Neural Spark / Golden Star in Sky -->
+        <path
+            android:fillColor="#F59E0B"
+            android:pathData="M54,22 L56,26 L60,28 L56,30 L54,34 L52,30 L48,28 L52,26 Z" />
+        <!-- AI Data Pulse Dot -->
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M68,26 A2.5,2.5 0 1,1 63,26 A2.5,2.5 0 1,1 68,26 Z" />
+    </group>
+</vector>

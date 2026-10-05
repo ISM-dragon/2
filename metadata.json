@@ -1,0 +1,6 @@
+{
+  "name": "Real Estate AI",
+  "description": "Autonomous real estate deal finder, deterministic financial analyzer, multi-slot Gemini intelligence, and automated offer generator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
