@@ -33,7 +33,7 @@ import com.example.data.local.entity.*
         GmailConfigurationEntity::class,
         OfferTemplateEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

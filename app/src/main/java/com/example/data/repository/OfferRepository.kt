@@ -26,7 +26,7 @@ data class PreSendValidationResult(
 class OfferRepository(
     private val offerDao: OfferDao,
     private val propertyDao: PropertyDao,
-    private val configDao: ConfigDao,
+    private val configRepository: ConfigRepository,
     private val geminiManager: GeminiManager,
     private val gmailService: GmailService
 ) {
@@ -77,9 +77,12 @@ class OfferRepository(
             return@withContext PreSendValidationResult(false, "Offer PDF contract document is missing or corrupted on disk.")
         }
 
-        val gmailConfig = configDao.getGmailConfig()
-        if (gmailConfig == null || !gmailConfig.isConnected) {
-            return@withContext PreSendValidationResult(false, "Gmail account is not connected. Authorization required in Settings.")
+        val gmailConfig = configRepository.getGmailConfig()
+        if (!gmailConfig.isConnected || gmailConfig.accessToken.isNullOrBlank()) {
+            return@withContext PreSendValidationResult(
+                false,
+                "Gmail account is not connected with a valid authorized OAuth token. Authorization required in Settings."
+            )
         }
 
         PreSendValidationResult(true, null)
@@ -101,7 +104,7 @@ class OfferRepository(
         val property = propertyDao.getPropertyById(propertyId)
             ?: throw IllegalArgumentException("Property not found: $propertyId")
 
-        val template = configDao.getOfferTemplate() ?: com.example.data.local.entity.OfferTemplateEntity()
+        val template = configRepository.getOfferTemplate() ?: com.example.data.local.entity.OfferTemplateEntity()
         val offerPrice = customPrice ?: (property.price * 0.92)
         val earnestMoney = offerPrice * (template.earnestMoneyPercent / 100.0)
 
@@ -236,7 +239,7 @@ class OfferRepository(
             pdfFile = pdfFile
         )
 
-        if (sendResult.success) {
+        if (sendResult.success && !sendResult.messageId.isNullOrBlank()) {
             offerDao.updateOfferStatus(
                 id = offerId,
                 status = "SENT",
@@ -245,11 +248,12 @@ class OfferRepository(
             )
             true
         } else {
+            val failureError = sendResult.error ?: "Gmail API transmission failed without message ID confirmation."
             offerDao.updateOfferStatus(
                 id = offerId,
                 status = "FAILED",
                 sentAt = null,
-                error = sendResult.error
+                error = failureError
             )
             false
         }

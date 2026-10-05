@@ -30,6 +30,10 @@ class ConfigRepository(
 
     val offerTemplate: Flow<OfferTemplateEntity?> = configDao.getOfferTemplateFlow()
 
+    suspend fun getOfferTemplate(): OfferTemplateEntity? = withContext(Dispatchers.IO) {
+        configDao.getOfferTemplate()
+    }
+
     suspend fun getGmailConfig(): GmailConfigurationEntity = withContext(Dispatchers.IO) {
         val cfg = configDao.getGmailConfig() ?: GmailConfigurationEntity()
         cfg.copy(
@@ -47,6 +51,57 @@ class ConfigRepository(
                 refreshToken = encryptedRefresh
             )
         )
+    }
+
+    suspend fun updateGmailAuthStatus(status: String, lastError: String? = null) = withContext(Dispatchers.IO) {
+        val current = getGmailConfig()
+        saveGmailConfig(
+            current.copy(
+                authStatus = status,
+                lastError = lastError
+            )
+        )
+    }
+
+    suspend fun updateGmailTokens(
+        newAccessToken: String?,
+        newRefreshToken: String? = null,
+        expiresAt: Long,
+        authStatus: String,
+        lastError: String? = null
+    ) = withContext(Dispatchers.IO) {
+        val current = getGmailConfig()
+        val isAuth = !newAccessToken.isNullOrBlank() &&
+            authStatus != com.example.data.local.entity.GmailAuthStatus.FAILED &&
+            authStatus != com.example.data.local.entity.GmailAuthStatus.AUTH_EXPIRED &&
+            authStatus != com.example.data.local.entity.GmailAuthStatus.NOT_CONFIGURED
+
+        val updated = current.copy(
+            accessToken = newAccessToken,
+            refreshToken = newRefreshToken ?: current.refreshToken,
+            expiresAt = expiresAt,
+            authStatus = authStatus,
+            isConnected = isAuth,
+            lastError = lastError
+        )
+        saveGmailConfig(updated)
+    }
+
+    fun getOAuthClientId(): String? {
+        return try {
+            val field = BuildConfig::class.java.getField("GOOGLE_OAUTH_CLIENT_ID")
+            val value = field.get(null) as? String
+            if (!value.isNullOrBlank()) value.trim() else null
+        } catch (e: Throwable) {
+            try {
+                val field = BuildConfig::class.java.getField("OAUTH_CLIENT_ID")
+                val value = field.get(null) as? String
+                if (!value.isNullOrBlank()) value.trim() else null
+            } catch (e2: Throwable) {
+                val envVal = System.getenv("GOOGLE_OAUTH_CLIENT_ID")
+                if (!envVal.isNullOrBlank()) envVal.trim() else null
+            }
+        }
     }
 
     suspend fun saveApiConfig(config: ApiConfigurationEntity) = withContext(Dispatchers.IO) {

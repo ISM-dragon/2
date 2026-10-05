@@ -6,8 +6,9 @@ import android.net.Uri
 import android.util.Base64
 import android.util.Patterns
 import androidx.core.content.FileProvider
-import com.example.data.local.dao.ConfigDao
+import com.example.data.local.entity.GmailAuthStatus
 import com.example.data.local.entity.GmailConfigurationEntity
+import com.example.data.repository.ConfigRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
@@ -19,7 +20,6 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.charset.StandardCharsets
-import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 data class GmailSendResult(
@@ -29,7 +29,7 @@ data class GmailSendResult(
 )
 
 class GmailService(
-    private val configDao: ConfigDao
+    private val configRepository: ConfigRepository
 ) {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(25, TimeUnit.SECONDS)
@@ -38,7 +38,8 @@ class GmailService(
         .build()
 
     suspend fun getConfiguration(): GmailConfigurationEntity {
-        return configDao.getGmailConfig() ?: GmailConfigurationEntity()
+        // Reads via ConfigRepository which decrypts access & refresh tokens
+        return configRepository.getGmailConfig()
     }
 
     suspend fun sendOfferEmail(
@@ -74,9 +75,13 @@ class GmailService(
             )
         }
 
-        // 4. Verify account authorization
+        // 4. Verify account authorization via single source of truth (ConfigRepository)
         var config = getConfiguration()
         if (!config.isConnected || config.accessToken.isNullOrBlank()) {
+            configRepository.updateGmailAuthStatus(
+                GmailAuthStatus.AUTH_REQUIRED,
+                "Gmail OAuth is not configured. Email was not sent."
+            )
             return@withContext GmailSendResult(
                 success = false,
                 error = "Gmail OAuth is not configured. Email was not sent."
@@ -85,8 +90,9 @@ class GmailService(
 
         // Check token expiration before sending
         if (config.expiresAt > 0L && System.currentTimeMillis() > config.expiresAt) {
+            configRepository.updateGmailAuthStatus(GmailAuthStatus.AUTH_EXPIRED, "OAuth access token expired")
             val refreshed = refreshAccessToken(config)
-            if (refreshed != null) {
+            if (refreshed != null && !refreshed.accessToken.isNullOrBlank()) {
                 config = refreshed
             } else {
                 return@withContext GmailSendResult(
@@ -96,15 +102,33 @@ class GmailService(
             }
         }
 
+        // Update status to SENDING
+        configRepository.updateGmailAuthStatus(GmailAuthStatus.SENDING, null)
+
         val result = transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
         if (!result.success && result.error?.contains("401") == true && !config.refreshToken.isNullOrBlank()) {
-            // Attempt token refresh on 401 Unauthorized
+            // Attempt one token refresh on 401 Unauthorized
+            configRepository.updateGmailAuthStatus(GmailAuthStatus.AUTH_EXPIRED, "HTTP 401 Unauthorized received from Gmail API")
             val refreshed = refreshAccessToken(config)
-            if (refreshed != null) {
+            if (refreshed != null && !refreshed.accessToken.isNullOrBlank()) {
                 config = refreshed
-                return@withContext transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
+                configRepository.updateGmailAuthStatus(GmailAuthStatus.SENDING, null)
+                val retryResult = transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
+                if (retryResult.success) {
+                    configRepository.updateGmailAuthStatus(GmailAuthStatus.SENT, null)
+                } else {
+                    configRepository.updateGmailAuthStatus(GmailAuthStatus.FAILED, retryResult.error)
+                }
+                return@withContext retryResult
             }
         }
+
+        if (result.success) {
+            configRepository.updateGmailAuthStatus(GmailAuthStatus.SENT, null)
+        } else {
+            configRepository.updateGmailAuthStatus(GmailAuthStatus.FAILED, result.error)
+        }
+
         return@withContext result
     }
 
@@ -189,29 +213,61 @@ class GmailService(
 
             if (response.isSuccessful) {
                 val json = JSONObject(if (responseBody.isNotBlank()) responseBody else "{}")
-                val messageId = json.optString("id", "GMAIL-${System.currentTimeMillis()}")
+                val messageId = json.optString("id", "").trim()
+                // Strict check: If Gmail response does not contain a real message ID, treat as failure
+                if (messageId.isBlank()) {
+                    return GmailSendResult(
+                        success = false,
+                        error = "Gmail API response succeeded but did not return a valid message id."
+                    )
+                }
                 return GmailSendResult(success = true, messageId = messageId)
             } else {
+                val sanitized = sanitizeSensitiveData(
+                    "Gmail API HTTP ${response.code}: ${response.message}. $responseBody",
+                    config
+                )
                 return GmailSendResult(
                     success = false,
-                    error = "Gmail API HTTP ${response.code}: ${response.message}. $responseBody"
+                    error = sanitized
                 )
             }
         } catch (e: Exception) {
+            val sanitized = sanitizeSensitiveData(
+                e.message ?: "Failed to transmit email via Gmail API",
+                config
+            )
             return GmailSendResult(
                 success = false,
-                error = e.message ?: "Failed to transmit email via Gmail API"
+                error = sanitized
             )
         }
     }
 
     suspend fun refreshAccessToken(config: GmailConfigurationEntity): GmailConfigurationEntity? {
-        val refreshToken = config.refreshToken ?: return null
+        val refreshToken = config.refreshToken
+        if (refreshToken.isNullOrBlank()) {
+            configRepository.updateGmailAuthStatus(
+                GmailAuthStatus.AUTH_EXPIRED,
+                "Refresh token is missing. Please authorize Gmail account in Settings."
+            )
+            return null
+        }
+
+        val clientId = configRepository.getOAuthClientId()
+        if (clientId.isNullOrBlank()) {
+            configRepository.updateGmailAuthStatus(
+                GmailAuthStatus.FAILED,
+                "OAuth Client ID is not configured. Google OAuth token refresh cannot proceed without a valid Client ID."
+            )
+            return null
+        }
+
         return try {
             val body = FormBody.Builder()
                 .add("grant_type", "refresh_token")
                 .add("refresh_token", refreshToken)
-                .add("client_id", "real-estate-ai-app")
+                .add("client_id", clientId)
                 .build()
 
             val request = Request.Builder()
@@ -222,20 +278,49 @@ class GmailService(
             val response = httpClient.newCall(request).execute()
             if (response.isSuccessful) {
                 val json = JSONObject(response.body?.string() ?: "{}")
-                val newAccessToken = json.optString("access_token")
+                val newAccessToken = json.optString("access_token", "").trim()
                 if (newAccessToken.isNotBlank()) {
-                    val updated = config.copy(
-                        accessToken = newAccessToken,
-                        expiresAt = System.currentTimeMillis() + (json.optLong("expires_in", 3600) * 1000)
+                    val expiresInSec = json.optLong("expires_in", 3600L)
+                    val newExpiresAt = System.currentTimeMillis() + (expiresInSec * 1000L)
+                    val newRefreshToken = json.optString("refresh_token", "").takeIf { it.isNotBlank() } ?: refreshToken
+
+                    // Save encrypted through ConfigRepository
+                    configRepository.updateGmailTokens(
+                        newAccessToken = newAccessToken,
+                        newRefreshToken = newRefreshToken,
+                        expiresAt = newExpiresAt,
+                        authStatus = GmailAuthStatus.AUTH_REQUIRED,
+                        lastError = null
                     )
-                    configDao.saveGmailConfig(updated)
-                    return updated
+                    return configRepository.getGmailConfig()
                 }
+            } else {
+                val errorBody = sanitizeSensitiveData(response.body?.string() ?: "", config)
+                configRepository.updateGmailAuthStatus(
+                    GmailAuthStatus.FAILED,
+                    "Google OAuth refresh failed: HTTP ${response.code}. $errorBody"
+                )
             }
             null
         } catch (e: Exception) {
+            val errorMsg = sanitizeSensitiveData(e.message ?: "OAuth refresh failed", config)
+            configRepository.updateGmailAuthStatus(
+                GmailAuthStatus.FAILED,
+                errorMsg
+            )
             null
         }
+    }
+
+    private fun sanitizeSensitiveData(message: String, config: GmailConfigurationEntity?): String {
+        var sanitized = message
+        config?.accessToken?.let { token ->
+            if (token.isNotBlank()) sanitized = sanitized.replace(token, "[REDACTED_ACCESS_TOKEN]")
+        }
+        config?.refreshToken?.let { token ->
+            if (token.isNotBlank()) sanitized = sanitized.replace(token, "[REDACTED_REFRESH_TOKEN]")
+        }
+        return sanitized
     }
 
     fun createGmailIntent(

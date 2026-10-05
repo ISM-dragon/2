@@ -83,6 +83,9 @@ class PropertyRepository(
     fun getTaxRecordFlow(propertyId: String): Flow<TaxRecordEntity?> =
         propertyDao.getTaxRecordFlow(propertyId)
 
+    suspend fun getTaxRecord(propertyId: String): TaxRecordEntity? =
+        propertyDao.getTaxRecord(propertyId)
+
     fun getSalesHistory(propertyId: String): Flow<List<SalesHistoryEntity>> =
         propertyDao.getSalesHistory(propertyId)
 

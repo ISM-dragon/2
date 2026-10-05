@@ -67,28 +67,56 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun connectGmail(
+    fun saveGmailAccountSettings(
         email: String,
         senderName: String,
         signature: String,
-        subjectTemplate: String,
-        token: String
+        subjectTemplate: String
     ) {
         viewModelScope.launch {
             val cleanEmail = email.trim()
-            val cleanToken = token.trim()
-            val isAuthorized = cleanEmail.isNotBlank() && cleanToken.isNotBlank()
             val current = uiState.value.gmailConfig
+            val isConnected = current.isConnected && !current.accessToken.isNullOrBlank()
             val updated = current.copy(
                 accountEmail = cleanEmail,
                 senderName = senderName.trim(),
                 signature = signature,
                 defaultSubjectTemplate = subjectTemplate,
-                accessToken = cleanToken.ifBlank { null },
-                isConnected = isAuthorized,
-                authStatus = if (isAuthorized) "AUTH_REQUIRED" else "NOT_CONFIGURED"
+                isConnected = isConnected,
+                authStatus = if (isConnected) current.authStatus else if (cleanEmail.isNotBlank()) {
+                    com.example.data.local.entity.GmailAuthStatus.AUTH_REQUIRED
+                } else {
+                    com.example.data.local.entity.GmailAuthStatus.NOT_CONFIGURED
+                }
             )
             configRepo.saveGmailConfig(updated)
+        }
+    }
+
+    fun applyVerifiedOAuthTokens(
+        accessToken: String,
+        refreshToken: String?,
+        expiresInSeconds: Long = 3600L
+    ) {
+        viewModelScope.launch {
+            val cleanAccess = accessToken.trim()
+            if (cleanAccess.isBlank()) {
+                configRepo.updateGmailAuthStatus(
+                    com.example.data.local.entity.GmailAuthStatus.FAILED,
+                    "Cannot authorize: Received empty OAuth access token."
+                )
+                return@launch
+            }
+
+            val cleanRefresh = refreshToken?.trim()?.takeIf { it.isNotBlank() }
+            val expiresAt = System.currentTimeMillis() + (expiresInSeconds * 1000L)
+            configRepo.updateGmailTokens(
+                newAccessToken = cleanAccess,
+                newRefreshToken = cleanRefresh,
+                expiresAt = expiresAt,
+                authStatus = com.example.data.local.entity.GmailAuthStatus.AUTH_REQUIRED,
+                lastError = null
+            )
         }
     }
 
@@ -97,7 +125,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             val current = uiState.value.gmailConfig
             val updated = current.copy(
                 isConnected = false,
-                authStatus = "NOT_CONFIGURED",
+                authStatus = com.example.data.local.entity.GmailAuthStatus.NOT_CONFIGURED,
                 accessToken = null,
                 refreshToken = null,
                 expiresAt = 0L,
@@ -111,16 +139,16 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             val current = uiState.value.gmailConfig
             if (current.refreshToken.isNullOrBlank()) {
-                onResult(false, "Cannot refresh: OAuth refresh token is not configured.")
+                onResult(false, "Cannot refresh: Google OAuth refresh token is missing. Authorization required.")
                 return@launch
             }
 
             val refreshed = app.gmailService.refreshAccessToken(current)
-            if (refreshed != null) {
-                configRepo.saveGmailConfig(refreshed.copy(authStatus = "AUTH_REQUIRED"))
+            if (refreshed != null && !refreshed.accessToken.isNullOrBlank()) {
                 onResult(true, "Authentication refreshed successfully for ${current.accountEmail}")
             } else {
-                onResult(false, "OAuth token refresh failed with Google servers.")
+                val errorMsg = uiState.value.gmailConfig.lastError ?: "OAuth token refresh failed with Google servers."
+                onResult(false, errorMsg)
             }
         }
     }

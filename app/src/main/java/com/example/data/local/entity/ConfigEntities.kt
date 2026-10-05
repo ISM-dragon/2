@@ -19,12 +19,21 @@ data class ApiConfigurationEntity(
     val lastErrorMessage: String? = null
 )
 
+object GmailAuthStatus {
+    const val NOT_CONFIGURED = "NOT_CONFIGURED"
+    const val AUTH_REQUIRED = "AUTH_REQUIRED"
+    const val AUTH_EXPIRED = "AUTH_EXPIRED"
+    const val SENDING = "SENDING"
+    const val SENT = "SENT"
+    const val FAILED = "FAILED"
+}
+
 @Entity(tableName = "gmail_configuration")
 data class GmailConfigurationEntity(
     @PrimaryKey
     val id: Int = 1,
     val isConnected: Boolean = false,
-    val authStatus: String = "NOT_CONFIGURED", // "NOT_CONFIGURED", "AUTH_REQUIRED", "AUTH_EXPIRED", "SENDING", "SENT", "FAILED"
+    val authStatus: String = GmailAuthStatus.NOT_CONFIGURED,
     val accountEmail: String = "",
     val senderName: String = "",
     val signature: String = "Best regards,\nReal Estate Investment Team",

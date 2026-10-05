@@ -82,6 +82,9 @@ interface PropertyDao {
     @Query("SELECT * FROM tax_records WHERE propertyId = :propertyId LIMIT 1")
     fun getTaxRecordFlow(propertyId: String): Flow<TaxRecordEntity?>
 
+    @Query("SELECT * FROM tax_records WHERE propertyId = :propertyId LIMIT 1")
+    suspend fun getTaxRecord(propertyId: String): TaxRecordEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTaxRecord(tax: TaxRecordEntity)
 

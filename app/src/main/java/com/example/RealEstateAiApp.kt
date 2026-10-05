@@ -71,12 +71,12 @@ class RealEstateAiApp : Application() {
         configRepository = ConfigRepository(database.configDao())
 
         geminiManager = GeminiManager(database.configDao())
-        gmailService = GmailService(database.configDao())
+        gmailService = GmailService(configRepository)
 
         offerRepository = OfferRepository(
             offerDao = database.offerDao(),
             propertyDao = database.propertyDao(),
-            configDao = database.configDao(),
+            configRepository = configRepository,
             geminiManager = geminiManager,
             gmailService = gmailService
         )

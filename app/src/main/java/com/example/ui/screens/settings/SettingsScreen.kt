@@ -115,12 +115,24 @@ fun SettingsScreen(
                             Column {
                                 Text("Google Gmail Account", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                                 Text(
-                                    if (isConnected) "Connected • OAuth Verified" else "Not Connected",
+                                    text = when (gmail.authStatus) {
+                                        "SENT" -> "Connected • Verified • Ready"
+                                        "SENDING" -> "Sending offer via Gmail..."
+                                        "AUTH_REQUIRED" -> if (isConnected) "Connected • OAuth Active" else "Authorization Required (Google OAuth)"
+                                        "AUTH_EXPIRED" -> "OAuth Expired • Re-auth Required"
+                                        "FAILED" -> "Connection Error • Check Settings"
+                                        else -> "Not Configured"
+                                    },
                                     fontSize = 11.sp,
-                                    color = if (isConnected) EmeraldGain else Slate400
+                                    color = when {
+                                        isConnected || gmail.authStatus == "SENT" -> EmeraldGain
+                                        gmail.authStatus == "AUTH_REQUIRED" || gmail.authStatus == "AUTH_EXPIRED" -> AmberAccent
+                                        gmail.authStatus == "FAILED" -> CrimsonAlert
+                                        else -> Slate400
+                                    }
                                 )
                             }
-                            StatusBadge(status = if (isConnected) "CONNECTED" else "OFFLINE")
+                            StatusBadge(status = if (isConnected) "CONNECTED" else gmail.authStatus)
                         }
 
                         OutlinedTextField(
@@ -159,7 +171,7 @@ fun SettingsScreen(
                             Text(
                                 text = authFeedback ?: "",
                                 fontSize = 11.sp,
-                                color = if (isConnected) EmeraldGain else CrimsonAlert,
+                                color = if (isConnected) EmeraldGain else AmberAccent,
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
@@ -173,24 +185,25 @@ fun SettingsScreen(
                             if (!isConnected) {
                                 Button(
                                     onClick = {
-                                        val targetEmail = email.ifBlank { "investor.deals@gmail.com" }
-                                        email = targetEmail
-                                        isConnected = true
-                                        viewModel.connectGmail(
-                                            email = targetEmail,
-                                            senderName = sender.ifBlank { "Real Estate Investment Group" },
-                                            signature = sig,
-                                            subjectTemplate = subjectTemplate,
-                                            token = "OAUTH_BEARER_${System.currentTimeMillis()}"
-                                        )
-                                        authFeedback = "OAuth connection authorized for $targetEmail"
+                                        val targetEmail = email.trim()
+                                        if (targetEmail.isBlank()) {
+                                            authFeedback = "Please enter your Gmail account address."
+                                        } else {
+                                            viewModel.saveGmailAccountSettings(
+                                                email = targetEmail,
+                                                senderName = sender.ifBlank { "Real Estate Acquisitions Team" },
+                                                signature = sig,
+                                                subjectTemplate = subjectTemplate
+                                            )
+                                            authFeedback = "Settings saved for $targetEmail. Google OAuth sign-in required to authorize email dispatch."
+                                        }
                                     },
                                     modifier = Modifier.weight(1f).testTag("connect_gmail_button"),
                                     colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
                                 ) {
                                     Icon(Icons.Filled.AccountCircle, contentDescription = null, modifier = Modifier.size(16.dp), tint = Slate950)
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Connect", color = Slate950, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    Text("Save Account", color = Slate950, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                 }
                             } else {
                                 OutlinedButton(
@@ -223,14 +236,11 @@ fun SettingsScreen(
 
                             Button(
                                 onClick = {
-                                    viewModel.updateGmailConfig(
-                                        gmail.copy(
-                                            accountEmail = email,
-                                            senderName = sender,
-                                            signature = sig,
-                                            defaultSubjectTemplate = subjectTemplate,
-                                            isConnected = isConnected
-                                        )
+                                    viewModel.saveGmailAccountSettings(
+                                        email = email,
+                                        senderName = sender,
+                                        signature = sig,
+                                        subjectTemplate = subjectTemplate
                                     )
                                     authFeedback = "Settings saved successfully."
                                 },
