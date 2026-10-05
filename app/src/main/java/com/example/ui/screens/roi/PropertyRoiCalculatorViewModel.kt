@@ -4,20 +4,35 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.RealEstateAiApp
-import com.example.domain.finance.FinancialEngine
 import com.example.domain.finance.FinancialInput
+import com.example.domain.finance.underwriting.AssumptionRecord
+import com.example.domain.finance.underwriting.DealRating
+import com.example.domain.finance.underwriting.InvestmentStrategy
+import com.example.domain.finance.underwriting.IssueSeverity
+import com.example.domain.finance.underwriting.UnderwritingAssumptions
+import com.example.domain.finance.underwriting.UnderwritingEngine
+import com.example.domain.finance.underwriting.UnderwritingInput
+import com.example.domain.finance.underwriting.UnderwritingResult
+import com.example.domain.finance.underwriting.ValidationIssue
+import com.example.domain.finance.underwriting.Summaries
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import org.json.JSONArray
 import org.json.JSONObject
 
+/**
+ * Which numbers the screen is showing.
+ *
+ * There is deliberately no "AI" member: the language model is never a source of
+ * a financial figure in this app, so it can never be a source of a *metric*.
+ */
 enum class CalculationSource {
     NONE,
-    GEMINI_AI,
-    LOCAL_ENGINE_FALLBACK
+
+    /** Every figure was computed by the deterministic underwriting engine. */
+    DETERMINISTIC_ENGINE
 }
 
 data class PropertyDetailsInput(
@@ -58,23 +73,40 @@ data class LocalMarketDataInput(
     val utilitiesMonthly: Double = 0.0
 )
 
+/**
+ * The screen's view of a deterministic underwriting result.
+ *
+ * Metrics that genuinely do not exist for a deal (DSCR on an all-cash purchase,
+ * a cap rate with no price) are null here rather than invented as 0 or 999.
+ * [assumptionsUsed] and [findings] carry the engine's provenance and warnings so
+ * the UI can show *why* a number is what it is.
+ */
 data class CalculatedRoiMetrics(
-    val capRatePct: Double,
-    val cashOnCashReturnPct: Double,
+    val capRatePct: Double?,
+    val cashOnCashReturnPct: Double?,
     val monthlyCashFlow: Double,
     val annualCashFlow: Double,
     val netOperatingIncomeAnnual: Double,
     val grossRentalIncomeAnnual: Double,
     val totalCashRequired: Double,
-    val debtServiceCoverageRatio: Double,
-    val grossRentMultiplier: Double,
+    val debtServiceCoverageRatio: Double?,
+    val grossRentMultiplier: Double?,
     val projected5YearRoiPct: Double,
-    val breakEvenOccupancyPct: Double,
+    val breakEvenOccupancyPct: Double?,
     val investmentVerdict: String,
     val recommendedStrategy: String,
     val marketInsights: String,
     val riskFactors: List<String> = emptyList(),
-    val localMarketScore: Int = 75
+    val localMarketScore: Int = 75,
+    val specVersion: String = UnderwritingAssumptions.SPEC_VERSION,
+    val assumptionsUsed: Map<String, AssumptionRecord> = emptyMap(),
+    val findings: List<ValidationIssue> = emptyList()
+)
+
+/** Qualitative commentary. Never contains a computed financial figure. */
+data class AiNarrative(
+    val marketInsights: String,
+    val riskFactors: List<String> = emptyList()
 )
 
 data class PropertyRoiUiState(
@@ -83,9 +115,182 @@ data class PropertyRoiUiState(
     val marketData: LocalMarketDataInput = LocalMarketDataInput(),
     val metrics: CalculatedRoiMetrics? = null,
     val calculationSource: CalculationSource = CalculationSource.NONE,
+    /** True when the (qualitative only) commentary below came from the model. */
+    val aiNarrativeUsed: Boolean = false,
     val errorMessage: String? = null,
     val lastCalculatedAt: Long = 0L
 )
+
+/**
+ * Pure functions behind the ROI screen.
+ *
+ * Splitting the arithmetic out of the ViewModel is what makes the "no AI maths"
+ * rule testable: [deterministic] takes the user's inputs and nothing else, and
+ * [withNarrative] is the *only* place AI output is allowed to touch a
+ * [CalculatedRoiMetrics] - and it can only replace prose.
+ */
+object RoiMetricsCalculator {
+
+    fun deterministic(
+        prop: PropertyDetailsInput,
+        mkt: LocalMarketDataInput
+    ): CalculatedRoiMetrics {
+        val result = UnderwritingEngine.analyze(underwritingInput(prop, mkt))
+        return fromResult(prop, mkt, result)
+    }
+
+    /** The exact deal handed to the engine, so the same inputs reproduce the same metrics. */
+    fun underwritingInput(prop: PropertyDetailsInput, mkt: LocalMarketDataInput): UnderwritingInput =
+        UnderwritingInput(
+            strategy = InvestmentStrategy.BUY_AND_HOLD,
+            purchasePrice = prop.purchasePrice,
+            closingCosts = prop.purchasePrice * (prop.closingCostRatePct / 100.0),
+            rehabCost = prop.renovationCost,
+            monthlyRent = mkt.estimatedMonthlyRent,
+            vacancyRatePct = mkt.vacancyRatePct,
+            propertyTaxAnnual = mkt.propertyTaxAnnual,
+            insuranceAnnual = mkt.insuranceAnnual,
+            maintenancePctOfGsi = mkt.maintenancePct,
+            managementPctOfEgi = mkt.propertyManagementPct,
+            utilitiesMonthly = mkt.utilitiesMonthly,
+            downPaymentPct = prop.downPaymentPct,
+            interestRatePct = prop.interestRatePct,
+            loanTermMonths = prop.loanTermYears * 12,
+            amortizationMonths = prop.loanTermYears * 12,
+            holdYears = FIVE_YEAR_PROJECTION_YEARS,
+            appreciationPct = mkt.neighborhoodAppreciationRatePct
+        )
+
+    private const val FIVE_YEAR_PROJECTION_YEARS = 5
+
+    fun fromResult(
+        prop: PropertyDetailsInput,
+        mkt: LocalMarketDataInput,
+        result: UnderwritingResult
+    ): CalculatedRoiMetrics {
+        val findings = result.validation
+            .filter { it.severity != IssueSeverity.INFO }
+            .sortedWith(compareBy({ it.severity.ordinal }, { it.code }))
+
+        return CalculatedRoiMetrics(
+            capRatePct = result.core.capRateOnPricePct,
+            cashOnCashReturnPct = result.core.cashOnCashPct,
+            monthlyCashFlow = result.core.monthlyCashFlow,
+            annualCashFlow = result.core.annualCashFlow,
+            netOperatingIncomeAnnual = result.core.noiAnnual,
+            grossRentalIncomeAnnual = result.operating.grossScheduledIncomeAnnual,
+            totalCashRequired = result.core.totalCashRequired,
+            debtServiceCoverageRatio = result.core.dscr,
+            grossRentMultiplier = result.core.grossRentMultiplier,
+            // the five-year projection, including sale costs and loan payoff
+            projected5YearRoiPct = result.hold?.roiPct ?: result.returns?.roiPct ?: 0.0,
+            breakEvenOccupancyPct = result.core.breakEvenOccupancyPct,
+            investmentVerdict = verdictLabel(result.verdict.rating),
+            recommendedStrategy = recommendedStrategy(prop, mkt, result),
+            marketInsights = Summaries.describe(result),
+            riskFactors = riskFactors(prop, mkt, findings),
+            localMarketScore = localMarketScore(mkt),
+            specVersion = result.specVersion,
+            assumptionsUsed = result.assumptionsUsed,
+            findings = findings
+        )
+    }
+
+    /**
+     * Fold qualitative commentary into the metrics. Financial fields are copied
+     * through untouched: there is no code path from [AiNarrative] to a number,
+     * which is exactly the property the unit test pins down.
+     */
+    fun withNarrative(metrics: CalculatedRoiMetrics, narrative: AiNarrative): CalculatedRoiMetrics =
+        metrics.copy(
+            marketInsights = narrative.marketInsights.ifBlank { metrics.marketInsights },
+            riskFactors = narrative.riskFactors.ifEmpty { metrics.riskFactors }
+        )
+
+    /**
+     * Reads commentary from a model response. Numeric keys in the payload are
+     * ignored, whatever they claim; a malformed payload simply yields null.
+     */
+    fun narrativeFrom(rawJson: String?): AiNarrative? {
+        if (rawJson.isNullOrBlank()) return null
+        return try {
+            val clean = rawJson
+                .replace("```json", "")
+                .replace("```", "")
+                .trim()
+            val obj = JSONObject(clean)
+            val insights = obj.optString("marketInsights", "").trim()
+            val risks = ArrayList<String>()
+            obj.optJSONArray("riskFactors")?.let { array ->
+                for (index in 0 until array.length()) {
+                    val risk = array.optString(index, "").trim()
+                    if (risk.isNotEmpty()) risks.add(risk)
+                }
+            }
+            if (insights.isEmpty() && risks.isEmpty()) null else AiNarrative(insights, risks)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun verdictLabel(rating: DealRating): String = when (rating) {
+        DealRating.STRONG -> "Strong Buy"
+        DealRating.ACCEPTABLE -> "Moderate Opportunity"
+        DealRating.MARGINAL -> "Borderline Deal"
+        DealRating.FAILS_CRITERIA -> "High Risk / Overpriced"
+    }
+
+    private fun recommendedStrategy(
+        prop: PropertyDetailsInput,
+        mkt: LocalMarketDataInput,
+        result: UnderwritingResult
+    ): String = when {
+        prop.renovationCost > 25000.0 -> "Value-Add BRRRR"
+        mkt.marketDemand.equals("High", ignoreCase = true) &&
+            (result.core.cashOnCashPct ?: 0.0) > 8.0 -> "Long-Term Buy & Hold"
+        else -> "Turnkey Cash Flow"
+    }
+
+    private fun riskFactors(
+        prop: PropertyDetailsInput,
+        mkt: LocalMarketDataInput,
+        findings: List<ValidationIssue>
+    ): List<String> {
+        val risks = ArrayList<String>()
+        risks.add("Interest rate exposure at ${prop.interestRatePct}% on a ${prop.loanTermYears}-year note")
+        risks.add("Vacancy assumption of ${mkt.vacancyRatePct}% of gross rent")
+        if (prop.renovationCost > 0.0) {
+            risks.add("Renovation budget buffer: $${formatMoney(prop.renovationCost)}")
+        }
+        for (finding in findings) {
+            if (risks.size >= 5) break
+            risks.add(finding.message)
+        }
+        return risks.distinct().take(5)
+    }
+
+    /** A qualitative read of the market inputs, never of a computed return. */
+    private fun localMarketScore(mkt: LocalMarketDataInput): Int {
+        var score = 50
+        score += when (mkt.marketDemand.lowercase()) {
+            "high" -> 20
+            "moderate" -> 10
+            "balanced" -> 0
+            "buyer's market", "buyers market" -> -10
+            else -> 0
+        }
+        score += ((mkt.neighborhoodAppreciationRatePct - 3.0) * 4.0).toInt().coerceIn(-12, 20)
+        score += when {
+            mkt.averageDaysOnMarket <= 30 -> 10
+            mkt.averageDaysOnMarket <= 60 -> 0
+            else -> -10
+        }
+        return score.coerceIn(1, 100)
+    }
+
+    private fun formatMoney(value: Double): String =
+        String.format("%,.0f", value)
+}
 
 class PropertyRoiCalculatorViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as RealEstateAiApp
@@ -169,7 +374,6 @@ class PropertyRoiCalculatorViewModel(application: Application) : AndroidViewMode
                     )
                 }
 
-                // Automatically trigger Gemini ROI calculation with loaded market data
                 calculateRoiMetrics()
             } catch (e: Exception) {
                 _uiState.update {
@@ -182,6 +386,12 @@ class PropertyRoiCalculatorViewModel(application: Application) : AndroidViewMode
         }
     }
 
+    /**
+     * Computes the metrics, then (optionally) asks the model for commentary.
+     *
+     * The order is the point: the numbers exist before the model is called, they
+     * are shown even if the model call fails, and no model output can move them.
+     */
     fun calculateRoiMetrics() {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, errorMessage = null) }
@@ -189,225 +399,80 @@ class PropertyRoiCalculatorViewModel(application: Application) : AndroidViewMode
             val prop = _uiState.value.propertyDetails
             val mkt = _uiState.value.marketData
 
-            val prompt = buildPrompt(prop, mkt)
-            val systemInstruction = """
-                You are a senior real estate investment analyst specializing in residential underwriting, cap rate estimation, and ROI forecasting.
-                Analyze the subject property against its local market indicators and compute exact return on investment metrics.
-                Output MUST be strict raw JSON without markdown fences.
-                Required JSON keys:
-                - "capRatePct": number (e.g. 7.2)
-                - "cashOnCashReturnPct": number (e.g. 9.4)
-                - "monthlyCashFlow": number (e.g. 520.0)
-                - "annualCashFlow": number (e.g. 6240.0)
-                - "netOperatingIncomeAnnual": number (e.g. 31200.0)
-                - "grossRentalIncomeAnnual": number (e.g. 42000.0)
-                - "totalCashRequired": number (e.g. 105000.0)
-                - "debtServiceCoverageRatio": number (e.g. 1.35)
-                - "grossRentMultiplier": number (e.g. 10.7)
-                - "projected5YearRoiPct": number (e.g. 58.5)
-                - "breakEvenOccupancyPct": number (e.g. 72.0)
-                - "investmentVerdict": string ("Strong Buy", "Moderate Opportunity", "High Risk / Overpriced", or "Borderline Deal")
-                - "recommendedStrategy": string (e.g. "Long-Term Buy & Hold", "Value-Add BRRRR", "Medium-Term Rental")
-                - "marketInsights": string (concise explanation of ROI dynamics relative to local market appreciation and rents)
-                - "riskFactors": array of strings (top 2-3 risk factors)
-                - "localMarketScore": integer between 1 and 100
-            """.trimIndent()
-
-            val aiResponse = geminiManager.generateContent(
-                prompt = prompt,
-                systemPrompt = systemInstruction
-            )
-
-            if (aiResponse.success && aiResponse.text.isNotBlank()) {
-                val parsed = parseGeminiMetrics(aiResponse.text, prop, mkt)
-                if (parsed != null) {
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            metrics = parsed,
-                            calculationSource = CalculationSource.GEMINI_AI,
-                            lastCalculatedAt = System.currentTimeMillis()
-                        )
-                    }
-                    return@launch
+            val metrics = try {
+                RoiMetricsCalculator.deterministic(prop, mkt)
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(isLoading = false, errorMessage = "Underwriting failed: ${e.message}")
                 }
-            }
-
-            // Fallback to local financial engine if Gemini fails or is unavailable
-            val fallbackMetrics = computeLocalEngineMetrics(prop, mkt)
-            val fallbackReason = if (aiResponse.errorMessage != null) {
-                "Gemini AI note: ${aiResponse.errorMessage}. Computed via local financial engine."
-            } else {
-                "Computed via local financial engine with local market indicators."
+                return@launch
             }
 
             _uiState.update {
                 it.copy(
-                    isLoading = false,
-                    metrics = fallbackMetrics,
-                    calculationSource = CalculationSource.LOCAL_ENGINE_FALLBACK,
-                    errorMessage = fallbackReason,
+                    metrics = metrics,
+                    calculationSource = CalculationSource.DETERMINISTIC_ENGINE,
+                    aiNarrativeUsed = false,
                     lastCalculatedAt = System.currentTimeMillis()
+                )
+            }
+
+            val response = geminiManager.generateContent(
+                prompt = buildNarrativePrompt(prop, mkt),
+                systemPrompt = NARRATIVE_SYSTEM_PROMPT
+            )
+            val narrative = if (response.success) {
+                RoiMetricsCalculator.narrativeFrom(response.text)
+            } else {
+                null
+            }
+
+            _uiState.update { state ->
+                val current = state.metrics ?: metrics
+                state.copy(
+                    isLoading = false,
+                    metrics = narrative?.let { RoiMetricsCalculator.withNarrative(current, it) } ?: current,
+                    aiNarrativeUsed = narrative != null,
+                    errorMessage = if (response.success || response.errorMessage == null) {
+                        null
+                    } else {
+                        "Market commentary unavailable (${response.errorMessage}); figures are unchanged."
+                    }
                 )
             }
         }
     }
 
-    private fun buildPrompt(prop: PropertyDetailsInput, mkt: LocalMarketDataInput): String {
+    private fun buildNarrativePrompt(prop: PropertyDetailsInput, mkt: LocalMarketDataInput): String {
         return """
-            Please analyze the following property and calculate comprehensive return on investment (ROI) metrics based on local market data.
-            
-            [SUBJECT PROPERTY DETAILS]
-            - Title: ${prop.title.ifBlank { prop.address }}
+            A deterministic underwriting engine has already computed every financial figure for this deal.
+            Write qualitative market commentary only.
+
+            [SUBJECT PROPERTY]
             - Address: ${prop.address}, ${prop.city}, ${prop.state} ${prop.zipCode}
-            - Purchase Price: $${prop.purchasePrice}
-            - Property Type: ${prop.propertyType}
-            - Layout: ${prop.bedrooms} Bed / ${prop.bathrooms} Bath | ${prop.squareFeet} sq ft
-            - Year Built: ${prop.yearBuilt}
-            - Condition: ${prop.condition}
-            - Estimated Renovation Cost: $${prop.renovationCost}
-            - Financing: ${prop.downPaymentPct}% down payment at ${prop.interestRatePct}% annual interest (${prop.loanTermYears}-year fixed)
-            - Estimated Closing Cost Rate: ${prop.closingCostRatePct}%
-            
-            [LOCAL MARKET INDICATORS]
-            - Local Median Area Price: $${mkt.medianAreaPrice}
-            - Local Price Per Sq Ft: $${mkt.pricePerSqFt}
-            - Average Days on Market: ${mkt.averageDaysOnMarket} days
-            - Neighborhood Appreciation Rate: ${mkt.neighborhoodAppreciationRatePct}% annually
-            - Local Market Demand: ${mkt.marketDemand}
-            - Estimated Monthly Market Rent: $${mkt.estimatedMonthlyRent} (Range: $${mkt.fairMarketRentRangeLow} - $${mkt.fairMarketRentRangeHigh})
-            - Local Expected Vacancy Rate: ${mkt.vacancyRatePct}%
-            - Local Annual Property Tax: $${mkt.propertyTaxAnnual}
-            - Annual Insurance: $${mkt.insuranceAnnual}
-            - Maintenance Reserve: ${mkt.maintenancePct}%
-            - Property Management Fee: ${mkt.propertyManagementPct}%
-            - Monthly Utilities: $${mkt.utilitiesMonthly}
-            
-            Evaluate cash flow, cap rate, cash-on-cash return, DSCR, and 5-year total ROI. Return strict JSON.
+            - Type: ${prop.propertyType}; Layout: ${prop.bedrooms} Bed / ${prop.bathrooms} Bath; ${prop.squareFeet} sq ft
+            - Year Built: ${prop.yearBuilt}; Condition: ${prop.condition}
+
+            [LOCAL MARKET CONTEXT]
+            - Market demand: ${mkt.marketDemand}
+            - Average days on market: ${mkt.averageDaysOnMarket}
+            - Neighborhood appreciation trend: ${mkt.neighborhoodAppreciationRatePct}% per year
+            - Fair market rent range: ${mkt.fairMarketRentRangeLow} - ${mkt.fairMarketRentRangeHigh} per month
+
+            Return raw JSON with exactly these keys:
+            - "marketInsights": string, 2-4 sentences of qualitative commentary about demand, rent trends and liquidity in this submarket.
+            - "riskFactors": array of 2-4 short strings, each naming a qualitative risk (tenant, regulatory, liquidity, condition...).
         """.trimIndent()
     }
 
-    private fun parseGeminiMetrics(
-        jsonString: String,
-        prop: PropertyDetailsInput,
-        mkt: LocalMarketDataInput
-    ): CalculatedRoiMetrics? {
-        return try {
-            val clean = jsonString
-                .replace("```json", "")
-                .replace("```", "")
-                .trim()
-            val obj = JSONObject(clean)
-
-            val riskList = mutableListOf<String>()
-            val riskArray = obj.optJSONArray("riskFactors")
-            if (riskArray != null) {
-                for (i in 0 until riskArray.length()) {
-                    riskList.add(riskArray.optString(i))
-                }
-            }
-
-            CalculatedRoiMetrics(
-                capRatePct = obj.optDouble("capRatePct", 0.0),
-                cashOnCashReturnPct = obj.optDouble("cashOnCashReturnPct", 0.0),
-                monthlyCashFlow = obj.optDouble("monthlyCashFlow", 0.0),
-                annualCashFlow = obj.optDouble("annualCashFlow", 0.0),
-                netOperatingIncomeAnnual = obj.optDouble("netOperatingIncomeAnnual", 0.0),
-                grossRentalIncomeAnnual = obj.optDouble("grossRentalIncomeAnnual", mkt.estimatedMonthlyRent * 12),
-                totalCashRequired = obj.optDouble("totalCashRequired", 0.0),
-                debtServiceCoverageRatio = obj.optDouble("debtServiceCoverageRatio", 1.0),
-                grossRentMultiplier = obj.optDouble("grossRentMultiplier", 0.0),
-                projected5YearRoiPct = obj.optDouble("projected5YearRoiPct", 0.0),
-                breakEvenOccupancyPct = obj.optDouble("breakEvenOccupancyPct", 0.0),
-                investmentVerdict = obj.optString("investmentVerdict", "Analyzed"),
-                recommendedStrategy = obj.optString("recommendedStrategy", "Long-Term Buy & Hold"),
-                marketInsights = obj.optString("marketInsights", "AI ROI analysis completed."),
-                riskFactors = riskList,
-                localMarketScore = obj.optInt("localMarketScore", 70)
-            )
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun computeLocalEngineMetrics(
-        prop: PropertyDetailsInput,
-        mkt: LocalMarketDataInput
-    ): CalculatedRoiMetrics {
-        val closingCosts = prop.purchasePrice * (prop.closingCostRatePct / 100.0)
-        val financialInput = FinancialInput(
-            purchasePrice = prop.purchasePrice,
-            closingCosts = closingCosts,
-            renovationCost = prop.renovationCost,
-            monthlyRent = mkt.estimatedMonthlyRent,
-            otherMonthlyIncome = 0.0,
-            vacancyRatePct = mkt.vacancyRatePct,
-            propertyTaxAnnual = mkt.propertyTaxAnnual,
-            insuranceAnnual = mkt.insuranceAnnual,
-            maintenancePct = mkt.maintenancePct,
-            managementPct = mkt.propertyManagementPct,
-            utilitiesMonthly = mkt.utilitiesMonthly,
-            downPaymentPct = prop.downPaymentPct,
-            interestRatePct = prop.interestRatePct,
-            loanTermYears = prop.loanTermYears
-        )
-
-        val result = FinancialEngine.calculate(financialInput)
-        val annualRent = mkt.estimatedMonthlyRent * 12.0
-        val grm = if (annualRent > 0) prop.purchasePrice / annualRent else 0.0
-
-        // 5-Year total ROI estimation incorporating cash flow and local market appreciation
-        val appreciationRate = mkt.neighborhoodAppreciationRatePct / 100.0
-        val futureValue5Y = prop.purchasePrice * Math.pow(1.0 + appreciationRate, 5.0)
-        val equityGain5Y = (futureValue5Y - prop.purchasePrice)
-        val cumulativeCashFlow5Y = result.annualCashFlow * 5.0
-        val totalReturn5Y = equityGain5Y + cumulativeCashFlow5Y
-        val projected5YearRoiPct = if (result.totalCashRequired > 0) {
-            (totalReturn5Y / result.totalCashRequired) * 100.0
-        } else 0.0
-
-        val verdict = when {
-            result.cashOnCashReturn >= 10.0 && result.dscr >= 1.25 -> "Strong Buy"
-            result.cashOnCashReturn >= 6.0 && result.dscr >= 1.15 -> "Moderate Opportunity"
-            result.cashOnCashReturn > 0 -> "Borderline Deal"
-            else -> "High Risk / Overpriced"
-        }
-
-        val strategy = when {
-            prop.renovationCost > 25000.0 -> "Value-Add BRRRR"
-            mkt.marketDemand == "High" && result.cashOnCashReturn > 8.0 -> "Long-Term Buy & Hold"
-            else -> "Turnkey Cash Flow"
-        }
-
-        val marketSummary = "Local market median is $${String.format("%,.0f", mkt.medianAreaPrice)} with ${mkt.neighborhoodAppreciationRatePct}% annual appreciation. Subject property offers a ${String.format("%.1f", result.capRate)}% Cap Rate."
-
-        return CalculatedRoiMetrics(
-            capRatePct = result.capRate,
-            cashOnCashReturnPct = result.cashOnCashReturn,
-            monthlyCashFlow = result.monthlyCashFlow,
-            annualCashFlow = result.annualCashFlow,
-            netOperatingIncomeAnnual = result.noiAnnual,
-            grossRentalIncomeAnnual = annualRent,
-            totalCashRequired = result.totalCashRequired,
-            debtServiceCoverageRatio = result.dscr,
-            grossRentMultiplier = grm,
-            projected5YearRoiPct = projected5YearRoiPct,
-            breakEvenOccupancyPct = result.breakEvenOccupancyPct,
-            investmentVerdict = verdict,
-            recommendedStrategy = strategy,
-            marketInsights = marketSummary,
-            riskFactors = listOf(
-                "Interest rate exposure at ${prop.interestRatePct}%",
-                "Local vacancy estimated at ${mkt.vacancyRatePct}%",
-                "Renovation overrun buffer: $${String.format("%,.0f", prop.renovationCost)}"
-            ),
-            localMarketScore = if (result.dscr >= 1.2) 82 else 65
-        )
-    }
-
+    /**
+     * Persists the analysis. The stored row is produced by the legacy
+     * `FinancialEngine` snapshot that [com.example.data.repository.FinancialRepository]
+     * understands; the screen itself renders the deterministic underwriting result above.
+     */
     fun saveAnalysisToDatabase() {
         val pId = uiState.value.propertyDetails.propertyId ?: return
-        val currentMetrics = uiState.value.metrics ?: return
+        if (uiState.value.metrics == null) return
         val p = uiState.value.propertyDetails
         val m = uiState.value.marketData
 
@@ -429,5 +494,18 @@ class PropertyRoiCalculatorViewModel(application: Application) : AndroidViewMode
             )
             financialRepo.analyzeProperty(pId, input)
         }
+    }
+
+    private companion object {
+        val NARRATIVE_SYSTEM_PROMPT = """
+            You are a real estate market commentator.
+
+            A deterministic underwriting engine computes every financial figure in this application.
+            You must NOT compute, estimate, restate or invent any numbers: no currency amounts, no
+            percentages, no ratios, no scores, no ranges. Qualitative prose only.
+
+            Output MUST be strict raw JSON without markdown fences, with exactly the keys
+            "marketInsights" (string) and "riskFactors" (array of strings).
+        """.trimIndent()
     }
 }
