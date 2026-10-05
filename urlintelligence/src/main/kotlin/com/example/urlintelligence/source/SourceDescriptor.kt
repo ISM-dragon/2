@@ -135,7 +135,7 @@ object KnownSources {
         displayName = "Redfin",
         hostSuffixes = listOf("redfin.com"),
         pathPatterns = listOf(
-            Regex("/[A-Z]{2}/[^/]+/home/\\d+", RegexOption.IGNORE_CASE),
+            Regex("/[A-Z]{2}/(?:[^/]+/){1,4}home/\\d+", RegexOption.IGNORE_CASE),
             Regex("/stingray/", RegexOption.IGNORE_CASE)
         ),
         idPatterns = listOf(
