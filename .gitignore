@@ -16,3 +16,7 @@
 local.properties
 .env
 debug.keystore
+
+# Python caches (oracle / tooling)
+__pycache__/
+*.pyc
