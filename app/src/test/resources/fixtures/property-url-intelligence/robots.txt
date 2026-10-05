@@ -1,0 +1,10 @@
+# Example portal robots.txt used by the compliance tests.
+User-agent: *
+Disallow: /search
+Disallow: /homes/*/photos
+Allow: /homedetails/
+Crawl-delay: 2
+
+User-agent: RealEstateAI-PropertyIntel
+Disallow: /homedetails/*/print
+Allow: /
