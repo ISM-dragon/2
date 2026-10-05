@@ -117,15 +117,25 @@ class ConfigRepository(
             configDao.insertApiConfigs(defaultSlots)
         }
 
-        if (configDao.getGmailConfig() == null) {
+        val existingGmail = configDao.getGmailConfig()
+        if (existingGmail == null) {
             configDao.saveGmailConfig(
                 GmailConfigurationEntity(
                     id = 1,
-                    isConnected = true,
-                    accountEmail = "dragonlorde3@gmail.com",
+                    isConnected = false,
+                    authStatus = "NOT_CONFIGURED",
+                    accountEmail = "",
                     senderName = "Acquisitions Director",
                     signature = "Best regards,\nReal Estate Acquisitions Dept\nReal Estate AI Capital",
                     defaultSubjectTemplate = "Purchase Offer & Letter of Intent - {property_address}"
+                )
+            )
+        } else if (existingGmail.accessToken.isNullOrBlank() && existingGmail.isConnected) {
+            // Ensure no mock connected state without a real OAuth token
+            configDao.saveGmailConfig(
+                existingGmail.copy(
+                    isConnected = false,
+                    authStatus = "NOT_CONFIGURED"
                 )
             )
         }

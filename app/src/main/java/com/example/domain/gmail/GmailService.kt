@@ -76,33 +76,36 @@ class GmailService(
 
         // 4. Verify account authorization
         var config = getConfiguration()
-        if (!config.isConnected) {
+        if (!config.isConnected || config.accessToken.isNullOrBlank()) {
             return@withContext GmailSendResult(
                 success = false,
-                error = "Gmail account is not connected. Please authorize Gmail in Settings."
+                error = "Gmail OAuth is not configured. Email was not sent."
             )
         }
 
-        // If an OAuth access token is stored, transmit via official Gmail REST API
-        if (!config.accessToken.isNullOrBlank()) {
-            val result = transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
-            if (!result.success && result.error?.contains("401") == true && !config.refreshToken.isNullOrBlank()) {
-                // Token may be expired; attempt token refresh
-                val refreshed = refreshAccessToken(config)
-                if (refreshed != null) {
-                    config = refreshed
-                    return@withContext transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
-                }
+        // Check token expiration before sending
+        if (config.expiresAt > 0L && System.currentTimeMillis() > config.expiresAt) {
+            val refreshed = refreshAccessToken(config)
+            if (refreshed != null) {
+                config = refreshed
+            } else {
+                return@withContext GmailSendResult(
+                    success = false,
+                    error = "Gmail authorization expired. Please re-authorize in Settings."
+                )
             }
-            return@withContext result
-        } else {
-            // Local authorized connection without external OAuth endpoint
-            val generatedMsgId = "GMAIL-DISPATCH-${UUID.randomUUID().toString().take(12).uppercase()}"
-            return@withContext GmailSendResult(
-                success = true,
-                messageId = generatedMsgId
-            )
         }
+
+        val result = transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
+        if (!result.success && result.error?.contains("401") == true && !config.refreshToken.isNullOrBlank()) {
+            // Attempt token refresh on 401 Unauthorized
+            val refreshed = refreshAccessToken(config)
+            if (refreshed != null) {
+                config = refreshed
+                return@withContext transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
+            }
+        }
+        return@withContext result
     }
 
     private fun transmitViaGmailApi(
@@ -202,7 +205,7 @@ class GmailService(
         }
     }
 
-    private suspend fun refreshAccessToken(config: GmailConfigurationEntity): GmailConfigurationEntity? {
+    suspend fun refreshAccessToken(config: GmailConfigurationEntity): GmailConfigurationEntity? {
         val refreshToken = config.refreshToken ?: return null
         return try {
             val body = FormBody.Builder()

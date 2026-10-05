@@ -125,9 +125,14 @@ class GeminiManager(
                             configDao.updateSlotStatus(slotIndex, "COOLDOWN", cooldownUntil, "Quota exceeded / Rate-limited")
                             configDao.incrementSlotError(slotIndex, "HTTP 429 Too Many Requests")
                             break // Stop retrying this slot, go to next slot
+                        } else if (resultOrError.contains("401") || resultOrError.contains("403")) {
+                            // Invalid key or forbidden -> Mark slot error immediately without retry
+                            configDao.updateSlotStatus(slotIndex, "ERROR", 0L, "API key unauthorized or forbidden")
+                            configDao.incrementSlotError(slotIndex, "HTTP Authorization Failure")
+                            break // Go to next slot
                         } else {
                             if (attempt == 0) {
-                                delay(1000) // 1s backoff for transient error
+                                delay(1200) // Backoff for transient network / 5xx error
                             } else {
                                 configDao.updateSlotStatus(slotIndex, "ERROR", 0L, resultOrError)
                                 configDao.incrementSlotError(slotIndex, resultOrError)
@@ -135,7 +140,7 @@ class GeminiManager(
                         }
                     }
                 } catch (e: Exception) {
-                    val msg = e.message ?: "Network error"
+                    val msg = (e.message ?: "Network error").replace(apiKey, "[REDACTED]")
                     lastError = msg
                     if (attempt == 1) {
                         configDao.updateSlotStatus(slotIndex, "ERROR", 0L, msg)
@@ -188,10 +193,13 @@ class GeminiManager(
             put("generationConfig", genConfig)
         }
 
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+        // Pass API key via x-goog-api-key header instead of query parameter to prevent exposure in logs or URLs
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
         val body = requestJson.toString().toRequestBody(jsonMediaType)
         val request = Request.Builder()
             .url(url)
+            .addHeader("x-goog-api-key", apiKey)
+            .addHeader("Content-Type", "application/json")
             .post(body)
             .build()
 
@@ -199,17 +207,26 @@ class GeminiManager(
         val responseBody = response.body?.string() ?: ""
 
         return if (response.isSuccessful) {
-            val rootJson = JSONObject(responseBody)
+            val rootJson = JSONObject(if (responseBody.isNotBlank()) responseBody else "{}")
             val candidates = rootJson.optJSONArray("candidates")
             val candidate = candidates?.optJSONObject(0)
             val content = candidate?.optJSONObject("content")
             val parts = content?.optJSONArray("parts")
             val text = parts?.optJSONObject(0)?.optString("text", "") ?: ""
-            Pair(true, text.trim())
+            if (text.isBlank()) {
+                Pair(false, "Gemini returned empty response")
+            } else {
+                Pair(true, text.trim())
+            }
         } else {
             // Mask any key if present in error message
             val sanitized = responseBody.replace(apiKey, "[REDACTED]")
-            Pair(false, "HTTP ${response.code}: $sanitized")
+            when (response.code) {
+                401, 403 -> Pair(false, "HTTP ${response.code} (Unauthorized): API key is invalid or lacks permission.")
+                429 -> Pair(false, "HTTP 429 (Rate Limit): Quota exhausted for slot.")
+                in 500..599 -> Pair(false, "HTTP ${response.code} (Service Unavailable): Upstream Gemini service error.")
+                else -> Pair(false, "HTTP ${response.code}: $sanitized")
+            }
         }
     }
 }

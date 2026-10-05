@@ -24,6 +24,7 @@ data class GmailConfigurationEntity(
     @PrimaryKey
     val id: Int = 1,
     val isConnected: Boolean = false,
+    val authStatus: String = "NOT_CONFIGURED", // "NOT_CONFIGURED", "AUTH_REQUIRED", "AUTH_EXPIRED", "SENDING", "SENT", "FAILED"
     val accountEmail: String = "",
     val senderName: String = "",
     val signature: String = "Best regards,\nReal Estate Investment Team",
@@ -31,7 +32,8 @@ data class GmailConfigurationEntity(
     val defaultCc: String = "",
     val accessToken: String? = null,
     val refreshToken: String? = null,
-    val expiresAt: Long = 0L
+    val expiresAt: Long = 0L,
+    val lastError: String? = null
 )
 
 @Entity(tableName = "offer_templates")

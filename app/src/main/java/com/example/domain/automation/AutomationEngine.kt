@@ -285,7 +285,7 @@ class AutomationEngine(
                     currentJob = currentJob.copy(
                         currentState = JobState.ANALYZED.name,
                         lastSuccessfulState = JobState.ANALYZED.name,
-                        analysisId = finResult.propertyId,
+                        analysisId = bundle.property.id,
                         updatedAt = System.currentTimeMillis()
                     )
                     automationDao.insertOrUpdateJob(currentJob)
@@ -327,7 +327,7 @@ class AutomationEngine(
                             _status.value = AutomationStatus.GENERATING_OFFERS
                             _currentTaskDescription.value = "Drafting institutional purchase offer for ${bundle.property.address}..."
                             updatePersistentState(
-                                enabled = true,
+                                isEnabled = true,
                                 op = "Generating LOI for ${bundle.property.address}",
                                 stage = "OFFER_GENERATION",
                                 addr = bundle.property.address
@@ -435,10 +435,11 @@ class AutomationEngine(
                         }
                     } else {
                         propertyDao.setDealStatus(bundle.property.id, false, qualEval.score)
+                        val disqReason = qualEval.failedChecks.joinToString("; ").ifBlank { qualEval.summary }
                         currentJob = currentJob.copy(
                             currentState = JobState.DISQUALIFIED.name,
                             lastSuccessfulState = JobState.DISQUALIFIED.name,
-                            blockageReason = qualEval.disqualificationReason,
+                            blockageReason = disqReason,
                             updatedAt = System.currentTimeMillis()
                         )
                         automationDao.insertOrUpdateJob(currentJob)

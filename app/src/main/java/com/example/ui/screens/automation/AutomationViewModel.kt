@@ -32,32 +32,47 @@ class AutomationViewModel(application: Application) : AndroidViewModel(applicati
     private val _selectedTab = MutableStateFlow(0)
     private val _selectedJob = MutableStateFlow<AutomationJobEntity?>(null)
 
-    private val engineInfoFlow = combine(
-        automationRepo.engineStatus,
-        automationRepo.currentTaskDescription
-    ) { status, task -> Pair(status, task) }
+    private data class AutomationCoreData(
+        val status: AutomationStatus,
+        val taskDescription: String,
+        val rules: AutomationRuleEntity,
+        val activityLogs: List<AutomationLogEntity>,
+        val errorLogs: List<AutomationLogEntity>,
+        val jobs: List<AutomationJobEntity>
+    )
 
-    private val logsFlow = combine(
+    private val coreDataFlow = combine(
+        automationRepo.engineStatus,
+        automationRepo.currentTaskDescription,
+        automationRepo.rulesFlow,
         automationRepo.recentLogs,
         automationRepo.errorLogs
-    ) { recent, errors -> Pair(recent, errors) }
+    ) { status, task, rules, recentLogs, errorLogs ->
+        AutomationCoreData(
+            status = status,
+            taskDescription = task,
+            rules = rules ?: AutomationRuleEntity(),
+            activityLogs = recentLogs,
+            errorLogs = errorLogs,
+            jobs = emptyList()
+        )
+    }.combine(automationRepo.allJobs) { core, jobsList ->
+        core.copy(jobs = jobsList)
+    }
 
     val uiState: StateFlow<AutomationUiState> = combine(
-        engineInfoFlow,
-        automationRepo.rulesFlow,
-        logsFlow,
-        automationRepo.allJobs,
+        coreDataFlow,
         configRepo.apiConfigs,
         _selectedTab,
         _selectedJob
-    ) { engineInfo, rules, logs, jobsList, apiConfigs, tab, selJob ->
+    ) { core, apiConfigs, tab, selJob ->
         AutomationUiState(
-            status = engineInfo.first,
-            currentTaskDescription = engineInfo.second,
-            rules = rules ?: AutomationRuleEntity(),
-            activityLogs = logs.first,
-            errorLogs = logs.second,
-            jobs = jobsList,
+            status = core.status,
+            currentTaskDescription = core.taskDescription,
+            rules = core.rules,
+            activityLogs = core.activityLogs,
+            errorLogs = core.errorLogs,
+            jobs = core.jobs,
             apiSlots = apiConfigs,
             selectedTab = tab,
             selectedJob = selJob

@@ -574,7 +574,7 @@ private fun JobDetailsDialog(
                 Text("Property Address:", fontSize = 11.sp, color = Slate400)
                 Text(job.propertyAddress, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Slate100)
 
-                Divider(color = Slate800, thickness = 1.dp)
+                HorizontalDivider(color = Slate800, thickness = 1.dp)
 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Job ID:", fontSize = 11.sp, color = Slate400)

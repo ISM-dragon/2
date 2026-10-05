@@ -4,8 +4,10 @@ import com.example.data.local.entity.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+// Adapter providing realistic curated real estate seed data for MLS on-market testing
+// Ready to be replaced or extended with a live MLS/IDX API endpoint
 class OnMarketMlsAdapter : PropertySourceAdapter {
-    override val sourceName: String = "MLS Direct Feed v2.4"
+    override val sourceName: String = "MLS Feed (Demo Seed Dataset)"
     override val sourceType: String = "ON_MARKET"
 
     override suspend fun fetchProperties(
@@ -19,8 +21,10 @@ class OnMarketMlsAdapter : PropertySourceAdapter {
     }
 }
 
+// Adapter providing realistic off-market & distressed wholesale seed data
+// Ready to be replaced or extended with live Probate / County Recorder / ATTOM API endpoints
 class OffMarketWholesaleAdapter : PropertySourceAdapter {
-    override val sourceName: String = "Distressed & Probate Direct Mail Feed"
+    override val sourceName: String = "Off-Market Wholesale (Demo Seed Dataset)"
     override val sourceType: String = "OFF_MARKET"
 
     override suspend fun fetchProperties(

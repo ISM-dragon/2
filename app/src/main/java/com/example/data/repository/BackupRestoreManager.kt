@@ -176,6 +176,10 @@ class BackupRestoreManager(
             if (!root.has("app") || !root.getString("app").contains("Real Estate AI")) {
                 return@withContext Pair(false, "Invalid backup file: Missing app identity header")
             }
+            val version = root.optInt("version", 1)
+            if (version > 1) {
+                return@withContext Pair(false, "Unsupported backup version: v$version. App supports up to v1.")
+            }
 
             database.withTransaction {
                 val propertyDao = database.propertyDao()
@@ -184,24 +188,32 @@ class BackupRestoreManager(
                 val automationDao = database.automationDao()
                 val configDao = database.configDao()
 
+                val validPropertyIds = mutableSetOf<String>()
+
                 // Restore Properties
                 if (root.has("properties")) {
                     val pArray = root.getJSONArray("properties")
                     val propertiesList = mutableListOf<PropertyEntity>()
                     for (i in 0 until pArray.length()) {
                         val obj = pArray.getJSONObject(i)
+                        val id = obj.optString("id")
+                        val address = obj.optString("address")
+                        val price = obj.optDouble("price", 0.0)
+                        if (id.isBlank() || address.isBlank() || price <= 0.0) continue
+
+                        validPropertyIds.add(id)
                         propertiesList.add(
                             PropertyEntity(
-                                id = obj.getString("id"),
+                                id = id,
                                 sourceType = obj.optString("sourceType", "ON_MARKET"),
                                 title = obj.optString("title", ""),
-                                address = obj.getString("address"),
-                                city = obj.getString("city"),
-                                state = obj.getString("state"),
-                                zipCode = obj.getString("zipCode"),
+                                address = address,
+                                city = obj.optString("city", "Austin"),
+                                state = obj.optString("state", "TX"),
+                                zipCode = obj.optString("zipCode", "78701"),
                                 latitude = obj.optDouble("latitude", 30.26),
                                 longitude = obj.optDouble("longitude", -97.74),
-                                price = obj.getDouble("price"),
+                                price = price,
                                 propertyType = obj.optString("propertyType", "Single Family"),
                                 bedrooms = obj.optInt("bedrooms", 3),
                                 bathrooms = obj.optDouble("bathrooms", 2.0),
@@ -223,19 +235,22 @@ class BackupRestoreManager(
                     }
                 }
 
-                // Restore Financial Analyses
+                // Restore Financial Analyses with referential integrity check
                 if (root.has("financial_analyses")) {
                     val fArray = root.getJSONArray("financial_analyses")
                     val finList = mutableListOf<FinancialAnalysisEntity>()
                     for (i in 0 until fArray.length()) {
                         val obj = fArray.getJSONObject(i)
+                        val pId = obj.optString("propertyId")
+                        if (pId.isBlank() || !validPropertyIds.contains(pId)) continue
+
                         finList.add(
                             FinancialAnalysisEntity(
-                                propertyId = obj.getString("propertyId"),
-                                purchasePrice = obj.getDouble("purchasePrice"),
+                                propertyId = pId,
+                                purchasePrice = obj.optDouble("purchasePrice", 0.0),
                                 closingCosts = obj.optDouble("closingCosts", 0.0),
                                 renovationCost = obj.optDouble("renovationCost", 0.0),
-                                monthlyRent = obj.getDouble("monthlyRent"),
+                                monthlyRent = obj.optDouble("monthlyRent", 0.0),
                                 otherMonthlyIncome = obj.optDouble("otherMonthlyIncome", 0.0),
                                 grossRentalIncome = obj.optDouble("grossRentalIncome", 0.0),
                                 vacancyRatePct = obj.optDouble("vacancyRatePct", 5.0),
@@ -270,20 +285,25 @@ class BackupRestoreManager(
                     }
                 }
 
-                // Restore Offers
+                // Restore Offers with referential integrity check
                 if (root.has("offers")) {
                     val oArray = root.getJSONArray("offers")
                     val offersList = mutableListOf<OfferEntity>()
                     for (i in 0 until oArray.length()) {
                         val obj = oArray.getJSONObject(i)
+                        val pId = obj.optString("propertyId")
+                        val oId = obj.optString("id")
+                        val price = obj.optDouble("offerPrice", 0.0)
+                        if (oId.isBlank() || pId.isBlank() || price <= 0.0 || !validPropertyIds.contains(pId)) continue
+
                         offersList.add(
                             OfferEntity(
-                                id = obj.getString("id"),
-                                propertyId = obj.getString("propertyId"),
+                                id = oId,
+                                propertyId = pId,
                                 recipientName = obj.optString("recipientName", "Agent"),
                                 recipientEmail = obj.optString("recipientEmail", "agent@deals.com"),
-                                offerPrice = obj.getDouble("offerPrice"),
-                                earnestMoney = obj.getDouble("earnestMoney"),
+                                offerPrice = price,
+                                earnestMoney = obj.optDouble("earnestMoney", 5000.0),
                                 inspectionPeriodDays = obj.optInt("inspectionPeriodDays", 10),
                                 closingPeriodDays = obj.optInt("closingPeriodDays", 21),
                                 contingencies = obj.optString("contingencies", ""),

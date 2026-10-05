@@ -75,14 +75,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         token: String
     ) {
         viewModelScope.launch {
+            val cleanEmail = email.trim()
+            val cleanToken = token.trim()
+            val isAuthorized = cleanEmail.isNotBlank() && cleanToken.isNotBlank()
             val current = uiState.value.gmailConfig
             val updated = current.copy(
-                accountEmail = email,
-                senderName = senderName,
+                accountEmail = cleanEmail,
+                senderName = senderName.trim(),
                 signature = signature,
                 defaultSubjectTemplate = subjectTemplate,
-                accessToken = token.ifBlank { "OAUTH_TOKEN_${System.currentTimeMillis()}" },
-                isConnected = true
+                accessToken = cleanToken.ifBlank { null },
+                isConnected = isAuthorized,
+                authStatus = if (isAuthorized) "AUTH_REQUIRED" else "NOT_CONFIGURED"
             )
             configRepo.saveGmailConfig(updated)
         }
@@ -93,7 +97,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             val current = uiState.value.gmailConfig
             val updated = current.copy(
                 isConnected = false,
-                accessToken = null
+                authStatus = "NOT_CONFIGURED",
+                accessToken = null,
+                refreshToken = null,
+                expiresAt = 0L,
+                lastError = null
             )
             configRepo.saveGmailConfig(updated)
         }
@@ -102,16 +110,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun refreshGmailAuth(onResult: (Boolean, String) -> Unit) {
         viewModelScope.launch {
             val current = uiState.value.gmailConfig
-            if (current.accountEmail.isNotBlank()) {
-                val refreshed = current.copy(
-                    isConnected = true,
-                    accessToken = "REFRESHED_OAUTH_TOKEN_${System.currentTimeMillis()}",
-                    expiresAt = System.currentTimeMillis() + 3600_000L
-                )
-                configRepo.saveGmailConfig(refreshed)
+            if (current.refreshToken.isNullOrBlank()) {
+                onResult(false, "Cannot refresh: OAuth refresh token is not configured.")
+                return@launch
+            }
+
+            val refreshed = app.gmailService.refreshAccessToken(current)
+            if (refreshed != null) {
+                configRepo.saveGmailConfig(refreshed.copy(authStatus = "AUTH_REQUIRED"))
                 onResult(true, "Authentication refreshed successfully for ${current.accountEmail}")
             } else {
-                onResult(false, "No account email configured to refresh")
+                onResult(false, "OAuth token refresh failed with Google servers.")
             }
         }
     }

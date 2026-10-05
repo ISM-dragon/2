@@ -8,6 +8,7 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 object CryptoManager {
     private const val KEY_ALIAS = "RealEstateAiMasterKey"
@@ -16,94 +17,105 @@ object CryptoManager {
     private const val GCM_IV_LENGTH = 12
     private const val GCM_TAG_LENGTH = 128
 
+    // Strictly in-memory AES key for JVM local test environments where AndroidKeyStore provider is absent
+    private val jvmTestFallbackKey: SecretKey by lazy {
+        val kg = KeyGenerator.getInstance("AES")
+        kg.init(256)
+        kg.generateKey()
+    }
+
+    private val isAndroidRuntime: Boolean by lazy {
+        try {
+            KeyStore.getInstance(ANDROID_KEYSTORE) != null
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
     init {
-        try {
-            initKey()
-        } catch (e: Throwable) {
-            // AndroidKeyStore is not present in local JVM unit testing environment
-        }
-    }
-
-    private fun initKey() {
-        try {
-            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-            if (!keyStore.containsAlias(KEY_ALIAS)) {
-                val keyGenerator = KeyGenerator.getInstance(
-                    KeyProperties.KEY_ALGORITHM_AES,
-                    ANDROID_KEYSTORE
-                )
-                val spec = KeyGenParameterSpec.Builder(
-                    KEY_ALIAS,
-                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-                )
-                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                    .setKeySize(256)
-                    .build()
-
-                keyGenerator.init(spec)
-                keyGenerator.generateKey()
+        if (isAndroidRuntime) {
+            try {
+                initAndroidKeyStore()
+            } catch (e: Throwable) {
+                android.util.Log.e("CryptoManager", "Failed to initialize AndroidKeyStore: ${e.message}")
             }
-        } catch (e: Throwable) {
-            // Fallback for non-Android JVM
         }
     }
 
-    private fun getKey(): SecretKey? {
-        return try {
+    private fun initAndroidKeyStore() {
+        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        if (!keyStore.containsAlias(KEY_ALIAS)) {
+            val keyGenerator = KeyGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_AES,
+                ANDROID_KEYSTORE
+            )
+            val spec = KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+
+            keyGenerator.init(spec)
+            keyGenerator.generateKey()
+        }
+    }
+
+    private fun getSecretKey(): SecretKey {
+        if (isAndroidRuntime) {
             val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-            (keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
-        } catch (e: Throwable) {
-            null
+            val entry = keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
+            if (entry != null) {
+                return entry.secretKey
+            }
+            initAndroidKeyStore()
+            val reloaded = keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
+            if (reloaded != null) {
+                return reloaded.secretKey
+            }
+            throw IllegalStateException("AndroidKeyStore failed to provide SecretKey for alias $KEY_ALIAS")
+        } else {
+            return jvmTestFallbackKey
         }
     }
 
     fun encrypt(plainText: String): String {
         if (plainText.isBlank()) return ""
-        try {
-            val secretKey = getKey()
-            if (secretKey != null) {
-                val cipher = Cipher.getInstance(TRANSFORMATION)
-                cipher.init(Cipher.ENCRYPT_MODE, secretKey)
-                val iv = cipher.iv
-                val encryption = cipher.doFinal(plainText.toByteArray(Charsets.UTF_8))
+        val secretKey = getSecretKey()
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+        val iv = cipher.iv
+        val encryption = cipher.doFinal(plainText.toByteArray(Charsets.UTF_8))
 
-                val combined = ByteArray(iv.size + encryption.size)
-                System.arraycopy(iv, 0, combined, 0, iv.size)
-                System.arraycopy(encryption, 0, combined, iv.size, encryption.size)
+        val combined = ByteArray(iv.size + encryption.size)
+        System.arraycopy(iv, 0, combined, 0, iv.size)
+        System.arraycopy(encryption, 0, combined, iv.size, encryption.size)
 
-                return safeBase64Encode(combined)
-            }
-        } catch (e: Throwable) {
-            // Fallback for JVM testing environments
-        }
-        return "ENC:" + safeBase64Encode(plainText.toByteArray(Charsets.UTF_8))
+        return safeBase64Encode(combined)
     }
 
     fun decrypt(encryptedText: String): String {
         if (encryptedText.isBlank()) return ""
-        try {
-            if (encryptedText.startsWith("ENC:")) {
-                val raw = encryptedText.removePrefix("ENC:")
-                return String(safeBase64Decode(raw), Charsets.UTF_8)
-            }
+        return try {
             val combined = safeBase64Decode(encryptedText)
-            if (combined.size <= GCM_IV_LENGTH) return encryptedText
+            if (combined.size <= GCM_IV_LENGTH) return ""
 
             val iv = ByteArray(GCM_IV_LENGTH)
             val cipherText = ByteArray(combined.size - GCM_IV_LENGTH)
             System.arraycopy(combined, 0, iv, 0, GCM_IV_LENGTH)
             System.arraycopy(combined, GCM_IV_LENGTH, cipherText, 0, cipherText.size)
 
-            val secretKey = getKey() ?: return encryptedText
+            val secretKey = getSecretKey()
             val cipher = Cipher.getInstance(TRANSFORMATION)
             val spec = GCMParameterSpec(GCM_TAG_LENGTH, iv)
             cipher.init(Cipher.DECRYPT_MODE, secretKey, spec)
 
-            return String(cipher.doFinal(cipherText), Charsets.UTF_8)
+            String(cipher.doFinal(cipherText), Charsets.UTF_8)
         } catch (e: Throwable) {
-            // If decrypting plain text or failed, return original
-            return encryptedText
+            // If decryption fails due to corrupted data, invalid tag, or mismatched key, return empty string
+            ""
         }
     }
 

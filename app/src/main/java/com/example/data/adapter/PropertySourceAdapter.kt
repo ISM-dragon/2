@@ -35,12 +35,22 @@ class PropertySourceManager(
         limitPerSource: Int = 10
     ): List<NormalizedPropertyBundle> = withContext(Dispatchers.IO) {
         val results = mutableListOf<NormalizedPropertyBundle>()
+        val seenIds = mutableSetOf<String>()
+
         for (adapter in adapters) {
             try {
                 val bundles = adapter.fetchProperties(query, minPrice, maxPrice, limitPerSource)
-                results.addAll(bundles)
+                for (b in bundles) {
+                    if (seenIds.add(b.property.id)) {
+                        results.add(b)
+                    }
+                }
             } catch (e: Exception) {
-                // Log and continue with other sources
+                // Safe logging: source name and error class without sensitive payload exposure
+                android.util.Log.w(
+                    "PropertySourceManager",
+                    "Source [${adapter.sourceName}] query failed: ${e.javaClass.simpleName} - ${e.message}"
+                )
             }
         }
         results
