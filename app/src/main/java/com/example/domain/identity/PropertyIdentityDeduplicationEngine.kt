@@ -11,9 +11,11 @@ import kotlin.math.sqrt
 
 private fun IdentityMatchMethod.displayName(): String = when (this) {
     IdentityMatchMethod.APN -> "APN/parcel ID"
+    IdentityMatchMethod.MLS_ID -> "MLS ID"
+    IdentityMatchMethod.SOURCE_LISTING_ID -> "source listing ID"
+    IdentityMatchMethod.SOURCE_URL -> "normalized listing URL"
     IdentityMatchMethod.NORMALIZED_ADDRESS -> "normalized address"
     IdentityMatchMethod.COORDINATES -> "coordinates"
-    IdentityMatchMethod.PROVIDER_LISTING_ID -> "same-provider listing ID"
     IdentityMatchMethod.FUZZY_ADDRESS -> "fuzzy address"
     IdentityMatchMethod.NONE -> "no identity signal"
     IdentityMatchMethod.CONFLICT -> "conflicting identity signals"
@@ -27,8 +29,14 @@ data class DeduplicationConfig(
     val coordinatePossibleMatchRadiusMeters: Double = 150.0,
     /** A larger coordinate discrepancy alongside an exact signal is reported as a conflict. */
     val conflictingCoordinateRadiusMeters: Double = 1_000.0,
-    /** Fuzzy addresses at or above this similarity are review-only candidates. */
-    val fuzzyAddressThreshold: Double = 0.84
+    /**
+     * Fuzzy addresses at or above this similarity are review-only candidates.
+     *
+     * 0.80 keeps realistic single-token typos in the review queue (for example
+     * "123 Mane St" vs "123 Main St" scores 0.82) while staying far away from any auto-merge:
+     * fuzzy evidence can only ever produce [DeduplicationStatus.POSSIBLE_MATCH].
+     */
+    val fuzzyAddressThreshold: Double = 0.80
 ) {
     init {
         require(coordinateMatchRadiusMeters.isFinite() && coordinateMatchRadiusMeters >= 0.0)
@@ -47,11 +55,59 @@ data class DeduplicationConfig(
 /**
  * Resolves a provider identity against known canonical property identities.
  *
- * Signals are evaluated in the requested order: APN/parcel ID, normalized address, coordinates,
- * same-provider listing ID, then fuzzy address. Exact signals are cross-checked before a match is
- * returned: if they point at different records, or an exact link contradicts another known
- * identifier, the result is [DeduplicationStatus.CONFLICT]. Fuzzy and nearby-coordinate evidence
- * is never used to merge automatically.
+ * ## Deterministic matching precedence
+ *
+ * Exact signals are evaluated in this fixed order (strongest first); the first signal that
+ * matched the resolved candidate is reported as [DeduplicationResult.matchMethod]:
+ *
+ *  1. **APN / parcel ID** - the county parcel identifier; identifies the physical parcel and is
+ *     independent of any listing or feed.
+ *  2. **MLS ID** - the listing number of the originating MLS board; shared by every portal that
+ *     syndicates the listing, so it is matched across providers (not namespaced by source).
+ *  3. **Source listing ID** - `(source, providerListingId)`; namespaced by source because these
+ *     ids are only unique inside one provider. A hit means *the same source record* was imported
+ *     before, so the outcome is [DeduplicationStatus.EXACT_MATCH] and re-importing is an
+ *     idempotent refresh.
+ *  4. **Source URL** - the normalized listing URL (scheme folded to https, host lowercased
+ *     without `www.`, tracking query parameters removed, remaining parameters sorted). The URL
+ *     host is its namespace: the same normalized URL denotes the same source record even when
+ *     adapters label it with different source names, so a hit is also an
+ *     [DeduplicationStatus.EXACT_MATCH].
+ *  5. **Normalized address** - USPS-style normalization (case, punctuation, directionals,
+ *     suffixes, unit designators, appended city/state/ZIP) plus locality compatibility.
+ *  6. **Normalized coordinates** - haversine distance inside
+ *     [DeduplicationConfig.coordinateMatchRadiusMeters]; Null Island, out-of-range and
+ *     non-finite values are treated as missing.
+ *
+ * Weak signals are never merged automatically:
+ *  - coordinates inside [DeduplicationConfig.coordinatePossibleMatchRadiusMeters], and
+ *  - fuzzy address similarity at or above [DeduplicationConfig.fuzzyAddressThreshold]
+ *
+ * produce [DeduplicationStatus.POSSIBLE_MATCH] (review only). A candidate whose known parcel ID
+ * differs from the incoming one is excluded from weak-signal matching entirely.
+ *
+ * ## Conflicts
+ *
+ * Exact signals are cross-checked before a match is returned. The result is
+ * [DeduplicationStatus.CONFLICT] when:
+ *  - one exact signal matches several canonical records (an ambiguous identifier), or
+ *  - different exact signals point at different canonical records, or
+ *  - an exact link to one record contradicts another known identifier of that record
+ *    (different parcel ID, hard address/unit conflict, or coordinates further apart than
+ *    [DeduplicationConfig.conflictingCoordinateRadiusMeters]).
+ *
+ * A *different* MLS ID, source listing ID, or URL is deliberately not a contradiction: listings
+ * get relisted and re-published under new numbers, while parcel IDs and addresses identify the
+ * physical property.
+ *
+ * ## Explainability
+ *
+ * Every result carries [DeduplicationResult.evidence]: the ordered trail of each evaluated
+ * signal with the value compared, the canonical ids it matched, the ids it contradicted, and a
+ * human-readable detail line - plus the [DeduplicationResult.reason] summary. The engine is a
+ * pure function of its inputs: identical inputs always produce identical outputs, and candidate
+ * iteration order cannot change the decision (inputs are de-duplicated and sorted by canonical
+ * id first).
  */
 class PropertyIdentityDeduplicationEngine(
     private val config: DeduplicationConfig = DeduplicationConfig()
@@ -66,21 +122,34 @@ class PropertyIdentityDeduplicationEngine(
             .distinctBy { it.canonicalId }
             .sortedBy { it.canonicalId }
 
-        if (canonical.isEmpty()) return newResult()
+        val incomingSignals = IncomingSignals.from(incoming)
+        if (canonical.isEmpty()) return newResult(incomingSignals)
 
-        val evidence = canonical.map { candidate -> evaluate(incoming, candidate) }
+        val evidence = canonical.map { candidate -> evaluate(incoming, incomingSignals, candidate) }
+
+        // Exact signals in strict matching precedence (see class KDoc).
         val exactSignals = listOf(
             IdentityMatchMethod.APN to evidence.filter { it.parcelIdMatches }.map { it.canonical.canonicalId },
+            IdentityMatchMethod.MLS_ID to evidence.filter { it.mlsIdMatches }.map { it.canonical.canonicalId },
+            IdentityMatchMethod.SOURCE_LISTING_ID to evidence.filter { it.sourceListingIdMatches }.map { it.canonical.canonicalId },
+            IdentityMatchMethod.SOURCE_URL to evidence.filter { it.sourceUrlMatches }.map { it.canonical.canonicalId },
             IdentityMatchMethod.NORMALIZED_ADDRESS to evidence.filter { it.addressMatches }.map { it.canonical.canonicalId },
-            IdentityMatchMethod.COORDINATES to evidence.filter { it.coordinatesMatch }.map { it.canonical.canonicalId },
-            IdentityMatchMethod.PROVIDER_LISTING_ID to evidence.filter { it.providerListingIdMatches }.map { it.canonical.canonicalId }
+            IdentityMatchMethod.COORDINATES to evidence.filter { it.coordinatesMatch }.map { it.canonical.canonicalId }
         ).map { (method, ids) -> method to ids.distinct().sorted() }
-            .filter { (_, ids) -> ids.isNotEmpty() }
 
-        val exactCandidateIds = exactSignals.flatMap { (_, ids) -> ids }.distinct().sorted()
-        val ambiguousSignals = exactSignals.filter { (_, ids) -> ids.size > 1 }
+        val activeExactSignals = exactSignals.filter { (_, ids) -> ids.isNotEmpty() }
+        val exactCandidateIds = activeExactSignals.flatMap { (_, ids) -> ids }.distinct().sorted()
+
+        val trail = buildEvidenceTrail(
+            signals = incomingSignals,
+            evidence = evidence,
+            exactSignals = exactSignals,
+            includeWeakEvidence = exactCandidateIds.isEmpty()
+        )
+
+        val ambiguousSignals = activeExactSignals.filter { (_, ids) -> ids.size > 1 }
         if (ambiguousSignals.isNotEmpty() || exactCandidateIds.size > 1) {
-            val signalDetails = exactSignals.joinToString(separator = "; ") { (method, ids) ->
+            val signalDetails = activeExactSignals.joinToString(separator = "; ") { (method, ids) ->
                 "${method.displayName()} identifies ${ids.joinToString(prefix = "[", postfix = "]")}"
             }
             val reason = if (ambiguousSignals.isNotEmpty()) {
@@ -88,7 +157,7 @@ class PropertyIdentityDeduplicationEngine(
             } else {
                 "Conflicting identity evidence: exact signals point to different canonical properties. $signalDetails."
             }
-            return conflict(exactCandidateIds, reason)
+            return conflict(exactCandidateIds, reason, trail)
         }
 
         if (exactCandidateIds.size == 1) {
@@ -111,19 +180,49 @@ class PropertyIdentityDeduplicationEngine(
                 return conflict(
                     listOf(matchedId),
                     "An exact identity signal links the listing to $matchedId, but " +
-                        contradictions.joinToString("; ") + ". Review the source data before merging."
+                        contradictions.joinToString("; ") + ". Review the source data before merging.",
+                    trail
                 )
             }
 
-            val method = exactSignals.first { (_, ids) -> matchedId in ids }.first
+            val matchedSignals = activeExactSignals.filter { (_, ids) -> matchedId in ids }.map { it.first }
+            val sameRecordSignal = matchedSignals.firstOrNull { it in SAME_RECORD_SIGNALS }
+            // The headline signal decides the outcome: a same-record identity (source listing ID /
+            // URL) makes this an idempotent re-import; otherwise the strongest matching exact
+            // signal (precedence order) identifies the canonical property across sources.
+            val method = sameRecordSignal ?: matchedSignals.first()
             val matchedCanonical = matchedEvidence.canonical
+
+            // A same-source record identity (source listing ID or URL) means this exact record was
+            // imported before: the re-import is an idempotent refresh, reported as EXACT_MATCH.
+            val status = if (sameRecordSignal != null) {
+                DeduplicationStatus.EXACT_MATCH
+            } else {
+                DeduplicationStatus.CANONICAL_MATCH
+            }
+            val corroboration = matchedSignals.filter { it != method }
+            val reason = buildString {
+                if (status == DeduplicationStatus.EXACT_MATCH) {
+                    append("Same source record re-imported: ")
+                    append(method.displayName())
+                    append(" already links to canonical property $matchedId; refreshing it is idempotent.")
+                } else {
+                    append("Matched canonical property $matchedId by ${method.displayName()}.")
+                }
+                if (corroboration.isNotEmpty()) {
+                    append(" Corroborated by ")
+                    append(corroboration.joinToString(", ") { it.displayName() })
+                    append('.')
+                }
+            }
             return DeduplicationResult(
-                status = DeduplicationStatus.MATCHED,
+                status = status,
                 matchMethod = method,
                 canonicalIdentity = matchedCanonical,
                 candidateCanonicalIds = listOf(matchedId),
-                confidence = confidenceFor(method),
-                reason = "Matched canonical property $matchedId by ${method.displayName()}."
+                confidence = if (status == DeduplicationStatus.EXACT_MATCH) 1.0 else confidenceFor(method),
+                reason = reason,
+                evidence = trail
             )
         }
 
@@ -177,21 +276,47 @@ class PropertyIdentityDeduplicationEngine(
                     append(possibleIds.joinToString())
                     append('.')
                 }
+                append(" Ambiguous fuzzy evidence is never merged automatically.")
             }
             return DeduplicationResult(
                 status = DeduplicationStatus.POSSIBLE_MATCH,
                 matchMethod = method,
                 candidateCanonicalIds = possibleIds,
                 confidence = confidence,
-                reason = reason
+                reason = reason,
+                evidence = trail
             )
         }
 
-        return newResult()
+        return newResult(incomingSignals, trail)
+    }
+
+    /** The incoming identity's normalized signal values, computed once per decision. */
+    private class IncomingSignals(
+        val source: String?,
+        val parcelId: String?,
+        val mlsId: String?,
+        val providerListingId: String?,
+        val sourceUrl: String?,
+        val streetAddress: String?,
+        val coordinates: Coordinates?
+    ) {
+        companion object {
+            fun from(incoming: SourcePropertyIdentity) = IncomingSignals(
+                source = normalizeSource(incoming.source),
+                parcelId = normalizeParcelId(incoming.parcelId),
+                mlsId = normalizeMlsId(incoming.mlsId),
+                providerListingId = normalizeProviderListingId(incoming.providerListingId),
+                sourceUrl = normalizeSourceUrl(incoming.sourceUrl),
+                streetAddress = normalizedStreetAddress(incoming),
+                coordinates = coordinatesOf(incoming)
+            )
+        }
     }
 
     private fun evaluate(
         incoming: SourcePropertyIdentity,
+        signals: IncomingSignals,
         canonical: CanonicalPropertyIdentity
     ): CandidateEvidence {
         val observations = buildList {
@@ -204,35 +329,44 @@ class PropertyIdentityDeduplicationEngine(
                     state = canonical.state,
                     postalCode = canonical.postalCode,
                     latitude = canonical.latitude,
-                    longitude = canonical.longitude
+                    longitude = canonical.longitude,
+                    mlsId = canonical.mlsId
                 )
             )
             addAll(canonical.sourceIdentities)
         }.distinct()
 
-        val incomingParcelId = normalizeParcelId(incoming.parcelId)
         val knownParcelIds = observations.mapNotNull { normalizeParcelId(it.parcelId) }.toSet()
-        val parcelIdMatches = incomingParcelId != null && incomingParcelId in knownParcelIds
-        val parcelIdConflicts = incomingParcelId != null &&
+        val parcelIdMatches = signals.parcelId != null && signals.parcelId in knownParcelIds
+        val parcelIdConflicts = signals.parcelId != null &&
             knownParcelIds.isNotEmpty() &&
-            incomingParcelId !in knownParcelIds
+            signals.parcelId !in knownParcelIds
+
+        // MLS numbers are shared across portals: matched globally, and a *different* MLS number is
+        // not a contradiction because properties get relisted under new numbers.
+        val knownMlsIds = observations.mapNotNull { normalizeMlsId(it.mlsId) }.toSet()
+        val mlsIdMatches = signals.mlsId != null && signals.mlsId in knownMlsIds
+
+        // Source listing IDs are namespaced by their provider.
+        val sourceListingIdMatches = signals.providerListingId != null && signals.source != null &&
+            observations.any { observation ->
+                normalizeProviderListingId(observation.providerListingId) == signals.providerListingId &&
+                    normalizeSource(observation.source) == signals.source
+            }
+
+        // Listing URLs are namespaced by their host, which normalizeSourceUrl keeps: the same
+        // normalized URL denotes the same source record regardless of adapter labels.
+        val sourceUrlMatches = signals.sourceUrl != null &&
+            observations.any { normalizeSourceUrl(it.sourceUrl) == signals.sourceUrl }
 
         val addressMatches = observations.any { addressesMatch(incoming, it) }
-        val coordinateDistances = observations.mapNotNull { distanceMeters(incoming, it) }
+        val coordinateDistances = observations.mapNotNull { distanceMeters(signals.coordinates, it) }
         val coordinateDistance = coordinateDistances.minOrNull()
         val coordinatesMatch = coordinateDistance != null &&
             coordinateDistance <= config.coordinateMatchRadiusMeters
         val addressConflicts = allKnownAddressesConflict(incoming, observations)
         val coordinatesConflict = coordinateDistance != null &&
             coordinateDistance > config.conflictingCoordinateRadiusMeters
-
-        val incomingListingId = normalizeProviderListingId(incoming.providerListingId)
-        val incomingSource = normalizeSource(incoming.source)
-        val providerListingIdMatches = incomingListingId != null && incomingSource != null &&
-            observations.any { observation ->
-                normalizeProviderListingId(observation.providerListingId) == incomingListingId &&
-                    normalizeSource(observation.source) == incomingSource
-            }
 
         val fuzzyScore = observations.maxOfOrNull { addressSimilarity(incoming, it) } ?: 0.0
         val coordinatesPossible = coordinateDistance != null &&
@@ -244,15 +378,161 @@ class PropertyIdentityDeduplicationEngine(
             canonical = canonical,
             parcelIdMatches = parcelIdMatches,
             parcelIdConflicts = parcelIdConflicts,
+            mlsIdMatches = mlsIdMatches,
+            sourceListingIdMatches = sourceListingIdMatches,
+            sourceUrlMatches = sourceUrlMatches,
             addressMatches = addressMatches,
             addressConflicts = addressConflicts,
             coordinateDistanceMeters = coordinateDistance,
             coordinatesMatch = coordinatesMatch,
             coordinatesPossible = coordinatesPossible,
             coordinatesConflict = coordinatesConflict,
-            providerListingIdMatches = providerListingIdMatches,
             fuzzyAddressScore = fuzzyScore
         )
+    }
+
+    /**
+     * Builds the deterministic audit trail: one entry per exact signal the incoming identity
+     * actually supplied (in precedence order), followed by the weak-signal summary when any
+     * candidate produced review-worthy evidence.
+     */
+    private fun buildEvidenceTrail(
+        signals: IncomingSignals,
+        evidence: List<CandidateEvidence>,
+        exactSignals: List<Pair<IdentityMatchMethod, List<String>>>,
+        includeWeakEvidence: Boolean = true
+    ): List<IdentityEvidence> {
+        val trail = mutableListOf<IdentityEvidence>()
+
+        fun matchedIds(method: IdentityMatchMethod): List<String> =
+            exactSignals.first { it.first == method }.second
+
+        fun addExact(
+            method: IdentityMatchMethod,
+            suppliedValue: String?,
+            contradicted: List<String> = emptyList(),
+            noMatchDetail: String
+        ) {
+            if (suppliedValue == null) return
+            val matched = matchedIds(method)
+            val detail = when {
+                matched.isNotEmpty() ->
+                    "${method.displayName()} '$suppliedValue' matched " +
+                        matched.joinToString(prefix = "[", postfix = "]")
+                contradicted.isNotEmpty() ->
+                    "${method.displayName()} '$suppliedValue' matched nothing and contradicts " +
+                        contradicted.joinToString(prefix = "[", postfix = "]")
+                else -> noMatchDetail
+            }
+            trail += IdentityEvidence(
+                signal = method,
+                incomingValue = suppliedValue,
+                matchedCanonicalIds = matched,
+                contradictedCanonicalIds = contradicted.sorted(),
+                detail = detail
+            )
+        }
+
+        addExact(
+            IdentityMatchMethod.APN,
+            signals.parcelId,
+            contradicted = evidence.filter { it.parcelIdConflicts }.map { it.canonical.canonicalId },
+            noMatchDetail = "APN/parcel ID '${signals.parcelId}' matched no known parcel ID"
+        )
+        addExact(
+            IdentityMatchMethod.MLS_ID,
+            signals.mlsId,
+            noMatchDetail = "MLS ID '${signals.mlsId}' matched no known MLS listing"
+        )
+        addExact(
+            IdentityMatchMethod.SOURCE_LISTING_ID,
+            signals.providerListingId?.let { id ->
+                signals.source?.let { "$it:$id" } ?: id
+            },
+            noMatchDetail = "source listing ID '${signals.source?.let { "$it:" }.orEmpty()}" +
+                "${signals.providerListingId}' was never imported before"
+        )
+        addExact(
+            IdentityMatchMethod.SOURCE_URL,
+            signals.sourceUrl,
+            noMatchDetail = "normalized listing URL '${signals.sourceUrl}' was never imported before"
+        )
+        addExact(
+            IdentityMatchMethod.NORMALIZED_ADDRESS,
+            signals.streetAddress,
+            contradicted = evidence.filter { it.addressConflicts }.map { it.canonical.canonicalId },
+            noMatchDetail = "normalized address '${signals.streetAddress}' matched no known address"
+        )
+        if (signals.coordinates != null) {
+            val matched = matchedIds(IdentityMatchMethod.COORDINATES)
+            val closest = evidence
+                .filter { it.coordinateDistanceMeters != null }
+                .minByOrNull { it.coordinateDistanceMeters!! }
+            val detail = when {
+                matched.isNotEmpty() ->
+                    "coordinates ${signals.coordinates.latitude},${signals.coordinates.longitude} are within " +
+                        "${formatMeters(config.coordinateMatchRadiusMeters)} of " +
+                        matched.joinToString(prefix = "[", postfix = "]")
+                closest != null ->
+                    "coordinates ${signals.coordinates.latitude},${signals.coordinates.longitude} are " +
+                        "${formatMeters(closest.coordinateDistanceMeters!!)} from the closest candidate " +
+                        "${closest.canonical.canonicalId} (outside the exact-match radius)"
+                else ->
+                    "coordinates ${signals.coordinates.latitude},${signals.coordinates.longitude} matched no known coordinates"
+            }
+            trail += IdentityEvidence(
+                signal = IdentityMatchMethod.COORDINATES,
+                incomingValue = "${signals.coordinates.latitude},${signals.coordinates.longitude}",
+                matchedCanonicalIds = matched,
+                contradictedCanonicalIds = evidence.filter { it.coordinatesConflict }
+                    .map { it.canonical.canonicalId }.sorted(),
+                detail = detail
+            )
+        }
+
+        // Weak evidence is informative only when nothing exact resolved the identity; a fuzzy
+        // row for a candidate that an exact signal already matched would just be noise.
+        val weak = if (!includeWeakEvidence) {
+            emptyList()
+        } else {
+            evidence
+                .filter { it.coordinatesPossible || it.fuzzyAddressScore >= config.fuzzyAddressThreshold }
+                .sortedBy { it.canonical.canonicalId }
+        }
+        if (weak.isNotEmpty()) {
+            trail += IdentityEvidence(
+                signal = IdentityMatchMethod.FUZZY_ADDRESS,
+                incomingValue = signals.streetAddress
+                    ?: signals.coordinates?.let { "${it.latitude},${it.longitude}" }
+                    ?: "",
+                matchedCanonicalIds = emptyList(),
+                detail = "weak evidence (never merged automatically): " + weak.joinToString("; ") {
+                    buildString {
+                        append(it.canonical.canonicalId)
+                        if (it.fuzzyAddressScore >= config.fuzzyAddressThreshold) {
+                            append(" fuzzy address ")
+                            append(String.format(Locale.ROOT, "%.2f", it.fuzzyAddressScore))
+                        }
+                        if (it.coordinatesPossible) {
+                            if (it.fuzzyAddressScore >= config.fuzzyAddressThreshold) append(',')
+                            append(" coordinates ")
+                            append(formatMeters(it.coordinateDistanceMeters!!))
+                            append(" away")
+                        }
+                    }
+                }
+            )
+        }
+
+        if (trail.isEmpty()) {
+            trail += IdentityEvidence(
+                signal = IdentityMatchMethod.NONE,
+                incomingValue = "",
+                detail = "the incoming identity supplied no usable APN/parcel ID, MLS ID, source " +
+                    "listing ID, source URL, normalized address, or coordinates"
+            )
+        }
+        return trail
     }
 
     private fun allKnownAddressesConflict(
@@ -346,40 +626,45 @@ class PropertyIdentityDeduplicationEngine(
         return true
     }
 
-    private fun distanceMeters(first: SourcePropertyIdentity, second: SourcePropertyIdentity): Double? {
-        val pointA = coordinates(first) ?: return null
-        val pointB = coordinates(second) ?: return null
+    private fun distanceMeters(
+        incomingCoordinates: Coordinates?,
+        second: SourcePropertyIdentity
+    ): Double? {
+        val pointA = incomingCoordinates ?: return null
+        val pointB = coordinatesOf(second) ?: return null
         return haversineMeters(pointA.latitude, pointA.longitude, pointB.latitude, pointB.longitude)
     }
 
-    private fun coordinates(identity: SourcePropertyIdentity): Coordinates? {
-        val latitude = identity.latitude ?: return null
-        val longitude = identity.longitude ?: return null
-        if (!latitude.isFinite() || !longitude.isFinite()) return null
-        if (latitude !in -90.0..90.0 || longitude !in -180.0..180.0) return null
-        // Several feeds use the Null Island coordinate as a missing-value sentinel.
-        if (latitude == 0.0 && longitude == 0.0) return null
-        return Coordinates(latitude, longitude)
-    }
-
-    private fun newResult() = DeduplicationResult(
+    private fun newResult(
+        signals: IncomingSignals,
+        trail: List<IdentityEvidence> = emptyList()
+    ) = DeduplicationResult(
         status = DeduplicationStatus.NEW,
         matchMethod = IdentityMatchMethod.NONE,
-        reason = "No APN/parcel ID, normalized address, coordinate, provider listing ID, or fuzzy-address candidate matched the supplied canonical properties."
+        reason = "No APN/parcel ID, MLS ID, source listing ID, source URL, normalized address, " +
+            "coordinate, or fuzzy-address candidate matched the supplied canonical properties.",
+        evidence = trail.ifEmpty { buildEvidenceTrail(signals, emptyList(), EXACT_SIGNAL_PRECEDENCE.map { it to emptyList() }) }
     )
 
-    private fun conflict(canonicalIds: List<String>, reason: String) = DeduplicationResult(
+    private fun conflict(
+        canonicalIds: List<String>,
+        reason: String,
+        trail: List<IdentityEvidence>
+    ) = DeduplicationResult(
         status = DeduplicationStatus.CONFLICT,
         matchMethod = IdentityMatchMethod.CONFLICT,
         candidateCanonicalIds = canonicalIds.distinct().sorted(),
-        reason = reason
+        reason = reason,
+        evidence = trail
     )
 
     private fun confidenceFor(method: IdentityMatchMethod): Double = when (method) {
         IdentityMatchMethod.APN -> 0.995
-        IdentityMatchMethod.NORMALIZED_ADDRESS -> 0.98
+        IdentityMatchMethod.MLS_ID -> 0.99
+        IdentityMatchMethod.SOURCE_LISTING_ID -> 0.985
+        IdentityMatchMethod.SOURCE_URL -> 0.98
+        IdentityMatchMethod.NORMALIZED_ADDRESS -> 0.97
         IdentityMatchMethod.COORDINATES -> 0.92
-        IdentityMatchMethod.PROVIDER_LISTING_ID -> 0.88
         else -> 0.0
     }
 
@@ -398,13 +683,15 @@ class PropertyIdentityDeduplicationEngine(
         val canonical: CanonicalPropertyIdentity,
         val parcelIdMatches: Boolean,
         val parcelIdConflicts: Boolean,
+        val mlsIdMatches: Boolean,
+        val sourceListingIdMatches: Boolean,
+        val sourceUrlMatches: Boolean,
         val addressMatches: Boolean,
         val addressConflicts: Boolean,
         val coordinateDistanceMeters: Double?,
         val coordinatesMatch: Boolean,
         val coordinatesPossible: Boolean,
         val coordinatesConflict: Boolean,
-        val providerListingIdMatches: Boolean,
         val fuzzyAddressScore: Double
     )
 
@@ -412,6 +699,31 @@ class PropertyIdentityDeduplicationEngine(
 
     companion object {
         private const val ADDRESS_CONTRADICTION_THRESHOLD = 0.70
+
+        /** Signals that identify *the same source record* and therefore yield EXACT_MATCH. */
+        private val SAME_RECORD_SIGNALS = setOf(
+            IdentityMatchMethod.SOURCE_LISTING_ID,
+            IdentityMatchMethod.SOURCE_URL
+        )
+
+        /** Exact signal precedence, strongest first (mirrors the class KDoc ladder). */
+        private val EXACT_SIGNAL_PRECEDENCE = listOf(
+            IdentityMatchMethod.APN,
+            IdentityMatchMethod.MLS_ID,
+            IdentityMatchMethod.SOURCE_LISTING_ID,
+            IdentityMatchMethod.SOURCE_URL,
+            IdentityMatchMethod.NORMALIZED_ADDRESS,
+            IdentityMatchMethod.COORDINATES
+        )
+
+        /** Placeholder strings feeds use for "we have no value"; treated as missing identifiers. */
+        private val PLACEHOLDER_VALUES = setOf("NA", "NONE", "NULL", "UNKNOWN", "NOTAVAILABLE", "0")
+
+        /** Query parameters that carry tracking, never listing identity. */
+        private val TRACKING_QUERY_PARAMS = setOf(
+            "fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "yclid", "msclkid",
+            "pk_campaign", "pk_kwd", "rb_clickid", "dclid", "twclid"
+        )
 
         private fun normalizeParcelId(value: String?): String? {
             val stripped = value
@@ -424,7 +736,27 @@ class PropertyIdentityDeduplicationEngine(
                 ?.filter { it.isLetterOrDigit() }
                 ?.takeIf { it.isNotBlank() }
                 ?: return null
-            if (stripped in setOf("NA", "N A", "NONE", "NULL", "UNKNOWN", "NOTAVAILABLE", "0")) return null
+            if (stripped in PLACEHOLDER_VALUES) return null
+            return stripped
+        }
+
+        /**
+         * MLS/listing numbers: label prefixes removed ("MLS# A10-50837" -> "A1050837"), case and
+         * separators folded. Matched across providers because MLS numbers are board-scoped, not
+         * portal-scoped.
+         */
+        private fun normalizeMlsId(value: String?): String? {
+            val stripped = value
+                ?.trim()
+                ?.replace(
+                    Regex("(?i)^(?:MLS|LISTING)(?:\\s*(?:ID|NUMBER|NUM|NO\\.?|#))?\\s*[:#-]?\\s*"),
+                    ""
+                )
+                ?.uppercase(Locale.ROOT)
+                ?.filter { it.isLetterOrDigit() }
+                ?.takeIf { it.isNotBlank() }
+                ?: return null
+            if (stripped in PLACEHOLDER_VALUES || stripped == "MLS") return null
             return stripped
         }
 
@@ -434,11 +766,80 @@ class PropertyIdentityDeduplicationEngine(
             ?.lowercase(Locale.ROOT)
             ?.takeIf { it.isNotBlank() && it !in setOf("n/a", "none", "null", "unknown") }
 
-        private fun normalizeSource(value: String?): String? = value
-            ?.trim()
-            ?.lowercase(Locale.ROOT)
-            ?.replace(Regex("\\s+"), " ")
-            ?.takeIf { it.isNotBlank() }
+        /**
+         * Normalizes a listing URL into a deterministic identity form:
+         *  - scheme folded to `https` (portals serve the same record over both schemes);
+         *  - host lowercased, `www.` and default ports removed - the host is the URL's namespace;
+         *  - fragment removed, duplicate slashes collapsed, trailing slash removed;
+         *  - tracking parameters (utm_*, fbclid, gclid, ...) removed, remaining parameters sorted;
+         *  - everything lowercased so cosmetic casing cannot split one record into two.
+         *
+         * Returns null for blank, placeholder, or host-less values (missing identifier).
+         */
+        private fun normalizeSourceUrl(value: String?): String? {
+            val trimmed = value?.trim()?.takeIf { it.isNotBlank() } ?: return null
+            if (trimmed.lowercase(Locale.ROOT) in setOf("n/a", "na", "none", "null", "unknown", "-")) return null
+
+            var rest = trimmed
+            val schemeIndex = rest.indexOf("://")
+            if (schemeIndex >= 0) {
+                val scheme = rest.substring(0, schemeIndex).lowercase(Locale.ROOT)
+                if (scheme != "http" && scheme != "https") return null
+                rest = rest.substring(schemeIndex + 3)
+            }
+
+            val fragmentIndex = rest.indexOf('#')
+            if (fragmentIndex >= 0) rest = rest.substring(0, fragmentIndex)
+
+            var query = ""
+            val queryIndex = rest.indexOf('?')
+            if (queryIndex >= 0) {
+                query = rest.substring(queryIndex + 1)
+                rest = rest.substring(0, queryIndex)
+            }
+
+            val slashIndex = rest.indexOf('/')
+            var host = (if (slashIndex >= 0) rest.substring(0, slashIndex) else rest).lowercase(Locale.ROOT)
+            var path = if (slashIndex >= 0) rest.substring(slashIndex) else ""
+
+            val portIndex = host.indexOf(':')
+            if (portIndex >= 0) {
+                val port = host.substring(portIndex + 1)
+                host = host.substring(0, portIndex)
+                if (port.isNotEmpty() && port != "80" && port != "443") host = "$host:$port"
+            }
+            if (host.startsWith("www.")) host = host.removePrefix("www.")
+            if (!host.contains('.')) return null
+
+            path = path.lowercase(Locale.ROOT)
+                .replace(Regex("/+"), "/")
+                .trimEnd('/')
+
+            val keptParams = query
+                .split('&')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .map { it.lowercase(Locale.ROOT) }
+                .filter { param ->
+                    val key = param.substringBefore('=')
+                    key !in TRACKING_QUERY_PARAMS && !key.startsWith("utm_")
+                }
+                .sorted()
+
+            return buildString {
+                append("https://").append(host).append(path)
+                keptParams.forEachIndexed { index, param ->
+                    append(if (index == 0) '?' else '&').append(param)
+                }
+            }
+        }
+
+        private fun normalizeSource(value: String?): String? =
+            value
+                ?.trim()
+                ?.lowercase(Locale.ROOT)
+                ?.replace(Regex("\\s+"), " ")
+                ?.takeIf { it.isNotBlank() }
 
         private fun normalizeCity(value: String?): String? = normalizeText(value)
 
@@ -463,7 +864,7 @@ class PropertyIdentityDeduplicationEngine(
                 ?.filter { it.isLetterOrDigit() }
                 ?.takeIf { it.isNotBlank() }
                 ?: return null
-            if (normalized in setOf("NA", "NONE", "NULL", "UNKNOWN", "NOTAVAILABLE")) return null
+            if (normalized in PLACEHOLDER_VALUES) return null
             return if (normalized.all(Char::isDigit) && normalized.length >= 5) {
                 normalized.take(5)
             } else {
@@ -489,7 +890,7 @@ class PropertyIdentityDeduplicationEngine(
                 }
             }
             val state = normalizeAddressTokens(identity.state.orEmpty())
-            removeTrailingTokens(tokens, state)
+            removeTrailingStateTokens(tokens, state)
             val city = normalizeAddressTokens(identity.city.orEmpty())
             removeTrailingTokens(tokens, city)
 
@@ -501,6 +902,22 @@ class PropertyIdentityDeduplicationEngine(
             val start = tokens.size - suffix.size
             if (tokens.subList(start, tokens.size) == suffix) {
                 repeat(suffix.size) { tokens.removeAt(tokens.lastIndex) }
+            }
+        }
+
+        /**
+         * Removes a trailing state component ("..., Austin, TX" / "..., Texas") without mangling
+         * street names that merely resemble state names: "123 Maine St" and "123 Washington Ave"
+         * keep their street identity because the state-name equivalence is applied only to the
+         * *trailing* tokens being compared, never to the whole address.
+         */
+        private fun removeTrailingStateTokens(tokens: MutableList<String>, state: List<String>) {
+            if (state.isEmpty() || tokens.size <= state.size) return
+            val start = tokens.size - state.size
+            val tail = tokens.subList(start, tokens.size).map { STATE_NAME_TO_CODE[it] ?: it }
+            val expected = state.map { STATE_NAME_TO_CODE[it] ?: it }
+            if (tail == expected) {
+                repeat(state.size) { tokens.removeAt(tokens.lastIndex) }
             }
         }
 
@@ -556,7 +973,7 @@ class PropertyIdentityDeduplicationEngine(
                 for (secondIndex in second.indices) {
                     val substitutionCost = if (first[firstIndex] == second[secondIndex]) 0 else 1
                     current[secondIndex + 1] = min(
-                        min(current[secondIndex] + 1, previous[secondIndex + 1] + 1),
+                        min(current[secondIndex] + 1, previous[secondIndex] + 1),
                         previous[secondIndex] + substitutionCost
                     )
                 }
@@ -592,6 +1009,16 @@ class PropertyIdentityDeduplicationEngine(
             return result
         }
 
+        private fun coordinatesOf(identity: SourcePropertyIdentity): Coordinates? {
+            val latitude = identity.latitude ?: return null
+            val longitude = identity.longitude ?: return null
+            if (!latitude.isFinite() || !longitude.isFinite()) return null
+            if (latitude !in -90.0..90.0 || longitude !in -180.0..180.0) return null
+            // Several feeds use the Null Island coordinate as a missing-value sentinel.
+            if (latitude == 0.0 && longitude == 0.0) return null
+            return Coordinates(latitude, longitude)
+        }
+
         private fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
             val earthRadiusMeters = 6_371_000.0
             val latitudeDelta = Math.toRadians(lat2 - lat1)
@@ -618,6 +1045,11 @@ class PropertyIdentityDeduplicationEngine(
             "wisconsin" to "wi", "wyoming" to "wy", "district of columbia" to "dc"
         )
 
+        /**
+         * Street-suffix and directional equivalents. State names are deliberately NOT part of this
+         * table: folding them here would rewrite street names such as "Maine St" or "Washington
+         * Ave" into "me st" / "wa ave" and could silently merge two different addresses.
+         */
         private val ADDRESS_TOKEN_EQUIVALENTS: Map<String, String> = buildMap {
             putAll(
                 mapOf(
@@ -638,7 +1070,6 @@ class PropertyIdentityDeduplicationEngine(
                     "ridge" to "rdg", "spring" to "spg", "station" to "sta", "terr" to "ter"
                 )
             )
-            putAll(STATE_NAME_TO_CODE)
         }
     }
 }

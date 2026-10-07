@@ -3,11 +3,13 @@ package com.example.data.adapter
 import com.example.data.local.entity.*
 import com.example.domain.automation.DiscoveredProperty
 import com.example.domain.automation.PropertySourceGateway
+import com.example.domain.identity.CanonicalIdentityMerger
 import com.example.domain.identity.CanonicalPropertyIdentity
 import com.example.domain.identity.DeduplicationResult
 import com.example.domain.identity.DeduplicationStatus
 import com.example.domain.identity.PropertyIdentityDeduplicationEngine
 import com.example.domain.identity.SourcePropertyIdentity
+import com.example.domain.identity.SourceProvenance
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -73,17 +75,20 @@ data class PropertySourceDeduplicationDecision(
 
 /**
  * Converts the identity data currently persisted on a property row into a canonical candidate.
- * Provider IDs and APNs are intentionally not inferred from [PropertyEntity.id]/[PropertyEntity.sourceType]:
+ * The row's APN and MLS number are real identity columns (v3 schema) and are mapped when present.
+ * Provider IDs are intentionally not inferred from [PropertyEntity.id]/[PropertyEntity.sourceType]:
  * sourceType is a listing category, not a provider namespace.
  */
 fun PropertyEntity.toCanonicalPropertyIdentity(): CanonicalPropertyIdentity = CanonicalPropertyIdentity(
     canonicalId = id,
+    parcelId = apn.takeIf { it.isNotBlank() },
     address = address,
     city = city,
     state = state,
     postalCode = zipCode,
     latitude = latitude,
-    longitude = longitude
+    longitude = longitude,
+    mlsId = mlsNumber.takeIf { it.isNotBlank() }
 )
 
 class PropertySourceManager(
@@ -113,8 +118,7 @@ class PropertySourceManager(
         DiscoveredProperty(
             bundle = decision.bundle,
             isNew = decision.result.status == DeduplicationStatus.NEW,
-            needsReview = decision.result.status == DeduplicationStatus.POSSIBLE_MATCH ||
-                decision.result.status == DeduplicationStatus.CONFLICT
+            needsReview = decision.result.status.requiresReview
         )
     }
 
@@ -158,40 +162,50 @@ class PropertySourceManager(
                 val bundles = adapter.fetchProperties(query, minPrice, maxPrice, limitPerSource)
                 for (bundle in bundles) {
                     val identity = sourceIdentityFor(adapter, bundle)
-                    val result = identityEngine.deduplicate(identity, knownIdentities)
+                    var result = identityEngine.deduplicate(identity, knownIdentities)
+
+                    when (result.status) {
+                        // Confidently new: seed the in-memory catalog through the merger so the
+                        // canonical fields carry deterministic source provenance from the start.
+                        // The decision carries the identity the caller should persist.
+                        DeduplicationStatus.NEW -> {
+                            val created = CanonicalIdentityMerger.merge(
+                                CanonicalPropertyIdentity(canonicalId = bundle.property.id),
+                                additionalObservations = listOf(identity)
+                            ).merged
+                            knownIdentities += created
+                            result = result.copy(proposedCanonicalIdentity = created)
+                        }
+
+                        // Same record re-imported (EXACT_MATCH) or another source resolved to the
+                        // same property (CANONICAL_MATCH): link the identity and re-resolve the
+                        // canonical fields by explicit source priority, so repeated imports in any
+                        // order converge to the same values (idempotent, never "last writer wins").
+                        DeduplicationStatus.EXACT_MATCH,
+                        DeduplicationStatus.CANONICAL_MATCH -> {
+                            val matchedId = result.matchedCanonicalId
+                            val matchedIndex = knownIdentities.indexOfFirst { it.canonicalId == matchedId }
+                            if (matchedIndex >= 0) {
+                                val merged = CanonicalIdentityMerger.merge(
+                                    knownIdentities[matchedIndex],
+                                    additionalObservations = listOf(identity)
+                                ).merged
+                                knownIdentities[matchedIndex] = merged
+                                result = result.copy(canonicalIdentity = merged)
+                            }
+                        }
+
+                        // Ambiguous evidence is never merged automatically; the decisions are
+                        // surfaced to the caller for review.
+                        DeduplicationStatus.POSSIBLE_MATCH,
+                        DeduplicationStatus.CONFLICT -> Unit
+                    }
+
                     decisions += PropertySourceDeduplicationDecision(
                         bundle = bundle.withProvenance(adapter),
                         sourceIdentity = identity,
                         result = result
                     )
-
-                    when (result.status) {
-                        DeduplicationStatus.NEW -> knownIdentities += CanonicalPropertyIdentity(
-                            canonicalId = bundle.property.id,
-                            parcelId = identity.parcelId,
-                            address = identity.address,
-                            city = identity.city,
-                            state = identity.state,
-                            postalCode = identity.postalCode,
-                            latitude = identity.latitude,
-                            longitude = identity.longitude,
-                            sourceIdentities = setOf(identity)
-                        )
-
-                        DeduplicationStatus.MATCHED -> {
-                            val matchedId = result.matchedCanonicalId
-                            val matchedIndex = knownIdentities.indexOfFirst { it.canonicalId == matchedId }
-                            if (matchedIndex >= 0) {
-                                val matched = knownIdentities[matchedIndex]
-                                knownIdentities[matchedIndex] = matched.copy(
-                                    sourceIdentities = matched.sourceIdentities + identity
-                                )
-                            }
-                        }
-
-                        DeduplicationStatus.POSSIBLE_MATCH,
-                        DeduplicationStatus.CONFLICT -> Unit
-                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -274,13 +288,17 @@ class PropertySourceManager(
         return SourcePropertyIdentity(
             source = supplied?.source?.takeIf { it.isNotBlank() } ?: adapter.sourceName,
             providerListingId = supplied?.providerListingId?.takeIf { it.isNotBlank() } ?: property.id,
-            parcelId = supplied?.parcelId,
+            parcelId = supplied?.parcelId?.takeIf { it.isNotBlank() } ?: property.apn.takeIf { it.isNotBlank() },
             address = supplied?.address?.takeIf { it.isNotBlank() } ?: property.address,
             city = supplied?.city?.takeIf { it.isNotBlank() } ?: property.city,
             state = supplied?.state?.takeIf { it.isNotBlank() } ?: property.state,
             postalCode = supplied?.postalCode?.takeIf { it.isNotBlank() } ?: property.zipCode,
             latitude = supplied?.latitude ?: property.latitude,
-            longitude = supplied?.longitude ?: property.longitude
+            longitude = supplied?.longitude ?: property.longitude,
+            mlsId = supplied?.mlsId?.takeIf { it.isNotBlank() } ?: property.mlsNumber.takeIf { it.isNotBlank() },
+            sourceUrl = supplied?.sourceUrl?.takeIf { it.isNotBlank() } ?: bundle.externalUrl.takeIf { it.isNotBlank() },
+            sourcePriority = supplied?.sourcePriority ?: SourceProvenance.DEFAULT_SOURCE_PRIORITY,
+            observedAt = supplied?.observedAt?.takeIf { it > 0L } ?: bundle.sourceUpdatedAt
         )
     }
 }

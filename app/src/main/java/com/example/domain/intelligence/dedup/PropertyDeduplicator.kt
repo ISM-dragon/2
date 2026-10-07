@@ -1,102 +1,126 @@
 package com.example.domain.intelligence.dedup
 
+import com.example.data.adapter.toCanonicalPropertyIdentity
 import com.example.data.local.dao.PropertyDao
 import com.example.data.local.entity.PropertyEntity
+import com.example.domain.identity.DeduplicationStatus
+import com.example.domain.identity.IdentityMatchMethod
+import com.example.domain.identity.PropertyIdentityDeduplicationEngine
+import com.example.domain.identity.SourcePropertyIdentity
 import com.example.domain.intelligence.model.CanonicalProperty
-import kotlin.math.abs
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.sin
-import kotlin.math.sqrt
 
+/**
+ * The outcome of resolving one incoming listing against the local catalog.
+ *
+ * [isMatch] is true only for unambiguous resolutions (an exact re-import of the same source
+ * record, or a cross-source match through an exact identity signal). Weak evidence - fuzzy
+ * addresses or nearby-but-not-identical coordinates - is reported as [needsReview] with
+ * [isMatch] = false, so ambiguous candidates are NEVER silently merged. [reason] and [matchType]
+ * make every decision explainable at the call site and in import logs.
+ */
 data class MatchResult(
     val isMatch: Boolean,
     val existingProperty: PropertyEntity? = null,
-    val matchType: String? = null // "APN", "EXACT_ADDRESS", "COORDINATES", "FUZZY_ADDRESS", "NONE"
+    /** "APN", "MLS_ID", "SOURCE_LISTING_ID", "SOURCE_URL", "EXACT_ADDRESS", "COORDINATES", "FUZZY_ADDRESS", "CONFLICT", "NONE" */
+    val matchType: String? = null,
+    /** True when the evidence is ambiguous (possible match or conflict) and a human must review. */
+    val needsReview: Boolean = false,
+    /** Explainable summary of the decision, safe to log and surface. */
+    val reason: String = "",
+    val confidence: Double = 0.0
 )
 
+/**
+ * Deduplicates URL-intelligence imports against the persisted property catalog.
+ *
+ * This class used to implement its own first-hit-wins ladder (exact address, then coordinates
+ * within 35 m, then a fuzzy Jaccard address match that merged silently at >= 0.75). That ladder
+ * depended on DAO iteration order and auto-merged ambiguous fuzzy evidence. It is now a thin
+ * adapter over [PropertyIdentityDeduplicationEngine], which guarantees:
+ *
+ *  - deterministic matching precedence: APN/parcel ID > MLS ID > source listing ID > source URL >
+ *    normalized address > normalized coordinates;
+ *  - fuzzy address and merely-nearby coordinates produce POSSIBLE_MATCH (review) and never merge;
+ *  - disagreeing exact signals produce CONFLICT (review) and never merge;
+ *  - identical inputs produce identical [MatchResult]s on every run (idempotent re-imports), and
+ *    candidate ordering cannot influence the outcome.
+ */
 class PropertyDeduplicator(
-    private val propertyDao: PropertyDao
+    private val propertyDao: PropertyDao,
+    private val identityEngine: PropertyIdentityDeduplicationEngine = PropertyIdentityDeduplicationEngine()
 ) {
     suspend fun findExistingMatch(canonical: CanonicalProperty): MatchResult {
-        val allProps = propertyDao.getAllPropertiesList()
-        val normalizedCandidateAddress = normalizeAddress(canonical.address)
-
-        // 1. Match by exact normalized address
-        for (prop in allProps) {
-            if (normalizeAddress(prop.address) == normalizedCandidateAddress) {
-                return MatchResult(true, prop, "EXACT_ADDRESS")
-            }
+        // Sort by id so the lookup and any tie-breaking are fully deterministic.
+        val allProps = propertyDao.getAllPropertiesList().sortedBy { it.id }
+        if (allProps.isEmpty()) {
+            return MatchResult(
+                isMatch = false,
+                matchType = "NONE",
+                reason = "catalog is empty; the listing is new"
+            )
         }
 
-        // 2. Match by coordinates proximity (within 35 meters)
-        if (canonical.latitude != null && canonical.longitude != null) {
-            for (prop in allProps) {
-                val distanceMeters = calculateHaversineDistanceMeters(
-                    canonical.latitude, canonical.longitude,
-                    prop.latitude, prop.longitude
-                )
-                if (distanceMeters <= 35.0) {
-                    return MatchResult(true, prop, "COORDINATES")
-                }
-            }
-        }
+        val incoming = canonical.toSourcePropertyIdentity()
+        val candidates = allProps.map { it.toCanonicalPropertyIdentity() }
+        val result = identityEngine.deduplicate(incoming, candidates)
 
-        // 3. Fallback fuzzy address matching (matching street number, street name, and zip code)
-        for (prop in allProps) {
-            if (isFuzzyAddressMatch(prop.address, canonical.address, prop.zipCode, canonical.zipCode)) {
-                return MatchResult(true, prop, "FUZZY_ADDRESS")
-            }
-        }
+        return when (result.status) {
+            DeduplicationStatus.EXACT_MATCH,
+            DeduplicationStatus.CANONICAL_MATCH -> MatchResult(
+                isMatch = true,
+                existingProperty = allProps.firstOrNull { it.id == result.matchedCanonicalId },
+                matchType = result.matchMethod.toLegacyMatchType(),
+                reason = result.reason,
+                confidence = result.confidence
+            )
 
-        return MatchResult(false, null, "NONE")
+            DeduplicationStatus.POSSIBLE_MATCH,
+            DeduplicationStatus.CONFLICT -> MatchResult(
+                isMatch = false,
+                existingProperty = null,
+                matchType = result.matchMethod.toLegacyMatchType(),
+                needsReview = true,
+                reason = result.reason,
+                confidence = result.confidence
+            )
+
+            DeduplicationStatus.NEW -> MatchResult(
+                isMatch = false,
+                matchType = "NONE",
+                reason = result.reason
+            )
+        }
     }
 
-    private fun normalizeAddress(raw: String): String {
-        return raw.lowercase()
-            .replace(".", "")
-            .replace(",", "")
-            .replace(Regex("""\bstreet\b"""), "st")
-            .replace(Regex("""\bavenue\b"""), "ave")
-            .replace(Regex("""\bboulevard\b"""), "blvd")
-            .replace(Regex("""\broad\b"""), "rd")
-            .replace(Regex("""\bdrive\b"""), "dr")
-            .replace(Regex("""\blane\b"""), "ln")
-            .replace(Regex("""\bcourt\b"""), "ct")
-            .replace(Regex("""\bnorth\b"""), "n")
-            .replace(Regex("""\bsouth\b"""), "s")
-            .replace(Regex("""\beast\b"""), "e")
-            .replace(Regex("""\bwest\b"""), "w")
-            .replace(Regex("""\s+"""), " ")
-            .trim()
-    }
+    /**
+     * Maps the extraction result onto the identity signals the shared engine understands.
+     * `listingId` is the provider's own key (namespaced by [CanonicalProperty.source]); `apn` /
+     * `parcelId` identify the physical parcel; `sourceUrl` makes repeated imports of the same
+     * listing URL an idempotent exact match.
+     */
+    private fun CanonicalProperty.toSourcePropertyIdentity(): SourcePropertyIdentity =
+        SourcePropertyIdentity(
+            source = source,
+            providerListingId = listingId,
+            parcelId = apn?.takeIf { it.isNotBlank() } ?: parcelId?.takeIf { it.isNotBlank() },
+            address = street?.takeIf { it.isNotBlank() } ?: address,
+            city = city,
+            state = state,
+            postalCode = zipCode,
+            latitude = latitude,
+            longitude = longitude,
+            sourceUrl = sourceUrl.takeIf { it.isNotBlank() }
+        )
 
-    private fun isFuzzyAddressMatch(addr1: String, addr2: String, zip1: String, zip2: String): Boolean {
-        if (zip1.isNotBlank() && zip2.isNotBlank() && zip1.take(5) != zip2.take(5)) {
-            return false
-        }
-        val n1 = normalizeAddress(addr1)
-        val n2 = normalizeAddress(addr2)
-
-        val tokens1 = n1.split(" ").filter { it.length > 1 }.toSet()
-        val tokens2 = n2.split(" ").filter { it.length > 1 }.toSet()
-
-        if (tokens1.isEmpty() || tokens2.isEmpty()) return false
-        val intersection = tokens1.intersect(tokens2).size
-        val union = tokens1.union(tokens2).size
-        val jaccard = intersection.toDouble() / union.toDouble()
-
-        return jaccard >= 0.75
-    }
-
-    private fun calculateHaversineDistanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val r = 6371000.0 // Earth radius in meters
-        val dLat = Math.toRadians(lat2 - lat1)
-        val dLon = Math.toRadians(lon2 - lon1)
-        val a = sin(dLat / 2) * sin(dLat / 2) +
-                cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
-                sin(dLon / 2) * sin(dLon / 2)
-        val c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        return r * c
+    private fun IdentityMatchMethod.toLegacyMatchType(): String = when (this) {
+        IdentityMatchMethod.APN -> "APN"
+        IdentityMatchMethod.MLS_ID -> "MLS_ID"
+        IdentityMatchMethod.SOURCE_LISTING_ID -> "SOURCE_LISTING_ID"
+        IdentityMatchMethod.SOURCE_URL -> "SOURCE_URL"
+        IdentityMatchMethod.NORMALIZED_ADDRESS -> "EXACT_ADDRESS"
+        IdentityMatchMethod.COORDINATES -> "COORDINATES"
+        IdentityMatchMethod.FUZZY_ADDRESS -> "FUZZY_ADDRESS"
+        IdentityMatchMethod.NONE -> "NONE"
+        IdentityMatchMethod.CONFLICT -> "CONFLICT"
     }
 }
