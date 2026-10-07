@@ -205,9 +205,9 @@ class IdempotencyTest {
 
     @Test
     fun `reservations are exclusive`() {
-        val store: IdempotencyStore<String> = InMemoryIdempotencyStore(TestClock())
+        val store: IdempotencyStore<String> = InMemoryIdempotencyStore<String>(TestClock())
         val key = IdempotencyKey("k")
-        val record = com.example.urlintelligence.idempotency.IdempotencyRecord(
+        val record = com.example.urlintelligence.idempotency.IdempotencyRecord<String>(
             key = key,
             state = IdempotencyState.IN_FLIGHT,
             createdAtEpochMillis = 0L,

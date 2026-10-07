@@ -5,12 +5,21 @@ import com.example.urlintelligence.adapter.PropertyParseResult
 import com.example.urlintelligence.adapter.PropertySourceAdapter
 import com.example.urlintelligence.adapter.SourceFetchRequest
 import com.example.urlintelligence.adapter.SourceFetchResponse
+import com.example.urlintelligence.compliance.AccessPolicy
+import com.example.urlintelligence.compliance.AccessRequest
+import com.example.urlintelligence.compliance.AccessDecision
+import com.example.urlintelligence.fetch.FetchLimits
+import com.example.urlintelligence.fetch.ResponseGuard
+import com.example.urlintelligence.fetch.ResponseGuardResult
 import com.example.urlintelligence.failure.SourceFailure
 import com.example.urlintelligence.failure.SourceFailureClassifier
 import com.example.urlintelligence.idempotency.IdempotencyKey
 import com.example.urlintelligence.idempotency.IdempotencyRecord
 import com.example.urlintelligence.idempotency.IdempotencyState
 import com.example.urlintelligence.idempotency.IdempotencyStore
+import com.example.urlintelligence.idempotency.ImportIdempotency
+import com.example.urlintelligence.idempotency.ImportLedger
+import com.example.urlintelligence.idempotency.ImportLedgerEntry
 import com.example.urlintelligence.idempotency.InMemoryIdempotencyStore
 import com.example.urlintelligence.job.ImportJobEvent
 import com.example.urlintelligence.job.ImportJobState
@@ -49,7 +58,14 @@ data class ResolveOptions(
     /** Ignore a cached result and re-fetch (still re-reserves the idempotency key). */
     val refresh: Boolean = false,
     /** Enforce the per-source opt-in flag declared on the descriptor. */
-    val requireSourceOptIn: Boolean = true
+    val requireSourceOptIn: Boolean = true,
+    /**
+     * Fail (instead of warn) when no [AccessPolicy] is configured. Turn this on for any
+     * deployment that must prove it respects robots/access rules.
+     */
+    val requireAccessPolicy: Boolean = false,
+    /** Overrides the resolver's default fetch limits for this import. */
+    val limits: FetchLimits = FetchLimits()
 )
 
 /** Outcome of a URL import. Partial success is a first-class, usable result. */
@@ -58,9 +74,11 @@ sealed class PropertyImportResult {
     data class Success(
         val property: CanonicalProperty,
         val jobId: String,
-        val attempts: Int,
+        override val attempts: Int,
         val durationMillis: Long,
-        val warnings: List<String> = emptyList()
+        val warnings: List<String> = emptyList(),
+        /** Whether this import fetched fresh data, replayed a URL or replayed a property. */
+        val idempotency: ImportIdempotency = ImportIdempotency.FRESH
     ) : PropertyImportResult()
 
     data class Partial(
@@ -68,14 +86,15 @@ sealed class PropertyImportResult {
         val jobId: String,
         val missingFields: Set<PropertyField>,
         val warnings: List<String> = emptyList(),
-        val attempts: Int,
-        val durationMillis: Long
+        override val attempts: Int,
+        val durationMillis: Long,
+        val idempotency: ImportIdempotency = ImportIdempotency.FRESH
     ) : PropertyImportResult()
 
     data class Failure(
         val failure: SourceFailure,
         val jobId: String?,
-        val attempts: Int,
+        override val attempts: Int,
         val durationMillis: Long
     ) : PropertyImportResult()
 
@@ -92,6 +111,12 @@ sealed class PropertyImportResult {
             is Failure -> null
         }
 
+    /**
+     * Number of fetch attempts the import consumed. Declared here so callers can
+     * inspect any outcome uniformly; each variant stores its own value.
+     */
+    abstract val attempts: Int
+
     val jobIdOrNull: String?
         get() = when (this) {
             is Success -> jobId
@@ -99,12 +124,6 @@ sealed class PropertyImportResult {
             is Failure -> jobId
         }
 
-    val attempts: Int
-        get() = when (this) {
-            is Success -> attempts
-            is Partial -> attempts
-            is Failure -> attempts
-        }
 }
 
 /** Cheap, network-free inspection: what is this URL, and can we import it? */
@@ -116,7 +135,11 @@ data class UrlInspection(
     val detection: SourceDetection?,
     val adapterRegistered: Boolean,
     val requiresOptIn: Boolean,
-    val importAllowed: Boolean
+    val importAllowed: Boolean,
+    /** True when an access policy (robots/allow-list) is wired for this resolver. */
+    val accessPolicyConfigured: Boolean = false,
+    /** True when this canonical property has been imported before (property-level idempotency). */
+    val alreadyImported: Boolean = false
 )
 
 /**
@@ -148,8 +171,29 @@ class PropertyUrlResolver(
     /** null = no allow-list (all non-opt-in sources permitted). */
     private val allowedSourceIds: Set<String>? = null,
     private val random: () -> Double = { Random.nextDouble() },
-    private val idGenerator: () -> String = { UUID.randomUUID().toString() }
+    private val idGenerator: () -> String = { UUID.randomUUID().toString() },
+    /**
+     * Pre-fetch compliance gate. When null, imports proceed but the job records that no
+     * access policy was configured; `ResolveOptions.requireAccessPolicy` turns that into a
+     * hard failure for deployments that must prove compliance.
+     */
+    private val accessPolicy: AccessPolicy? = null,
+    /** Property-level idempotency; null disables "same property, different URL" reuse. */
+    private val ledger: ImportLedger<PropertyImportResult>? = null
 ) {
+
+    private val responseGuard: ResponseGuard = ResponseGuard(FetchLimits(), validator)
+
+    /**
+     * True when a compliance gate (robots/allow-list) is wired. Callers that must prove they
+     * respect access rules should refuse to run without it; see `ResolveOptions.requireAccessPolicy`.
+     */
+    val hasAccessPolicy: Boolean
+        get() = accessPolicy != null
+
+    /** True when property-level idempotency is wired. */
+    val hasImportLedger: Boolean
+        get() = ledger != null
 
     private val correlationCounter = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -173,6 +217,9 @@ class PropertyUrlResolver(
         val adapterRegistered = registry.adapterFor(detection.sourceId) != null
         val requiresOptIn = detection.descriptor?.requiresOptIn == true
         val importAllowed = adapterRegistered && (!requireSourceOptIn || !requiresOptIn || isAllowListed(detection.sourceId))
+        val canonicalId = detection.sourcePropertyId?.let { id ->
+            IdempotencyKey.canonicalPropertyId(detection.sourceId, id, url.canonical)
+        }
         return UrlInspection(
             rawUrl = rawUrl,
             isValid = true,
@@ -181,7 +228,9 @@ class PropertyUrlResolver(
             detection = detection,
             adapterRegistered = adapterRegistered,
             requiresOptIn = requiresOptIn,
-            importAllowed = importAllowed
+            importAllowed = importAllowed,
+            accessPolicyConfigured = accessPolicy != null,
+            alreadyImported = canonicalId != null && ledger?.find(canonicalId) != null
         )
     }
 
@@ -228,7 +277,7 @@ class PropertyUrlResolver(
         val keys = ArrayList<IdempotencyKey>().apply { add(rawKey) }
 
         if (!options.refresh) {
-            resultStore.get(rawKey)?.value?.let { cached -> return cached }
+            resultStore.get(rawKey)?.value?.let { cached -> return replayUrl(cached) }
         }
 
         job = advance(job, ImportJobEvent.START_VALIDATION, "validating url")
@@ -249,7 +298,7 @@ class PropertyUrlResolver(
         if (canonicalKey.value != rawKey.value) {
             keys.add(canonicalKey)
             if (!options.refresh) {
-                resultStore.get(canonicalKey)?.value?.let { cached -> return cached }
+                resultStore.get(canonicalKey)?.value?.let { cached -> return replayUrl(cached) }
             }
         }
 
@@ -289,6 +338,62 @@ class PropertyUrlResolver(
             return finishFailure(job, failure, 0, startedAt, keys)
         }
 
+        // Compliance gate, before any network activity: robots rules / opt-in decisions are
+        // never bypassed, and an unconfigured policy can be made fatal by the caller.
+        val policyWarnings = ArrayList<String>()
+        when (val decision = evaluateAccessPolicy(url, detection.sourceId, descriptor.displayName)) {
+            is AccessDecision.Denied -> {
+                val failure = SourceFailure.PolicyBlocked(
+                    sourceId = detection.sourceId,
+                    rule = "${decision.rule}: ${decision.detail}"
+                )
+                job = failJob(job, ImportJobEvent.POLICY_BLOCKED, failure, "policy denied access")
+                return finishFailure(job, failure, 0, startedAt, keys)
+            }
+            is AccessDecision.NotConfigured -> {
+                if (options.requireAccessPolicy) {
+                    val failure = SourceFailure.PolicyBlocked(
+                        sourceId = detection.sourceId,
+                        rule = "POLICY_UNCONFIGURED: no access policy is wired for this pipeline"
+                    )
+                    job = failJob(job, ImportJobEvent.POLICY_BLOCKED, failure, "policy not configured")
+                    return finishFailure(job, failure, 0, startedAt, keys)
+                }
+                policyWarnings.add(
+                    "no access policy configured; robots/access rules were not checked for " +
+                        detection.sourceId
+                )
+            }
+            is AccessDecision.Allowed -> Unit
+        }
+
+        // Property-level idempotency: the same canonical property may arrive through a
+        // different URL (share link, mobile subdomain, canonicalised variant). Reuse instead
+        // of fetching twice.
+        val canonicalPropertyId = detection.sourcePropertyId?.let { sourcePropertyId ->
+            IdempotencyKey.canonicalPropertyId(detection.sourceId, sourcePropertyId, url.canonical)
+        }
+        if (!options.refresh && canonicalPropertyId != null) {
+            val known = ledger?.find(canonicalPropertyId)
+            val knownResult = known?.value
+            if (known != null && knownResult != null) {
+                keys.forEach { key -> resultStore.release(key) }
+                val reused = when (knownResult) {
+                    is PropertyImportResult.Success ->
+                        knownResult.copy(idempotency = ImportIdempotency.REPLAYED_PROPERTY)
+                    is PropertyImportResult.Partial ->
+                        knownResult.copy(idempotency = ImportIdempotency.REPLAYED_PROPERTY)
+                    is PropertyImportResult.Failure -> knownResult
+                }
+                job = markDuplicate(
+                    job,
+                    "canonical property $canonicalPropertyId was imported at " +
+                        "${known.recordedAtEpochMillis} (job reuse)"
+                )
+                return reused
+            }
+        }
+
         job = advance(job, ImportJobEvent.SOURCE_DETECTED, detection.reason) {
             it.copy(sourceId = detection.sourceId, sourcePropertyId = detection.sourcePropertyId)
         }
@@ -316,7 +421,8 @@ class PropertyUrlResolver(
                 sourcePropertyId = detection.sourcePropertyId,
                 attempt = attempt,
                 timeoutMillis = options.timeoutMillis,
-                headers = sanitizeHeaders(options.headers)
+                headers = sanitizeHeaders(options.headers),
+                limits = options.limits
             )
             when (val response = adapter.fetch(request)) {
                 is SourceFetchResponse.Success -> AttemptOutcome.Success(response)
@@ -345,12 +451,36 @@ class PropertyUrlResolver(
             sourcePropertyId = detection.sourcePropertyId,
             attempt = job.attempt,
             timeoutMillis = options.timeoutMillis,
-            headers = sanitizeHeaders(options.headers)
+            headers = sanitizeHeaders(options.headers),
+            limits = options.limits
         )
 
-        val warnings = ArrayList<String>()
+        val warnings = ArrayList<String>(policyWarnings)
+
+        // Everything that came back is re-validated here, so an adapter (including a
+        // third-party one that implements only the interface) cannot be handed a payload the
+        // pipeline has not cleared: size, content type, redirect target, empty body.
+        val guard = guardFor(options.limits)
+        val guarded = when (val result = guard.inspect(request, response)) {
+            is ResponseGuardResult.Rejected -> {
+                job = failJob(job, ImportJobEvent.PARSE_FAILED, result.failure, "response rejected")
+                return finishFailure(job, result.failure, outcome.attempts, startedAt, keys)
+            }
+            is ResponseGuardResult.Usable -> result.inspected
+        }
+        SourceFailureClassifier.detectMetaNoindex(response.headers)?.let { noindex ->
+            job = failJob(job, ImportJobEvent.POLICY_BLOCKED, noindex, "provider asked us not to index")
+            return finishFailure(job, noindex, outcome.attempts, startedAt, keys)
+        }
+        if (guarded.redirected) {
+            warnings.add("request was redirected to ${guarded.finalUrl}")
+        }
+
         val draft = when (val parsed = adapter.parse(response, request)) {
-            is PropertyParseResult.Success -> parsed.draft
+            is PropertyParseResult.Success -> {
+                warnings.addAll(parsed.warnings)
+                parsed.draft
+            }
             is PropertyParseResult.Partial -> {
                 warnings.addAll(parsed.warnings)
                 parsed.draft
@@ -390,6 +520,9 @@ class PropertyUrlResolver(
             return finishFailure(job, failure, outcome.attempts, startedAt, keys)
         }
 
+        val changeWarning = ledgerChangeWarning(canonicalPropertyId, property.contentDigest)
+        if (changeWarning != null) warnings.add(changeWarning)
+
         val result: PropertyImportResult = if (missing.isEmpty()) {
             job = advance(
                 job,
@@ -419,6 +552,21 @@ class PropertyUrlResolver(
             )
         }
 
+        // Property-level idempotency: remember what this canonical property looked like, so a
+        // later URL that resolves to the same house can be answered without a fetch.
+        if (canonicalPropertyId != null) {
+            ledger?.record(
+                ImportLedgerEntry(
+                    canonicalId = canonicalPropertyId,
+                    sourceId = property.sourceId,
+                    canonicalUrl = property.canonicalUrl,
+                    contentDigest = property.contentDigest,
+                    recordedAtEpochMillis = clock.now(),
+                    value = result
+                )
+            )
+        }
+
         keys.forEach { key -> resultStore.complete(key, result) }
         jobStore.save(job)
         return result
@@ -426,6 +574,59 @@ class PropertyUrlResolver(
 
     private fun isAllowListed(sourceId: String): Boolean =
         allowedSourceIds?.contains(sourceId) ?: false
+
+    private fun guardFor(limits: FetchLimits): ResponseGuard =
+        if (limits == FetchLimits()) responseGuard else ResponseGuard(limits, validator)
+
+    private suspend fun evaluateAccessPolicy(
+        url: NormalizedUrl,
+        sourceId: String,
+        displayName: String
+    ): AccessDecision {
+        val policy = accessPolicy ?: return AccessDecision.NotConfigured
+        return try {
+            policy.check(
+                AccessRequest(
+                    url = url.canonical,
+                    host = url.host,
+                    path = url.path,
+                    sourceId = sourceId,
+                    displayName = displayName
+                )
+            )
+        } catch (t: Throwable) {
+            // Fail closed: a policy that cannot answer must not become an implicit allow.
+            AccessDecision.Denied(
+                com.example.urlintelligence.compliance.AccessRule.ROBOTS_UNAVAILABLE,
+                "access policy threw ${t.javaClass.simpleName}"
+            )
+        }
+    }
+
+    private fun ledgerChangeWarning(canonicalId: String?, contentDigest: String): String? {
+        if (canonicalId == null || contentDigest.isBlank()) return null
+        val known = ledger?.find(canonicalId) ?: return null
+        if (known.contentDigest.isBlank() || known.contentDigest == contentDigest) return null
+        return "source content changed since the last import of $canonicalId"
+    }
+
+    /** Stamps a cached result as a URL-level replay (the caller learns it did not fetch). */
+    private fun replayUrl(result: PropertyImportResult): PropertyImportResult = when (result) {
+        is PropertyImportResult.Success ->
+            result.copy(idempotency = ImportIdempotency.REPLAYED_URL)
+        is PropertyImportResult.Partial ->
+            result.copy(idempotency = ImportIdempotency.REPLAYED_URL)
+        is PropertyImportResult.Failure -> result
+    }
+
+    /** Records the request as a duplicate of an earlier import, without pretending to fetch. */
+    private fun markDuplicate(job: PropertyImportJob, note: String): PropertyImportJob {
+        val result = job.transition(ImportJobEvent.CANCEL, clock.now(), note)
+        return when (result) {
+            is TransitionResult.Accepted -> result.job.also { jobStore.save(it) }
+            is TransitionResult.Rejected -> job.also { jobStore.save(it) }
+        }
+    }
 
     private fun sanitizeHeaders(headers: Map<String, String>): Map<String, String> =
         headers.filterKeys { key -> key.lowercase() !in SourceFetchRequest.FORBIDDEN_HEADERS }
@@ -499,7 +700,15 @@ object PropertyUrlResolverFactory {
         allowedSourceIds: Set<String> = emptySet(),
         retryPolicy: RetryPolicy = RetryPolicy(),
         clock: Clock = Clock.SYSTEM,
-        sleeper: Sleeper = Sleeper.DEFAULT
+        sleeper: Sleeper = Sleeper.DEFAULT,
+        /**
+         * Compliance gate consulted before every fetch. Defaults to a robots.txt policy so a
+         * host that just wires a transport is compliant by default; pass
+         * [com.example.urlintelligence.compliance.AccessPolicy.PERMISSIVE_PUBLIC_WEB] only for
+         * providers you have cleared offline.
+         */
+        accessPolicy: AccessPolicy = com.example.urlintelligence.compliance.RobotsPolicy(transport),
+        ledger: ImportLedger<PropertyImportResult> = com.example.urlintelligence.idempotency.InMemoryImportLedger(clock)
     ): PropertyUrlResolver {
         val registry = SourceRegistry(
             descriptors = com.example.urlintelligence.source.KnownSources.all(),
@@ -518,7 +727,9 @@ object PropertyUrlResolverFactory {
             retryPolicy = retryPolicy,
             clock = clock,
             sleeper = sleeper,
-            allowedSourceIds = allowedSourceIds
+            allowedSourceIds = allowedSourceIds,
+            accessPolicy = accessPolicy,
+            ledger = ledger
         )
     }
 }

@@ -133,6 +133,51 @@ sealed class SourceFailure {
         override val code: String = "INCOMPLETE_DATA"
     }
 
+    /** The document is missing or too small to contain a listing (empty/blank/truncated). */
+    data class EmptyResponse(override val detail: String, val statusCode: Int? = null) : SourceFailure() {
+        override val category: FailureCategory = FailureCategory.PERMANENT
+        override val retryable: Boolean = false
+        override val code: String = "EMPTY_RESPONSE"
+    }
+
+    /** The response cannot contain a listing (binary payload, PDF, image, ...). */
+    data class UnsupportedContentType(val contentType: String, override val detail: String) : SourceFailure() {
+        override val category: FailureCategory = FailureCategory.PERMANENT
+        override val retryable: Boolean = false
+        override val code: String = "UNSUPPORTED_CONTENT_TYPE"
+    }
+
+    /** A redirect chain longer than the configured budget: treated as a loop. */
+    data class TooManyRedirects(val redirects: Int, val maxRedirects: Int) : SourceFailure() {
+        override val category: FailureCategory = FailureCategory.PERMANENT
+        override val retryable: Boolean = false
+        override val detail: String = "Followed $redirects redirects (limit $maxRedirects)"
+        override val code: String = "TOO_MANY_REDIRECTS"
+    }
+
+    /** A redirect that left the provider's host family, or pointed at a forbidden target. */
+    data class RedirectNotAllowed(override val detail: String) : SourceFailure() {
+        override val category: FailureCategory = FailureCategory.POLICY
+        override val retryable: Boolean = false
+        override val code: String = "REDIRECT_NOT_ALLOWED"
+    }
+
+    /**
+     * The page no longer matches the parser's versioned contract (markup rework, moved
+     * blobs, JavaScript-only rendering). Surfaced instead of silently importing less data.
+     */
+    data class SchemaDrift(
+        val parserId: String,
+        val parserVersion: String,
+        val level: String,
+        override val detail: String,
+        val missingProbes: List<String> = emptyList()
+    ) : SourceFailure() {
+        override val category: FailureCategory = FailureCategory.PERMANENT
+        override val retryable: Boolean = false
+        override val code: String = "SCHEMA_DRIFT"
+    }
+
     data class Conflict(override val detail: String) : SourceFailure() {
         override val category: FailureCategory = FailureCategory.TRANSIENT
         override val retryable: Boolean = false
@@ -155,7 +200,9 @@ enum class BlockReason {
     CAPTCHA,
     BOT_WALL,
     GEO_RESTRICTED,
-    LOGIN_REQUIRED
+    LOGIN_REQUIRED,
+    CONSENT_WALL,
+    NOINDEX_DIRECTIVE
 }
 
 /** Maps transport-level signals into the typed taxonomy. */
@@ -163,6 +210,7 @@ object SourceFailureClassifier {
 
     fun fromThrowable(throwable: Throwable): SourceFailure = when (throwable) {
         is SocketTimeoutException -> SourceFailure.Timeout(-1L)
+        is java.util.concurrent.TimeoutException -> SourceFailure.Timeout(-1L)
         is UnknownHostException -> SourceFailure.Network("host could not be resolved", throwable.javaClass.simpleName)
         is IOException -> SourceFailure.Network(throwable.message ?: "i/o failure", throwable.javaClass.simpleName)
         is InterruptedException -> SourceFailure.Network("request interrupted", throwable.javaClass.simpleName)
@@ -181,17 +229,58 @@ object SourceFailureClassifier {
         }
     }
 
-    /** Detects bot walls / CAPTCHA pages that arrive with a 200 status. */
+    private val CAPTCHA_SIGNALS = listOf(
+        "are you a human", "verify you are human", "captcha", "recaptcha",
+        "px-captcha", "hcaptcha", "cf-challenge", "checking your browser",
+        "access denied", "request blocked", "unusual traffic", "bot detection"
+    )
+
+    private val LOGIN_SIGNALS = listOf(
+        "sign in to continue", "log in to continue", "please log in", "please sign in",
+        "create an account to view", "members only", "authentication required"
+    )
+
+    private val CONSENT_SIGNALS = listOf(
+        "before you continue", "consent to the use of cookies", "cookie consent",
+        "we value your privacy", "manage your cookie preferences"
+    )
+
+    /**
+     * Detects bot walls / CAPTCHA / login / consent pages that arrive with a 200 status.
+     *
+     * These are *never* parsed as listings and never retried: the pipeline does not solve
+     * CAPTCHAs, does not authenticate and does not click through consent walls.
+     */
     fun detectSoftBlock(statusCode: Int, body: String): SourceFailure? {
         if (statusCode != 200) return null
         if (body.length > 2_000_000) return null
         val lowered = body.lowercase()
-        val signals = listOf(
-            "are you a human", "verify you are human", "captcha", "recaptcha",
-            "px-captcha", "access denied", "request blocked", "unusual traffic"
-        )
-        return if (signals.any { lowered.contains(it) }) {
-            SourceFailure.Blocked(BlockReason.CAPTCHA, "anti-bot page served with HTTP 200")
+        return when {
+            CAPTCHA_SIGNALS.any { lowered.contains(it) } ->
+                SourceFailure.Blocked(BlockReason.CAPTCHA, "anti-bot page served with HTTP 200")
+            LOGIN_SIGNALS.any { lowered.contains(it) } ->
+                SourceFailure.AuthRequired("login wall served with HTTP 200")
+            CONSENT_SIGNALS.any { lowered.contains(it) } ->
+                SourceFailure.Blocked(BlockReason.CONSENT_WALL, "consent interstitial served with HTTP 200")
+            else -> null
+        }
+    }
+
+    /**
+     * Honors `X-Robots-Tag: noindex`/`noarchive`: a document the provider asked not to be
+     * indexed or cached is not imported.
+     */
+    fun detectMetaNoindex(headers: Map<String, String>): SourceFailure? {
+        val value = headers.entries
+            .firstOrNull { it.key.equals("x-robots-tag", ignoreCase = true) }
+            ?.value
+            ?.lowercase()
+            ?: return null
+        return if (value.contains("noindex") || value.contains("noarchive")) {
+            SourceFailure.Blocked(
+                BlockReason.NOINDEX_DIRECTIVE,
+                "response carried X-Robots-Tag: $value"
+            )
         } else null
     }
 

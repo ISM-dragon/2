@@ -141,8 +141,9 @@ class InMemoryIdempotencyStore<T>(
         )
     }
 
-    override fun release(key: IdempotencyKey) = synchronized(lock) {
+    override fun release(key: IdempotencyKey): Unit = synchronized(lock) {
         records.remove(key.value)
+        Unit
     }
 
     override fun size(): Int = synchronized(lock) {

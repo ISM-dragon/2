@@ -1,7 +1,9 @@
 package com.example.urlintelligence.adapter
 
 import com.example.urlintelligence.failure.SourceFailure
+import com.example.urlintelligence.fetch.FetchLimits
 import com.example.urlintelligence.model.PropertyDraft
+import com.example.urlintelligence.provenance.FetchOrigin
 import com.example.urlintelligence.source.SourceDescriptor
 
 /** Everything an adapter needs to perform one fetch. Carries no credentials by design. */
@@ -12,7 +14,9 @@ data class SourceFetchRequest(
     val attempt: Int = 1,
     val timeoutMillis: Long = 15_000L,
     /** Non-sensitive headers only (e.g. Accept-Language). Auth is never part of this layer. */
-    val headers: Map<String, String> = emptyMap()
+    val headers: Map<String, String> = emptyMap(),
+    /** Hard limits the transport must enforce (timeouts, response size, redirects). */
+    val limits: FetchLimits = FetchLimits()
 ) {
     init {
         require(requestUrl.isNotBlank()) { "requestUrl must not be blank" }
@@ -37,8 +41,24 @@ sealed class SourceFetchResponse {
         val contentType: String?,
         val finalUrl: String,
         val fetchedAtEpochMillis: Long,
-        val headers: Map<String, String> = emptyMap()
-    ) : SourceFetchResponse()
+        val headers: Map<String, String> = emptyMap(),
+        /** Bytes the transport actually read; -1 when unreported (falls back to body length). */
+        val reportedByteSize: Int = -1,
+        /** Number of redirects the transport followed to reach [finalUrl]. */
+        val redirectCount: Int = 0,
+        /**
+         * Where this document came from. Only [FetchOrigin.LIVE_NETWORK] (reported by a
+         * transport that really performed the request) can produce live-verified fields.
+         */
+        val origin: FetchOrigin = FetchOrigin.UNSPECIFIED,
+        /** Digest of the raw document, when the transport computed one. */
+        val documentDigest: String? = null
+    ) : SourceFetchResponse() {
+
+        /** Response size used by the guard: the reported byte count, or the body length. */
+        val byteSize: Int
+            get() = if (reportedByteSize >= 0) reportedByteSize else body.length
+    }
 
     data class Failure(val failure: SourceFailure) : SourceFetchResponse()
 }
@@ -49,7 +69,11 @@ interface PropertyHttpTransport {
 }
 
 sealed class PropertyParseResult {
-    data class Success(val draft: PropertyDraft) : PropertyParseResult()
+    data class Success(
+        val draft: PropertyDraft,
+        /** Non-fatal notes (redirects followed, schema drift, ...) that must reach the caller. */
+        val warnings: List<String> = emptyList()
+    ) : PropertyParseResult()
     data class Partial(val draft: PropertyDraft, val warnings: List<String>) : PropertyParseResult()
     data class Failure(val failure: SourceFailure) : PropertyParseResult()
 

@@ -1,0 +1,7 @@
+User-agent: *
+Disallow: /*.json$
+Disallow: /photos/
+Allow: /photos/listing-*
+
+User-agent: RealEstateAI
+Disallow: /homedetails/

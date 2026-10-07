@@ -6,6 +6,7 @@ import com.example.urlintelligence.adapter.SourceFetchRequest
 import com.example.urlintelligence.adapter.SourceFetchResponse
 import com.example.urlintelligence.failure.SourceFailure
 import com.example.urlintelligence.model.PropertyDraft
+import com.example.urlintelligence.provenance.FetchOrigin
 import com.example.urlintelligence.retry.Clock
 import com.example.urlintelligence.retry.Sleeper
 import com.example.urlintelligence.source.SourceDescriptor
@@ -42,15 +43,6 @@ class TestClock(var now: Long = 1_700_000_000_000L) : Clock {
     }
 }
 
-/** Sleeper that records delays instead of waiting. */
-class RecordingSleeper : Sleeper {
-    val delays = mutableListOf<Long>()
-
-    override suspend fun delay(millis: Long) {
-        delays += millis
-    }
-}
-
 /**
  * Scriptable transport.
  *
@@ -63,7 +55,19 @@ class FakeTransport(
     private val statuses: List<Int> = listOf(200),
     private val failures: List<SourceFailure?> = listOf(null),
     private val finalUrls: List<String>? = null,
-    private val headers: Map<String, String> = emptyMap()
+    private val headers: Map<String, String> = emptyMap(),
+    /**
+     * Origin reported to the pipeline. Defaults to [FetchOrigin.REPLAYED]: a scripted
+     * transport must never be able to produce live-verified data.
+     */
+    private val origin: FetchOrigin = FetchOrigin.REPLAYED,
+    /** Overrides the body content type (defaults to text/html). */
+    private val contentType: String? = "text/html",
+    private val redirectCount: Int = 0,
+    /** Reported wire size; -1 lets the pipeline fall back to the body length. */
+    private val reportedByteSize: Int = -1,
+    /** Bodies keyed by request URL, taking precedence over [bodies] when present. */
+    private val bodiesByUrl: Map<String, String> = emptyMap()
 ) : PropertyHttpTransport {
 
     val requests: MutableList<SourceFetchRequest> = mutableListOf()
@@ -76,7 +80,8 @@ class FakeTransport(
 
         val status = if (index < statuses.size) statuses[index] else statuses.lastOrNull() ?: 200
         val callIndex = requests.size - 1
-        val body = if (callIndex < bodies.size) bodies[callIndex] else bodies.lastOrNull() ?: ""
+        val body = bodiesByUrl[request.requestUrl]
+            ?: if (callIndex < bodies.size) bodies[callIndex] else bodies.lastOrNull() ?: ""
         val finalUrl = finalUrls?.let { if (index < it.size) it[index] else it.lastOrNull() }
             ?: request.requestUrl
 
@@ -88,10 +93,13 @@ class FakeTransport(
         return SourceFetchResponse.Success(
             statusCode = status,
             body = body,
-            contentType = "text/html",
+            contentType = contentType,
             finalUrl = finalUrl,
             fetchedAtEpochMillis = 1_700_000_000_000L,
-            headers = headers
+            headers = headers,
+            reportedByteSize = reportedByteSize,
+            redirectCount = redirectCount,
+            origin = origin
         )
     }
 }

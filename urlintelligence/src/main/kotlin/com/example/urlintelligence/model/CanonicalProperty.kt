@@ -1,6 +1,7 @@
 package com.example.urlintelligence.model
 
 import com.example.urlintelligence.provenance.ProvenanceMap
+import com.example.urlintelligence.provenance.VerificationSummary
 
 /** Physical type of the asset, normalized across sources. */
 enum class CanonicalPropertyType {
@@ -136,8 +137,26 @@ data class CanonicalProperty(
     val fetchedAtEpochMillis: Long = 0L,
     val completeness: CompletenessReport,
     val provenance: ProvenanceMap,
-    val warnings: List<String> = emptyList()
+    val warnings: List<String> = emptyList(),
+    /**
+     * How well this record is verified: parser-verified (a versioned parser matched the
+     * document) vs live-fetch-verified (the document was fetched from the provider now).
+     * Never claims more than was actually performed.
+     */
+    val verification: VerificationSummary = VerificationSummary.NONE,
+    /** Digest of the extracted content, used for property-level idempotency. */
+    val contentDigest: String = "",
+    /** `parserId@version` values that produced fields on this record. */
+    val parserVersions: List<String> = emptyList()
 ) {
+
+    /** True only when a live fetch against the provider produced data for this record. */
+    val isLiveVerified: Boolean
+        get() = verification.liveVerified
+
+    /** True when a versioned parser matched the source document. */
+    val isParserVerified: Boolean
+        get() = verification.parserVerified
 
     val pricePerSqFtUsd: Double?
         get() {
