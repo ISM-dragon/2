@@ -9,6 +9,8 @@ import com.example.data.security.CryptoManager
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.Assert.assertThrows
+import com.example.data.security.CryptoDecryptionException
 
 class StrictSecurityAndIntegrationTest {
 
@@ -36,8 +38,10 @@ class StrictSecurityAndIntegrationTest {
 
         // 5. Corrupt ciphertext handling
         val corrupted = encrypted1.substring(0, encrypted1.length - 8) + "AAAA"
-        val corruptResult = CryptoManager.decrypt(corrupted)
-        assertEquals("Decryption of corrupted ciphertext must safely fail to empty string", "", corruptResult)
+        assertNull("Corrupt ciphertext must be distinguishable from valid empty plaintext", CryptoManager.decryptOrNull(corrupted))
+        assertThrows(CryptoDecryptionException::class.java) {
+            CryptoManager.decrypt(corrupted)
+        }
     }
 
     @Test

@@ -88,11 +88,12 @@ object UrlSensitiveParameters {
     private val EXACT = setOf(
         "token", "access_token", "id_token", "refresh_token", "auth", "authorization", "apikey", "api_key",
         "key", "secret", "signature", "sig", "session", "sessionid", "sid", "password", "pwd", "otp",
-        "code", "sharedid", "authid", "credential"
+        "code", "sharedid", "authid", "credential", "email", "phone", "mobile", "user", "username",
+        "user_id", "userid", "customer_id"
     )
 
     fun isSensitive(name: String): Boolean {
-        val lowered = name.lowercase(Locale.US)
+        val lowered = name.lowercase(Locale.US).replace('-', '_')
         return EXACT.contains(lowered) ||
             lowered.endsWith("_token") ||
             lowered.endsWith("token") ||

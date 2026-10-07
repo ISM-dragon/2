@@ -199,7 +199,7 @@ class AutomationEngine(
         automationDao.setEnabled(true, now)
         automationDao.updateProgress("Automation armed - work queued", "", "ARMED", now)
         _currentTaskDescription.value = "Automation armed (durable worker scheduled)"
-        audit.info("START", "Autonomous intelligence cycle armed by operator (trigger=$trigger)", correlationId = trigger)
+        audit.info("START", "Automation cycle armed.", correlationId = trigger)
 
         val rules = automationDao.getRules() ?: AutomationRuleEntity()
         scheduler.schedulePeriodic(rules.scanIntervalMinutes)
@@ -225,8 +225,8 @@ class AutomationEngine(
         fallbackJob = null
         _status.value = AutomationStatus.STOPPED
         _currentTaskDescription.value = "Automation Stopped: $reason"
-        closeActiveRuns(AutomationRunStatus.STOPPED, reason)
-        audit.warn("STOP", "Automation halted: $reason")
+        closeActiveRuns(AutomationRunStatus.STOPPED)
+        audit.warn("STOP", "Automation halted by operator.")
     }
 
     /**
@@ -246,8 +246,8 @@ class AutomationEngine(
         fallbackJob = null
         _status.value = AutomationStatus.KILLED
         _currentTaskDescription.value = "GLOBAL KILL SWITCH ENGAGED - $reason"
-        closeActiveRuns(AutomationRunStatus.KILLED, reason)
-        audit.error("KILL_SWITCH", "EMERGENCY ABORT: $reason")
+        closeActiveRuns(AutomationRunStatus.KILLED)
+        audit.error("KILL_SWITCH", "Emergency stop engaged.")
     }
 
     /** Clears the latch. Does not resume anything: the operator must arm automation again. */
@@ -259,7 +259,7 @@ class AutomationEngine(
         _killSwitch.value = KillSwitchState(false, null, null)
         _status.value = AutomationStatus.STOPPED
         _currentTaskDescription.value = "Kill switch cleared. Automation remains stopped until armed."
-        audit.warn("KILL_SWITCH", "Kill switch cleared by operator '$operatorName'; automation stays stopped")
+        audit.warn("KILL_SWITCH", "Kill switch cleared; automation remains stopped.")
     }
 
     /**
@@ -478,7 +478,7 @@ class AutomationEngine(
             AutomationRunEntity(
                 startTime = now,
                 status = AutomationRunStatus.RUNNING,
-                summary = "Cycle in progress (trigger=${request.trigger})",
+                summary = "Cycle in progress.",
                 trigger = request.trigger,
                 correlationId = request.correlationId,
                 workerRunAttempt = request.workerRunAttempt,
@@ -528,31 +528,31 @@ class AutomationEngine(
             CycleOutcome.Completed(runId, stats)
         } catch (halt: AutomationHaltException) {
             val status = if (halt.killSwitch) AutomationRunStatus.KILLED else AutomationRunStatus.STOPPED
-            closeRun(runId, status, "Cycle halted: ${halt.message}", halt.message)
-            audit.warn("CYCLE_HALT", "Cycle halted: ${halt.message}", runId = runId, correlationId = request.correlationId)
-            if (halt.killSwitch) CycleOutcome.Killed(runId, halt.message ?: "kill switch") else CycleOutcome.Skipped(halt.message ?: "stopped")
+            val safeReason = if (halt.killSwitch) "Emergency stop engaged." else "Cycle stopped by operator."
+            closeRun(runId, status, "Cycle halted.", safeReason)
+            audit.warn("CYCLE_HALT", "Cycle halted by operator or emergency stop.", runId = runId, correlationId = request.correlationId)
+            if (halt.killSwitch) CycleOutcome.Killed(runId, safeReason) else CycleOutcome.Skipped(safeReason)
         } catch (cancelled: CancellationException) {
             closeRun(runId, AutomationRunStatus.STOPPED, "Cycle cancelled", "Cancelled by operator or scheduler")
             audit.warn("CYCLE_CANCELLED", "Cycle cancelled; jobs stay durable and will resume", runId = runId)
             throw cancelled
         } catch (error: Throwable) {
             val kind = FailureClassifier.classify(error)
-            val message = error.message ?: error.javaClass.simpleName
+            val safeMessage = "Cycle failed ($kind). Review the affected job and configuration."
             audit.error(
                 "CYCLE_FAILURE",
-                "Cycle failed (kind=$kind): $message",
+                safeMessage,
                 runId = runId,
                 correlationId = request.correlationId
             )
-            automationDao.registerFailure(message, clock.now())
-            val runStatus = if (kind == FailureKind.RETRYABLE) AutomationRunStatus.ERROR else AutomationRunStatus.ERROR
-            closeRun(runId, runStatus, "Cycle failed ($kind): $message", message)
+            automationDao.registerFailure(safeMessage, clock.now())
+            closeRun(runId, AutomationRunStatus.ERROR, safeMessage, safeMessage)
             _status.value = AutomationStatus.ERROR
-            _currentTaskDescription.value = "Cycle error ($kind): $message"
+            _currentTaskDescription.value = safeMessage
             if (kind == FailureKind.RETRYABLE) {
-                CycleOutcome.Retryable(runId, message)
+                CycleOutcome.Retryable(runId, safeMessage)
             } else {
-                CycleOutcome.Terminal(runId, message)
+                CycleOutcome.Terminal(runId, safeMessage)
             }
         } finally {
             heartbeat.cancel()
@@ -670,7 +670,7 @@ class AutomationEngine(
             if (result.outcome == ImportOutcome.SKIPPED) {
                 audit.info(
                     "PROPERTY_SKIPPED",
-                    "Skipped duplicate record: ${result.reason}",
+                    "Skipped a duplicate or already-known property record.",
                     runId = runId
                 )
                 return null
@@ -707,7 +707,7 @@ class AutomationEngine(
         automationDao.insertOrUpdateJob(job)
         audit.info(
             "JOB_CREATED",
-            "[${job.jobId}] tracking ${bundle.property.address} (${bundle.property.sourceType})",
+            "Automation job created for a discovered property.",
             runId = runId,
             jobId = job.jobId
         )
@@ -809,11 +809,10 @@ class AutomationEngine(
             doubleCheckKillSwitch()
             val analysis = financialRepository.runAnalysis(job.propertyId)
             ledger.markSucceeded(AutomationEffect.ANALYZE_PROPERTY, job.propertyId, job.jobId, runId, "ANALYSIS")
-            automationDao.registerSuccess("Analyzed ${job.propertyAddress}", clock.now())
+            automationDao.registerSuccess("Financial analysis completed.", clock.now())
             audit.success(
                 "ANALYSIS_COMPLETED",
-                "[${job.jobId}] Underwrote ${job.propertyAddress}: NOI ${analysis.noiAnnual.toInt()}, " +
-                    "cash flow ${analysis.monthlyCashFlow.toInt()}/mo, cap ${String.format("%.1f", analysis.capRate)}%",
+                "Financial analysis completed.",
                 runId = runId,
                 jobId = job.jobId,
                 correlationId = correlationId
@@ -873,11 +872,10 @@ class AutomationEngine(
                 val transitioned = JobStateMachine.transition(qualifying, JobState.QUALIFIED, clock.now(), buildRetryPolicy(rules), random = random)
                 val persisted = persistTransition(qualifying, transitioned.job, runId, correlationId)
                 logTransition(qualifying, transitioned.job, persisted, "deal qualified (score ${evaluation.score})", runId, correlationId)
-                if (persisted != null) automationDao.registerSuccess("Qualified ${job.propertyAddress}", clock.now())
+                if (persisted != null) automationDao.registerSuccess("Deal qualified.", clock.now())
                 audit.success(
                     "QUALIFICATION_RESULT",
-                    "[${job.jobId}] DEAL QUALIFIED: ${job.propertyAddress} (score ${evaluation.score}/100, " +
-                        "suggested ${evaluation.suggestedOfferPrice.toInt()})",
+                    "Deal criteria passed.",
                     runId = runId,
                     jobId = job.jobId,
                     correlationId = correlationId
@@ -898,7 +896,7 @@ class AutomationEngine(
                 logTransition(qualifying, transitioned.job, persisted, "deal disqualified", runId, correlationId)
                 audit.info(
                     "QUALIFICATION_RESULT",
-                    "[${job.jobId}] DISQUALIFIED: ${job.propertyAddress} - $reason",
+                    "Deal criteria were not met.",
                     runId = runId,
                     jobId = job.jobId,
                     correlationId = correlationId
@@ -936,7 +934,7 @@ class AutomationEngine(
             if (persisted != null) {
                 audit.info(
                     "OFFER_REUSED",
-                    "[${job.jobId}] reusing existing offer ${existingOffer.id} (${existingOffer.status}) - no regeneration",
+                    "Existing offer reused without regeneration.",
                     runId = runId,
                     jobId = job.jobId,
                     correlationId = correlationId
@@ -1020,16 +1018,16 @@ class AutomationEngine(
             )
             val persisted = persistTransition(generating, transitioned.job, runId, correlationId)
             if (persisted != null) {
-                automationDao.registerSuccess("Generated offer ${offer.id}", clock.now())
-                audit.success("OFFER_GENERATED", "[${job.jobId}] offer ${offer.id} created for ${job.propertyAddress}", runId, job.jobId, correlationId)
-                audit.success("PDF_GENERATED", "PDF agreement generated and validated for offer ${offer.id}", runId, job.jobId, correlationId)
+                automationDao.registerSuccess("Offer generated.", clock.now())
+                audit.success("OFFER_GENERATED", "Offer generated successfully.", runId, job.jobId, correlationId)
+                audit.success("PDF_GENERATED", "Offer PDF generated and validated.", runId, job.jobId, correlationId)
             }
             logTransition(generating, transitioned.job, persisted, "offer persisted", runId, correlationId)
             StepResult(persisted ?: generating, advanced = persisted != null, outcome = JobOutcome.skipped(offersCreated = 1))
         } catch (halt: AutomationHaltException) {
             throw halt
         } catch (error: Throwable) {
-            ledger.markFailed(AutomationEffect.GENERATE_OFFER, job.propertyId, job.jobId, runId, error.message)
+            ledger.markFailed(AutomationEffect.GENERATE_OFFER, job.propertyId, job.jobId, runId, "Offer generation failed.")
             StepResult(failStep(generating, error, AutomationSteps.GENERATE_OFFER, rules, runId, correlationId), advanced = false, outcome = JobOutcome.skipped(failed = 1))
         }
     }
@@ -1078,7 +1076,7 @@ class AutomationEngine(
                 )
                 val persisted = persistTransition(validating, transitioned.job, runId, correlationId)
                 logTransition(validating, transitioned.job, persisted, "delivery blocked: $reason", runId, correlationId)
-                audit.warn("VALIDATION_BLOCKED", "[${job.jobId}] offer $offerId blocked: $reason", runId, job.jobId, correlationId)
+                audit.warn("VALIDATION_BLOCKED", "Offer blocked by pre-send validation.", runId, job.jobId, correlationId)
                 StepResult(persisted ?: validating, advanced = false, outcome = JobOutcome.skipped(blocked = true))
             } else {
                 val transitioned = JobStateMachine.transition(validating, JobState.SENDING, clock.now(), buildRetryPolicy(rules), random = random)
@@ -1157,10 +1155,10 @@ class AutomationEngine(
                 )
                 val persisted = persistTransition(job, transitioned.job, runId, correlationId)
                 if (persisted != null) {
-                    automationDao.registerSuccess("Sent offer $offerId", clock.now())
+                    automationDao.registerSuccess("Offer sent via Gmail.", clock.now())
                     audit.success(
                         "GMAIL_SENT",
-                        "[${job.jobId}] offer $offerId sent to ${job.recipientEmail ?: offer?.recipientEmail ?: "recipient"}",
+                        "Offer delivery acknowledged by Gmail.",
                         runId,
                         job.jobId,
                         correlationId
@@ -1169,15 +1167,14 @@ class AutomationEngine(
                 logTransition(job, transitioned.job, persisted, "offer transmitted", runId, correlationId)
                 StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped(sent = 1))
             } else {
-                val refreshed = offerRepository.findOffer(offerId)
-                val errorText = refreshed?.lastError ?: "Gmail delivery failed or rejected."
-                ledger.markFailed(AutomationEffect.SEND_OFFER, offerId, job.jobId, runId, errorText)
-                StepResult(failStep(job, RuntimeException(errorText), AutomationSteps.SEND_OFFER, rules, runId, correlationId), advanced = false, outcome = JobOutcome.skipped(failed = 1))
+                val safeError = "Gmail delivery failed or rejected."
+                ledger.markFailed(AutomationEffect.SEND_OFFER, offerId, job.jobId, runId, safeError)
+                StepResult(failStep(job, RuntimeException(safeError), AutomationSteps.SEND_OFFER, rules, runId, correlationId), advanced = false, outcome = JobOutcome.skipped(failed = 1))
             }
         } catch (halt: AutomationHaltException) {
             throw halt
         } catch (error: Throwable) {
-            ledger.markFailed(AutomationEffect.SEND_OFFER, offerId, job.jobId, runId, error.message)
+            ledger.markFailed(AutomationEffect.SEND_OFFER, offerId, job.jobId, runId, "Gmail delivery failed.")
             StepResult(failStep(job, error, AutomationSteps.SEND_OFFER, rules, runId, correlationId), advanced = false, outcome = JobOutcome.skipped(failed = 1))
         }
     }
@@ -1268,10 +1265,11 @@ class AutomationEngine(
             return StepResult(job, advanced = false, outcome = JobOutcome.skipped())
         }
         val persisted = persistTransition(job, outcome.job, runId, correlationId)
-        logTransition(job, outcome.job, persisted, "retry due; resuming ${job.failedStep ?: target.name}", runId, correlationId)
+        val resumeStep = job.failedStep?.takeIf { it.matches(Regex("[A-Z0-9_]{1,64}")) } ?: target.name
+        logTransition(job, outcome.job, persisted, "retry due; resuming $resumeStep", runId, correlationId)
         audit.info(
             "RETRY_RESUMED",
-            "[${job.jobId}] attempt ${job.attempts + 1}/${job.maxRetries} resuming ${job.failedStep ?: target.name}",
+            "Retry attempt ${job.attempts + 1}/${job.maxRetries} resumed for $resumeStep.",
             runId,
             job.jobId,
             correlationId
@@ -1318,7 +1316,7 @@ class AutomationEngine(
                 automationDao.insertOrUpdateJob(successor)
                 audit.warn(
                     "OPERATOR_RETRY",
-                    "[$jobId] was ${state.name}; created successor job ${successor.jobId} instead of reviving a terminal job ($operatorName)",
+                    "Terminal job re-queued as a successor job.",
                     jobId = successor.jobId
                 )
                 true
@@ -1340,7 +1338,7 @@ class AutomationEngine(
                 if (persisted != null) {
                     audit.warn(
                         "OPERATOR_RETRY",
-                        "[$jobId] retried by $operatorName: ${job.state()} -> ${outcome.job.state()}",
+                        "Job retry requested by operator: ${job.state()} -> ${outcome.job.state()}.",
                         jobId = jobId
                     )
                     scheduler.enqueueImmediateCycle(CycleTrigger.OPERATOR_NOW)
@@ -1364,7 +1362,7 @@ class AutomationEngine(
         if (!outcome.applied) return false
         val persisted = persistTransition(job, outcome.job, runId = null, correlationId = "OPERATOR_CANCEL")
         if (persisted != null) {
-            audit.warn("OPERATOR_CANCEL", "[$jobId] cancelled by $operatorName", jobId = jobId)
+            audit.warn("OPERATOR_CANCEL", "Job cancelled by operator.", jobId = jobId)
         }
         return persisted != null
     }
@@ -1432,7 +1430,7 @@ class AutomationEngine(
         correlationId: String
     ): AutomationJobEntity {
         val kind = FailureClassifier.classify(error)
-        val message = error.message ?: error.javaClass.simpleName
+        val message = safeFailureMessage(step, kind)
         val target = when (kind) {
             FailureKind.BLOCKED -> JobState.BLOCKED
             FailureKind.TERMINAL -> JobState.FAILED_TERMINAL
@@ -1467,6 +1465,16 @@ class AutomationEngine(
         return result
     }
 
+    private fun safeFailureMessage(step: String, kind: FailureKind): String {
+        val safeStep = step.takeIf { it.matches(Regex("[A-Z0-9_]{1,64}")) } ?: "AUTOMATION_STEP"
+        return when (kind) {
+            FailureKind.BLOCKED -> "$safeStep was blocked by validation or configuration."
+            FailureKind.TERMINAL -> "$safeStep failed validation."
+            FailureKind.CANCELLED -> "$safeStep was cancelled."
+            FailureKind.RETRYABLE -> "$safeStep failed; a bounded retry may be scheduled."
+        }
+    }
+
     private suspend fun deriveEvaluation(propertyId: String, rules: AutomationRuleEntity): QualificationEvaluation? {
         val property = propertyDao.getPropertyById(propertyId) ?: return null
         val analysis = runCatching { financialRepository.runAnalysis(propertyId) }.getOrNull() ?: return null
@@ -1485,7 +1493,7 @@ class AutomationEngine(
         }
     }
 
-    private suspend fun closeActiveRuns(status: String, reason: String) {
+    private suspend fun closeActiveRuns(status: String) {
         withContext(NonCancellable) {
             val now = clock.now()
             for (run in automationDao.getRunsByStatus(AutomationRunStatus.RUNNING)) {
@@ -1493,8 +1501,8 @@ class AutomationEngine(
                     runId = run.id,
                     status = status,
                     endTime = now,
-                    summary = "Closed by operator: $reason",
-                    failureReason = reason
+                    summary = if (status == AutomationRunStatus.KILLED) "Closed by emergency stop." else "Closed by operator.",
+                    failureReason = if (status == AutomationRunStatus.KILLED) "Emergency stop engaged." else "Cycle stopped by operator."
                 )
             }
         }
@@ -1532,7 +1540,7 @@ class AutomationEngine(
             val outcome = runCatching { executeCycle(CycleRequest(trigger = trigger)) }
             outcome.exceptionOrNull()?.let { error ->
                 if (error !is CancellationException) {
-                    audit.error("FALLBACK_CYCLE", "In-process fallback cycle failed: ${error.message}")
+                    audit.error("FALLBACK_CYCLE", "In-process fallback cycle failed.")
                 }
             }
         }

@@ -13,7 +13,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.Authenticator
+import okhttp3.CookieJar
 import okhttp3.FormBody
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -21,6 +25,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.net.Proxy
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -60,12 +65,24 @@ data class GmailSendResult(
 
 class GmailService(
     private val configRepository: ConfigRepository,
-    private val httpClient: OkHttpClient = defaultHttpClient(),
+    httpClient: OkHttpClient = defaultHttpClient(),
     private val gmailSendUrl: String = GMAIL_SEND_URL,
     private val oauthTokenUrl: String = OAUTH_TOKEN_URL,
     private val clock: () -> Long = System::currentTimeMillis,
     private val oauthClientIdProvider: () -> String? = { configRepository.getOAuthClientId() }
 ) : GmailSender {
+    /** Credentials are sent only to fixed HTTPS endpoints, with redirects, cookies, proxies and
+     * automatic authenticators disabled even if a caller injects a permissive client. */
+    private val safeHttpClient = httpClient.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .cookieJar(CookieJar.NO_COOKIES)
+        .authenticator(Authenticator.NONE)
+        .proxyAuthenticator(Authenticator.NONE)
+        .proxy(Proxy.NO_PROXY)
+        .retryOnConnectionFailure(false)
+        .build()
+
     /**
      * A single-flight lock shared by proactive refreshes, 401 recovery, and the Settings action.
      * After acquiring it, a caller re-reads storage and uses a token another caller just refreshed.
@@ -145,8 +162,8 @@ class GmailService(
                 idempotencyKey = sendKey,
                 nowMillis = clock()
             )
-        } catch (e: IllegalArgumentException) {
-            return@withContext validationFailure(e.message ?: "Email headers are invalid.")
+        } catch (_: IllegalArgumentException) {
+            return@withContext validationFailure("Email headers are invalid.")
         }
 
         configRepository.updateGmailAuthStatus(GmailAuthStatus.SENDING, null)
@@ -240,6 +257,13 @@ class GmailService(
 
     private suspend fun refreshAccessTokenLocked(config: GmailConfigurationEntity): GmailConfigurationEntity? {
         val refreshToken = config.refreshToken
+        if (!isTrustedGoogleEndpoint(oauthTokenUrl, OAUTH_TOKEN_HOST, OAUTH_TOKEN_PATH)) {
+            configRepository.updateGmailAuthStatus(
+                GmailAuthStatus.FAILED,
+                "Google OAuth token endpoint configuration is invalid."
+            )
+            return null
+        }
         if (refreshToken.isNullOrBlank()) {
             configRepository.updateGmailAuthStatus(
                 GmailAuthStatus.AUTH_EXPIRED,
@@ -268,8 +292,8 @@ class GmailService(
                 .post(body)
                 .build()
 
-            httpClient.newCall(request).execute().use { response ->
-                val responseText = response.body?.string().orEmpty()
+            safeHttpClient.newCall(request).execute().use { response ->
+                val responseText = if (response.isSuccessful) response.body?.string().orEmpty() else ""
                 if (!response.isSuccessful) {
                     // Do not persist Google's raw response body: OAuth responses can echo credentials.
                     configRepository.updateGmailAuthStatus(
@@ -337,6 +361,13 @@ class GmailService(
         mimeMessage: ByteArray,
         idempotencyKey: String
     ): GmailSendResult {
+        if (!isTrustedGoogleEndpoint(gmailSendUrl, GMAIL_SEND_HOST, GMAIL_SEND_PATH)) {
+            return GmailSendResult(
+                success = false,
+                error = "Gmail send endpoint configuration is invalid.",
+                failureKind = GmailFailureKind.VALIDATION
+            )
+        }
         val jsonPayload = JSONObject().put(
             "raw",
             Base64.encodeToString(
@@ -357,8 +388,8 @@ class GmailService(
             .build()
 
         return try {
-            httpClient.newCall(request).execute().use { response ->
-                val responseText = response.body?.string().orEmpty()
+            safeHttpClient.newCall(request).execute().use { response ->
+                val responseText = if (response.isSuccessful) response.body?.string().orEmpty() else ""
                 if (response.isSuccessful) {
                     val messageId = try {
                         JSONObject(responseText).optString("id", "").trim()
@@ -425,6 +456,18 @@ class GmailService(
             value.length <= 512 &&
             value.matches(Regex("[A-Za-z0-9._@+-]+"))
 
+    private fun isTrustedGoogleEndpoint(value: String, expectedHost: String, expectedPath: String): Boolean {
+        val url: HttpUrl = value.toHttpUrlOrNull() ?: return false
+        return url.scheme == "https" &&
+            url.host == expectedHost &&
+            url.port == 443 &&
+            url.encodedPath == expectedPath &&
+            url.username.isEmpty() &&
+            url.password.isEmpty() &&
+            url.encodedQuery == null &&
+            url.fragment == null
+    }
+
     private fun parseRetryAfter(value: String?, now: Long): Long? {
         if (value.isNullOrBlank()) return null
         value.trim().toLongOrNull()?.let { seconds ->
@@ -474,7 +517,11 @@ class GmailService(
 
     companion object {
         private const val GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+        private const val GMAIL_SEND_HOST = "gmail.googleapis.com"
+        private const val GMAIL_SEND_PATH = "/gmail/v1/users/me/messages/send"
         private const val OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+        private const val OAUTH_TOKEN_HOST = "oauth2.googleapis.com"
+        private const val OAUTH_TOKEN_PATH = "/token"
         private const val TOKEN_REFRESH_SKEW_MILLIS = 60_000L
         private const val FAILED_REFRESH_SINGLE_FLIGHT_WINDOW_MILLIS = 5_000L
         private const val MAX_TOKEN_LIFETIME_SECONDS = 86_400L

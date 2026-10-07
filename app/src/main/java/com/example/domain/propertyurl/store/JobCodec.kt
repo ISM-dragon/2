@@ -17,6 +17,7 @@ import com.example.domain.propertyurl.model.ProvenanceMethod
 import com.example.domain.propertyurl.model.SourceFailure
 import com.example.domain.propertyurl.model.SourceFailureKind
 import com.example.domain.propertyurl.model.SourcedField
+import com.example.domain.propertyurl.util.Redaction
 import java.util.Locale
 
 /**
@@ -27,8 +28,8 @@ import java.util.Locale
  *  - **defensive**: unknown enum values, missing members or malformed numbers degrade to "field
  *    absent" instead of failing the whole restore.
  *
- * It never writes credentials, cookies or unredacted URLs (the URL stored on a job is already the
- * normalized, fragment-free form produced by the normalizer).
+ * Raw pasted input, failure text and URLs are redacted again at this persistence boundary so a
+ * future caller cannot accidentally serialize credentials, sensitive query values, or raw errors.
  */
 object JobCodec {
 
@@ -39,8 +40,8 @@ object JobCodec {
     fun encodeValue(job: PropertyImportJob): JsonValue.Obj = JsonWriter.obj(
         "schemaVersion" to JsonValue.Num(SCHEMA_VERSION.toDouble(), SCHEMA_VERSION.toString()),
         "jobId" to JsonValue.Str(job.jobId),
-        "rawInput" to JsonValue.Str(job.rawInput.take(2048)),
-        "normalizedUrl" to JsonWriter.str(job.normalizedUrl),
+        "rawInput" to JsonValue.Str(Redaction.url(job.rawInput)?.take(2048).orEmpty()),
+        "normalizedUrl" to JsonWriter.str(job.normalizedUrl?.let(Redaction::url)),
         "sourceId" to JsonWriter.str(job.sourceId),
         "adapterId" to JsonWriter.str(job.adapterId),
         "externalListingId" to JsonWriter.str(job.externalListingId),
@@ -110,16 +111,16 @@ object JobCodec {
 
     private fun encodeFailure(failure: SourceFailure): JsonValue.Obj = JsonWriter.obj(
         "kind" to JsonValue.Str(failure.kind.name),
-        "message" to JsonValue.Str(failure.message.take(400)),
+        "message" to JsonValue.Str(Redaction.message(failure.message, maxLength = 400)),
         "httpStatus" to JsonWriter.int(failure.httpStatus),
         "retryAfterSeconds" to JsonWriter.long(failure.retryAfterSeconds),
         "sourceId" to JsonWriter.str(failure.sourceId),
         "adapterId" to JsonWriter.str(failure.adapterId),
-        "url" to JsonWriter.str(failure.url),
+        "url" to JsonWriter.str(failure.url?.let(Redaction::url)),
         "causeType" to JsonWriter.str(failure.causeType),
         "occurredAt" to JsonWriter.long(failure.occurredAtEpochMillis),
         "diagnostics" to JsonValue.Obj(
-            failure.diagnostics.mapValues { (_, v) -> JsonValue.Str(v.take(200)) as JsonValue }
+            failure.diagnostics.mapValues { (_, v) -> JsonValue.Str(Redaction.message(v, maxLength = 200)) as JsonValue }
         )
     )
 
@@ -138,10 +139,10 @@ object JobCodec {
 
     private fun encodeWarning(warning: ImportWarning): JsonValue.Obj = JsonWriter.obj(
         "code" to JsonValue.Str(warning.code.name),
-        "message" to JsonValue.Str(warning.message.take(300)),
+        "message" to JsonValue.Str(Redaction.message(warning.message, maxLength = 300)),
         "field" to JsonWriter.str(warning.field?.name),
         "sourceId" to JsonWriter.str(warning.sourceId),
-        "detail" to JsonWriter.str(warning.detail?.take(300))
+        "detail" to JsonWriter.str(warning.detail?.let { Redaction.message(it, maxLength = 300) })
     )
 
     private fun decodeWarning(obj: JsonValue.Obj): ImportWarning = ImportWarning(
@@ -178,7 +179,7 @@ object JobCodec {
         "canonicalId" to JsonValue.Str(property.canonicalId),
         "primarySourceId" to JsonValue.Str(property.primarySourceId),
         "sourceListingId" to JsonWriter.str(property.sourceListingId),
-        "sourceUrl" to JsonValue.Str(property.sourceUrl),
+        "sourceUrl" to JsonValue.Str(Redaction.url(property.sourceUrl).orEmpty()),
         "builtAt" to JsonWriter.long(property.builtAtEpochMillis),
         "fields" to JsonValue.Obj(
             property.fields.entries.associate { (field, sourced) ->
@@ -280,7 +281,7 @@ object JobCodec {
         "extractedAt" to JsonWriter.long(provenance.extractedAtEpochMillis),
         "adapterId" to JsonWriter.str(provenance.adapterId),
         "adapterVersion" to JsonValue.Str(provenance.adapterVersion),
-        "sourceUrl" to JsonWriter.str(provenance.sourceUrl),
+        "sourceUrl" to JsonWriter.str(provenance.sourceUrl?.let(Redaction::url)),
         "rawPath" to JsonWriter.str(provenance.rawPath),
         "note" to JsonWriter.str(provenance.note)
     )

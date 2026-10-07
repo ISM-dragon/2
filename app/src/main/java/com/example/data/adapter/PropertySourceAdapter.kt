@@ -196,10 +196,10 @@ class PropertySourceManager(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (e: Exception) {
-                // Safe logging: source name and error class without sensitive payload exposure.
+                // Exception messages may contain property search queries, URLs, or response data.
                 android.util.Log.w(
                     "PropertySourceManager",
-                    "Source [${adapter.sourceName}] query failed: ${e.javaClass.simpleName} - ${e.message}"
+                    "Source query failed (${e.javaClass.simpleName})"
                 )
             }
         }

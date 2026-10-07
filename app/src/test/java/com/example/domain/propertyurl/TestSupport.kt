@@ -141,6 +141,7 @@ class FakeHttpFetcher : HttpFetcher {
 
     private val routes = ArrayList<Route>()
     private val hits = LinkedHashMap<String, Int>()
+    val requests = mutableListOf<HttpRequest>()
 
     fun on(
         match: String,
@@ -160,6 +161,7 @@ class FakeHttpFetcher : HttpFetcher {
     val totalHits: Int get() = hits.values.sum()
 
     override suspend fun fetch(request: HttpRequest, options: FetchOptions): HttpFetchResult {
+        requests += request
         val route = routes.firstOrNull { request.url.contains(it.match) }
             ?: return HttpFetchResult.TransportError(
                 kind = TransportFailureKind.DNS_FAILURE,

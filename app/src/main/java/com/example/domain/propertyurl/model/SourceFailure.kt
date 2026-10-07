@@ -323,9 +323,18 @@ class SourceFailureClassifier(private val now: () -> Long = { System.currentTime
             is IllegalArgumentException -> SourceFailureKind.INTERNAL_ERROR
             else -> SourceFailureKind.UNKNOWN
         }
+        val safeMessage = when (kind) {
+            SourceFailureKind.CANCELLED -> "Request cancelled."
+            SourceFailureKind.DNS_FAILURE -> "Public destination name could not be resolved."
+            SourceFailureKind.TIMEOUT -> "Network request timed out."
+            SourceFailureKind.TLS_FAILURE -> "Secure connection could not be established."
+            SourceFailureKind.NETWORK_UNREACHABLE,
+            SourceFailureKind.CONNECTION_RESET -> "Network request failed."
+            else -> "Property request failed."
+        }
         return SourceFailure(
             kind = kind,
-            message = throwable.message ?: throwable.javaClass.simpleName,
+            message = safeMessage,
             sourceId = sourceId,
             adapterId = adapterId,
             url = url,

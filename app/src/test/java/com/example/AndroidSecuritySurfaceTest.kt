@@ -47,6 +47,46 @@ class AndroidSecuritySurfaceTest {
     }
 
     @Test
+    fun backupRuleFilesExcludePrivateApplicationData() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val legacyExclusions = readBackupExclusions(context, R.xml.backup_rules)
+        val extractionExclusions = readBackupExclusions(context, R.xml.data_extraction_rules)
+        val protectedDomains = setOf("database", "file", "sharedpref", "root", "external")
+
+        assertTrue(protectedDomains.all { domain -> (domain to ".") in legacyExclusions })
+        assertTrue(protectedDomains.all { domain ->
+            ("cloud-backup" to domain) in extractionExclusions &&
+                ("device-transfer" to domain) in extractionExclusions
+        })
+    }
+
+    private fun readBackupExclusions(context: Context, resourceId: Int): Set<Pair<String, String>> {
+        val parser = context.resources.getXml(resourceId)
+        val exclusions = mutableSetOf<Pair<String, String>>()
+        var section: String? = null
+        try {
+            while (parser.next() != XmlPullParser.END_DOCUMENT) {
+                when (parser.eventType) {
+                    XmlPullParser.START_TAG -> when (parser.name) {
+                        "cloud-backup", "device-transfer" -> section = parser.name
+                        "exclude" -> {
+                            val domain = parser.getAttributeValue(null, "domain")
+                            val path = parser.getAttributeValue(null, "path")
+                            if (domain != null && path != null) {
+                                exclusions += if (section == null) domain to path else section to domain
+                            }
+                        }
+                    }
+                    XmlPullParser.END_TAG -> if (parser.name == section) section = null
+                }
+            }
+        } finally {
+            parser.close()
+        }
+        return exclusions
+    }
+
+    @Test
     fun fileProviderIsPrivateAndOnlySharesOfferPdfs() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val authority = "${context.packageName}.fileprovider"

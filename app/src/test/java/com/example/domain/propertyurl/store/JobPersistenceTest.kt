@@ -9,6 +9,7 @@ import com.example.domain.propertyurl.job.PropertyImportJob
 import com.example.domain.propertyurl.job.PropertyImportJobState
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -111,6 +112,25 @@ class JobPersistenceTest {
         assertEquals(2, decoded.transitions.size)
         assertEquals("RETRY_SCHEDULED", decoded.transitions.last().reasonCode)
         assertEquals("attempt 1", decoded.transitions.last().detail)
+    }
+
+    @Test
+    fun `codec redacts URL credentials and sensitive query values before persistence`() {
+        val password = "unit-test-embedded-password"
+        val apiKey = "unit-test-query-api-key"
+        val job = sampleJob().copy(
+            rawInput = "https://listing-user:$password@www.zillow.com/homedetails/1/?api-key=$apiKey"
+        )
+
+        val encoded = JobCodec.encode(job)
+        val decoded = JobCodec.decode(encoded)
+
+        assertFalse(encoded.contains(password))
+        assertFalse(encoded.contains("listing-user"))
+        assertFalse(encoded.contains(apiKey))
+        assertNotNull(decoded)
+        assertFalse(decoded!!.rawInput.contains(password))
+        assertFalse(decoded.rawInput.contains(apiKey))
     }
 
     @Test

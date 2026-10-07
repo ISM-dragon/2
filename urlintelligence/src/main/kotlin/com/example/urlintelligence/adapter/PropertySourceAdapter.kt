@@ -23,8 +23,9 @@ data class SourceFetchRequest(
     companion object {
         /** Headers that must never be attached to an outbound property request. */
         val FORBIDDEN_HEADERS: Set<String> = setOf(
-            "authorization", "proxy-authorization", "cookie", "set-cookie",
-            "x-api-key", "api-key", "x-auth-token"
+            "authorization", "proxy-authorization", "proxy-authenticate", "www-authenticate",
+            "cookie", "set-cookie", "x-api-key", "x-goog-api-key", "api-key",
+            "x-auth-token", "x-access-token", "x-refresh-token", "x-id-token", "x-bearer-token"
         )
     }
 }

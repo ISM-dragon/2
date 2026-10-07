@@ -101,6 +101,40 @@ class PropertyUrlIntelligenceTest {
     }
 
     @Test
+    fun `imported jobs do not retain credential-like URL query values`() = runBlocking {
+        val harness = Harness().withZillowFixture()
+        val token = "unit-test-property-query-token"
+        val apiKey = "unit-test-property-query-api-key"
+        val input = "$zillowUrl?access_token=$token&api-key=$apiKey"
+
+        val outcome = harness.engine.import(input)
+
+        assertTrue("expected success but was ${outcome.describe()}", outcome is ImportOutcome.Success)
+        assertFalse(outcome.job.rawInput.contains(token))
+        assertFalse(outcome.job.rawInput.contains(apiKey))
+        assertFalse(harness.fetcher.requests.single().url.contains(token))
+        assertFalse(harness.fetcher.requests.single().url.contains(apiKey))
+        val persisted = harness.store.findById(outcome.job.jobId)
+        assertNotNull(persisted)
+        assertFalse(persisted!!.rawInput.contains(token))
+        assertFalse(persisted.rawInput.contains(apiKey))
+    }
+
+    @Test
+    fun `embedded credentials are not retained in rejected job records`() = runBlocking {
+        val harness = Harness()
+        val password = "unit-test-embedded-password"
+        val input = "https://listing-user:$password@www.zillow.com/homedetails/20451237_zpid/"
+
+        val outcome = harness.engine.import(input)
+
+        assertTrue(outcome is ImportOutcome.Rejected)
+        assertFalse(outcome.job.rawInput.contains(password))
+        assertFalse(outcome.job.rawInput.contains("listing-user"))
+        assertTrue(harness.fetcher.requests.isEmpty())
+    }
+
+    @Test
     fun `the imported job exposes the audit trail`() = runBlocking {
         val harness = Harness().withZillowFixture()
 

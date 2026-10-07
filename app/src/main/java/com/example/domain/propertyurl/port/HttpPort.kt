@@ -1,6 +1,8 @@
 package com.example.domain.propertyurl.port
 
 import com.example.domain.propertyurl.url.UrlHosts
+import java.net.URI
+import java.util.Locale
 
 /** Outbound HTTP request built by adapters. URLs must already be normalized and credential-free. */
 data class HttpRequest(
@@ -26,19 +28,34 @@ data class FetchOptions(
     /** Last line of defence against SSRF through redirects. */
     val redirectGuard: (String) -> Boolean = DEFAULT_REDIRECT_GUARD
 ) {
+    init {
+        require(connectTimeoutMillis > 0) { "connectTimeoutMillis must be positive" }
+        require(readTimeoutMillis > 0) { "readTimeoutMillis must be positive" }
+        require(maxBodyBytes >= 0) { "maxBodyBytes must not be negative" }
+        require(maxRedirects in 0..10) { "maxRedirects must be between 0 and 10" }
+    }
+
     companion object {
         const val DEFAULT_USER_AGENT =
             "RealEstateAI-PropertyIntel/1.0 (+https://realestate-ai.example/bot; contact: ops@realestate-ai.example)"
 
-        /** Blocks redirects that leave http(s) or point at loopback/private ranges. */
+        /** Redirects must remain HTTPS, credential-free, and target a public DNS name. */
         val DEFAULT_REDIRECT_GUARD: (String) -> Boolean = { candidate ->
-            val lowered = candidate.lowercase()
-            val allowedScheme = lowered.startsWith("http://") || lowered.startsWith("https://")
-            val host = lowered.removePrefix("https://").removePrefix("http://")
-                .substringBefore('/').substringBefore('?').substringBefore('#')
-                .substringBefore('@').substringAfterLast('@')
-                .substringBefore(':')
-            allowedScheme && host.isNotEmpty() && !UrlHosts.isPrivateNetwork(host)
+            val uri = runCatching { URI(candidate.trim()) }.getOrNull()
+            val scheme = uri?.scheme?.lowercase(Locale.US)
+            val host = uri?.host?.trimEnd('.')?.lowercase(Locale.US)
+            scheme == "https" &&
+                uri?.rawUserInfo == null &&
+                (uri?.port == -1 || uri?.port == 443) &&
+                !host.isNullOrBlank() &&
+                UrlHosts.isValidHostSyntax(host) &&
+                UrlHosts.hasTld(host) &&
+                !UrlHosts.isIpLiteral(host) &&
+                !UrlHosts.isPrivateNetwork(host) &&
+                host != "metadata" &&
+                host != "metadata.google.internal" &&
+                !host.endsWith(".internal") &&
+                !host.endsWith(".home.arpa")
         }
     }
 }
@@ -96,9 +113,9 @@ sealed interface HttpFetchResult {
 /**
  * The only way the layer talks to the network.
  *
- * Production wiring uses [com.example.domain.propertyurl.port.HttpUrlConnectionFetcher] (no extra
- * dependency, works on Android API 24+ and on a plain JVM); an OkHttp-backed implementation can be
- * dropped in later without touching a single adapter. Tests use a fake fetcher driven by fixtures.
+ * Production wiring uses [com.example.domain.propertyurl.port.OkHttpHttpFetcher], which enforces
+ * HTTPS-only requests, public-only DNS answers, bounded manual redirects, and credential isolation.
+ * Tests use a fake fetcher driven by fixtures.
  */
 interface HttpFetcher {
     suspend fun fetch(request: HttpRequest, options: FetchOptions = FetchOptions()): HttpFetchResult

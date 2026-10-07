@@ -53,6 +53,25 @@ class ConfigRepositorySecurityTest {
     }
 
     @Test
+    fun corruptedApiKeyIsNotPresentedAsAnEmptyValidCredential() = runBlocking {
+        val dao = InMemoryConfigDao()
+        dao.apiConfigurations = listOf(
+            ApiConfigurationEntity(
+                slotIndex = 1,
+                label = "corrupt slot",
+                apiKey = "not-valid-ciphertext",
+                status = "READY"
+            )
+        )
+
+        val projected = ConfigRepository(dao).apiConfigs.first().single()
+
+        assertTrue(projected.apiKey.isEmpty())
+        assertEquals("ERROR", projected.status)
+        assertEquals("Stored API key could not be decrypted. Re-enter the key.", projected.lastErrorMessage)
+    }
+
+    @Test
     fun oauthClientIdComesOnlyFromTheExplicitPublicBuildConfigField() {
         val expected = BuildConfig.GOOGLE_OAUTH_CLIENT_ID.trim().takeIf { it.isNotBlank() }
         assertEquals(expected, ConfigRepository(InMemoryConfigDao()).getOAuthClientId())

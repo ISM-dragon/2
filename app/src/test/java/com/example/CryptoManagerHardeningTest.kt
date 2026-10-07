@@ -1,12 +1,16 @@
 package com.example
 
+import com.example.data.local.dao.ConfigDao
 import com.example.data.security.AesGcmCipher
 import com.example.data.security.AndroidKeyStoreAccess
 import com.example.data.security.AndroidKeyStoreCryptoKeySource
 import com.example.data.security.CryptoKeySource
-import com.example.domain.ai.sanitizeGeminiError
-import com.example.domain.gmail.sanitizeMimeHeader
+import com.example.domain.ai.GeminiManager
+import com.example.domain.ai.geminiHttpErrorMessage
+import com.example.domain.gmail.GmailMimeBuilder
+import okhttp3.OkHttpClient
 import java.util.Base64
+import java.lang.reflect.Proxy
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import org.junit.Assert.assertEquals
@@ -98,21 +102,46 @@ class CryptoManagerHardeningTest {
     }
 
     @Test
-    fun mimeHeadersCannotIntroduceAdditionalLines() {
-        val sanitized = sanitizeMimeHeader("Offer title\r\nBcc: test@example.invalid")
-
-        assertFalse(sanitized.contains('\r'))
-        assertFalse(sanitized.contains('\n'))
-        assertEquals("Offer title Bcc: test@example.invalid", sanitized)
+    fun mimeBuilderRejectsHeaderInjectionInsteadOfSanitizingItIntoAValidHeader() {
+        assertTrue(GmailMimeBuilder.containsHeaderControls("Offer title\r\nBcc: test@example.invalid"))
     }
 
     @Test
-    fun geminiFailureMessagesRedactTheConfiguredKey() {
-        val apiKey = "test-only-gemini-key"
-        val sanitized = sanitizeGeminiError("Upstream error for key $apiKey", apiKey)
+    fun geminiHttpDiagnosticsNeverIncludeProviderResponseBodiesOrCredentials() {
+        val apiKey = "test-only-provider-secret"
+        val untrustedProviderBody = "error for key $apiKey and private request payload"
+        val safeError = geminiHttpErrorMessage(400)
 
-        assertFalse(sanitized.contains(apiKey))
-        assertTrue(sanitized.contains("[REDACTED]"))
+        assertFalse(safeError.contains(apiKey))
+        assertFalse(safeError.contains(untrustedProviderBody))
+        assertFalse(safeError.contains("private request payload"))
+        assertTrue(safeError.contains("HTTP 400"))
+    }
+
+    @Test
+    fun geminiRequestsCannotFollowRedirectsOrRetargetTheProviderKey() {
+        val configDao = Proxy.newProxyInstance(
+            ConfigDao::class.java.classLoader,
+            arrayOf(ConfigDao::class.java)
+        ) { _, _, _ -> null } as ConfigDao
+        val manager = GeminiManager(configDao)
+        val clientField = GeminiManager::class.java.getDeclaredField("httpClient").apply { isAccessible = true }
+        val client = clientField.get(manager) as OkHttpClient
+
+        assertFalse(client.followRedirects)
+        assertFalse(client.followSslRedirects)
+        assertFalse(client.retryOnConnectionFailure)
+
+        val endpointValidator = GeminiManager::class.java.getDeclaredMethod(
+            "isTrustedGeminiEndpoint",
+            String::class.java,
+            String::class.java
+        ).apply { isAccessible = true }
+        fun isTrusted(url: String): Boolean = endpointValidator.invoke(manager, url, "gemini-2.5-flash") as Boolean
+
+        assertTrue(isTrusted("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"))
+        assertFalse(isTrusted("https://generativelanguage.googleapis.com.attacker.invalid/v1beta/models/gemini-2.5-flash:generateContent"))
+        assertFalse(isTrusted("http://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"))
     }
 
     private class TestKeySource : CryptoKeySource {

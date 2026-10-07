@@ -163,10 +163,10 @@ object SourceFailureClassifier {
 
     fun fromThrowable(throwable: Throwable): SourceFailure = when (throwable) {
         is SocketTimeoutException -> SourceFailure.Timeout(-1L)
-        is UnknownHostException -> SourceFailure.Network("host could not be resolved", throwable.javaClass.simpleName)
-        is IOException -> SourceFailure.Network(throwable.message ?: "i/o failure", throwable.javaClass.simpleName)
-        is InterruptedException -> SourceFailure.Network("request interrupted", throwable.javaClass.simpleName)
-        else -> SourceFailure.Unknown(throwable.message ?: "unexpected failure", throwable.javaClass.simpleName)
+        is UnknownHostException -> SourceFailure.Network("public destination could not be resolved", throwable.javaClass.simpleName)
+        is IOException -> SourceFailure.Network("property request failed", throwable.javaClass.simpleName)
+        is InterruptedException -> SourceFailure.Network("property request was interrupted", throwable.javaClass.simpleName)
+        else -> SourceFailure.Unknown("property request failed", throwable.javaClass.simpleName)
     }
 
     fun fromStatus(statusCode: Int, headers: Map<String, String> = emptyMap()): SourceFailure {

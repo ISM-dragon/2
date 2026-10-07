@@ -5,6 +5,7 @@ import androidx.room.withTransaction
 import com.example.data.local.AppDatabase
 import com.example.data.local.entity.*
 import com.example.domain.pdf.OfferPdfStorage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -199,8 +200,10 @@ class BackupRestoreManager(
             backupFile.writeText(root.toString(2))
 
             Pair(true, "Backup successfully exported to: ${backupFile.name} (${root.getJSONArray("properties").length()} properties, ${root.getJSONArray("offers").length()} offers)")
-        } catch (e: Exception) {
-            Pair(false, "Export failed: ${e.message}")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            Pair(false, "Export failed. Please retry.")
         }
     }
 
@@ -436,8 +439,10 @@ class BackupRestoreManager(
             }
 
             Pair(true, "Backup successfully restored without errors. All relations preserved.")
-        } catch (e: Exception) {
-            Pair(false, "Restore failed: ${e.message}")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            Pair(false, "Restore failed. The backup was not applied.")
         }
     }
 }

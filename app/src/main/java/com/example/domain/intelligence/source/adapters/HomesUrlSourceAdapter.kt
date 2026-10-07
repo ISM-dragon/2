@@ -17,7 +17,7 @@ class HomesUrlSourceAdapter : PropertyUrlSourceAdapter {
 
     override fun supports(url: String): Boolean {
         val host = try { URI.create(url.trim()).host?.lowercase() ?: "" } catch (e: Exception) { "" }
-        return supportedDomains.any { host.contains(it) }
+        return supportedDomains.any { host == it || host.endsWith(".$it") }
     }
 
     override suspend fun extract(url: String): PropertyExtractionResult {
@@ -83,11 +83,11 @@ class HomesUrlSourceAdapter : PropertyUrlSourceAdapter {
                 provenanceRecords = provenance,
                 latencyMs = System.currentTimeMillis() - startTime
             )
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             return PropertyExtractionResult(
                 success = false,
                 errorCode = AdapterErrorCodes.PARSING_FAILED,
-                errorMessage = e.message ?: "Homes.com extraction error",
+                errorMessage = "Homes.com property parsing failed.",
                 latencyMs = System.currentTimeMillis() - startTime
             )
         }
@@ -174,11 +174,11 @@ class GenericUrlSourceAdapter : PropertyUrlSourceAdapter {
                 provenanceRecords = provenance,
                 latencyMs = System.currentTimeMillis() - startTime
             )
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             return PropertyExtractionResult(
                 success = false,
                 errorCode = AdapterErrorCodes.PARSING_FAILED,
-                errorMessage = "Failed to parse generic real estate URL: ${e.message}",
+                errorMessage = "Failed to parse generic real estate URL.",
                 latencyMs = System.currentTimeMillis() - startTime
             )
         }

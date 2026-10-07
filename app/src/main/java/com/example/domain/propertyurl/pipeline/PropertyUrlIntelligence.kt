@@ -872,7 +872,7 @@ class PropertyUrlIntelligence(
         now: Long
     ): PropertyImportJob = PropertyImportJob(
         jobId = environment.idGenerator.newId("job"),
-        rawInput = rawInput.take(2048),
+        rawInput = safeStoredRawInput(rawInput),
         normalizedUrl = resolved.url.normalized,
         sourceId = resolved.sourceId,
         adapterId = adapterId,
@@ -901,7 +901,7 @@ class PropertyUrlIntelligence(
     ): ImportOutcome {
         val job = existingJob ?: PropertyImportJob(
             jobId = environment.idGenerator.newId("job"),
-            rawInput = rawInput.take(2048),
+            rawInput = safeStoredRawInput(rawInput),
             normalizedUrl = resolved?.url?.normalized,
             sourceId = resolved?.sourceId,
             adapterId = null,
@@ -976,11 +976,15 @@ class PropertyUrlIntelligence(
         return scheduled
     }
 
-    /** Persists the job and returns it (job state is durable at every transition). */
+    /** Persistence boundary: raw pasted URLs are redacted before returning or writing a job. */
     private suspend fun persisted(job: PropertyImportJob): PropertyImportJob {
-        jobStore.save(job)
-        return job
+        val safeJob = job.copy(rawInput = safeStoredRawInput(job.rawInput))
+        jobStore.save(safeJob)
+        return safeJob
     }
+
+    private fun safeStoredRawInput(rawInput: String): String =
+        Redaction.url(rawInput)?.take(2048).orEmpty()
 
     private fun hasIdentityEvidence(property: CanonicalProperty): Boolean =
         !property.addressLine1.isNullOrBlank() ||
@@ -994,7 +998,7 @@ class PropertyUrlIntelligence(
         )
         val job = PropertyImportJob(
             jobId = environment.idGenerator.newId("job"),
-            rawInput = input.take(2048),
+            rawInput = safeStoredRawInput(input),
             idempotencyKey = IdempotencyKeys.forDocument(input.take(512)),
             createdAtEpochMillis = now,
             updatedAtEpochMillis = now,
@@ -1002,6 +1006,7 @@ class PropertyUrlIntelligence(
         )
         val failed = transition(job, PropertyImportJobState.REJECTED_INVALID_URL, "INTERNAL_ERROR", now, failure = failure)
             .let { if (it is TransitionResult.Applied) it.applied else job }
+            .copy(rawInput = safeStoredRawInput(input))
         return withContext(NonCancellable) {
             runCatching { jobStore.save(failed) }
             ImportOutcome.Failed(failed)

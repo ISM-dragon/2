@@ -131,6 +131,14 @@ class SourceFailureClassifierTest {
     }
 
     @Test
+    fun `exception messages are not persisted in classified failures`() {
+        val secret = "unit-test-secret-value"
+        val failure = SourceFailureClassifier.fromThrowable(IOException("Authorization: Bearer $secret"))
+        assertFalse(failure.detail.contains(secret))
+        assertEquals("property request failed", failure.detail)
+    }
+
+    @Test
     fun `maps http statuses onto categories`() {
         assertEquals(FailureCategory.TRANSIENT, SourceFailureClassifier.fromStatus(500).category)
         assertEquals(FailureCategory.PERMANENT, SourceFailureClassifier.fromStatus(404).category)

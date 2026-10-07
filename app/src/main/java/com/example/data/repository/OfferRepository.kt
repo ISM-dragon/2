@@ -17,6 +17,7 @@ import com.example.domain.gmail.GmailMimeBuilder
 import com.example.domain.gmail.GmailSendResult
 import com.example.domain.gmail.GmailSender
 import com.example.domain.pdf.OfferPdfGenerator
+import com.example.domain.propertyurl.util.Redaction
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -435,7 +436,7 @@ class OfferRepository(
                     "EMAIL_SENT",
                     sent.status,
                     sent.sentAt ?: clock(),
-                    "gmailMessageId=$confirmedMessageId"
+                    "Delivery acknowledged by Gmail."
                 )
             )
             return@withContext outcome(sent, success = true, attempted = true)
@@ -579,7 +580,7 @@ class OfferRepository(
         } catch (_: Exception) {
             // Keep the generic pattern redaction below even if the config store is unavailable.
         }
-        return OAUTH_TOKEN_PATTERN.replace(sanitized, "[REDACTED]")
+        return Redaction.message(OAUTH_TOKEN_PATTERN.replace(sanitized, "[REDACTED]"), MAX_ERROR_LENGTH)
     }
 
     private fun isSafeMessageId(value: String): Boolean =

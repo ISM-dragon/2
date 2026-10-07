@@ -14,6 +14,7 @@ import com.example.domain.gmail.GmailService
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -138,6 +139,43 @@ class GmailOAuthSecurityTest {
     }
 
     @Test
+    fun gmailServiceDisablesRedirectFollowingOnInjectedClients() {
+        val injectedClient = OkHttpClient.Builder()
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+        val service = GmailService(ConfigRepository(InMemoryConfigDao()), httpClient = injectedClient)
+        val field = GmailService::class.java.getDeclaredField("safeHttpClient").apply { isAccessible = true }
+        val safeClient = field.get(service) as OkHttpClient
+
+        assertFalse(safeClient.followRedirects)
+        assertFalse(safeClient.followSslRedirects)
+        assertFalse(safeClient.retryOnConnectionFailure)
+    }
+
+    @Test
+    fun gmailOAuthAndSendEndpointsArePinnedToExpectedHttpsOrigins() {
+        val service = GmailService(ConfigRepository(InMemoryConfigDao()))
+        val validator = GmailService::class.java.getDeclaredMethod(
+            "isTrustedGoogleEndpoint",
+            String::class.java,
+            String::class.java,
+            String::class.java
+        ).apply { isAccessible = true }
+        fun validOAuthEndpoint(value: String): Boolean = validator.invoke(
+            service,
+            value,
+            "oauth2.googleapis.com",
+            "/token"
+        ) as Boolean
+
+        assertTrue(validOAuthEndpoint("https://oauth2.googleapis.com/token"))
+        assertFalse(validOAuthEndpoint("http://oauth2.googleapis.com/token"))
+        assertFalse(validOAuthEndpoint("https://oauth2.googleapis.com.evil.invalid/token"))
+        assertFalse(validOAuthEndpoint("https://oauth2.googleapis.com/token?access_token=not-allowed"))
+    }
+
+    @Test
     fun testConfigRepositorySingleSourceOfTruthEncryption() = runBlocking {
         val fakeDao = InMemoryConfigDao()
         val repo = ConfigRepository(fakeDao)
@@ -181,6 +219,52 @@ class GmailOAuthSecurityTest {
         assertNotEquals(newRawToken, updatedInDao?.accessToken)
         val readBack = repo.getGmailConfig()
         assertEquals(newRawToken, readBack.accessToken)
+    }
+
+    @Test
+    fun corruptOAuthCiphertextProjectsAsDisconnectedAndRequiresReauthorization() = runBlocking {
+        val fakeDao = InMemoryConfigDao()
+        fakeDao.storedGmailConfig = GmailConfigurationEntity(
+            isConnected = true,
+            authStatus = GmailAuthStatus.AUTH_REQUIRED,
+            accessToken = "not-valid-ciphertext",
+            refreshToken = "also-not-valid-ciphertext"
+        )
+
+        val config = ConfigRepository(fakeDao).getGmailConfig()
+
+        assertFalse(config.isConnected)
+        assertEquals(GmailAuthStatus.AUTH_EXPIRED, config.authStatus)
+        assertNull(config.accessToken)
+        assertNull(config.refreshToken)
+        assertTrue(config.lastError.orEmpty().contains("could not be decrypted"))
+        // Fail-closed projection must not erase the original ciphertext as a side effect of reading.
+        assertEquals("not-valid-ciphertext", fakeDao.storedGmailConfig?.accessToken)
+        assertEquals("also-not-valid-ciphertext", fakeDao.storedGmailConfig?.refreshToken)
+    }
+
+    @Test
+    fun aFreshAccessTokenDoesNotPreserveUnreadableRefreshCiphertext() = runBlocking {
+        val fakeDao = InMemoryConfigDao()
+        fakeDao.storedGmailConfig = GmailConfigurationEntity(
+            isConnected = true,
+            accessToken = CryptoManager.encrypt("test-only-old-access-token"),
+            refreshToken = "unreadable-refresh-ciphertext"
+        )
+        val repository = ConfigRepository(fakeDao)
+
+        repository.updateGmailTokens(
+            newAccessToken = "test-only-new-access-token",
+            newRefreshToken = null,
+            expiresAt = System.currentTimeMillis() + 60_000L,
+            authStatus = GmailAuthStatus.AUTH_REQUIRED
+        )
+
+        assertEquals("", fakeDao.storedGmailConfig?.refreshToken)
+        val projected = repository.getGmailConfig()
+        assertTrue(projected.isConnected)
+        assertEquals("test-only-new-access-token", projected.accessToken)
+        assertTrue(projected.refreshToken.isNullOrBlank())
     }
 
     @Test

@@ -65,6 +65,8 @@ private class PlatformAndroidKeyStoreAccess : AndroidKeyStoreAccess {
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(KEY_SIZE_BITS)
+            // Require a provider-generated random IV for every encryption operation.
+            .setRandomizedEncryptionRequired(true)
             .build()
 
         keyGenerator.init(spec)
@@ -171,10 +173,15 @@ object CryptoManager {
     fun encrypt(plainText: String): String = cipher.encrypt(plainText)
 
     /**
-     * Compatibility API: invalid or unreadable data fails closed as an empty string. Callers that
-     * need to distinguish an empty value from corruption can use [decryptOrNull].
+     * Decrypts an authenticated value. Empty plaintext remains supported, but malformed,
+     * unauthenticated, or key-inaccessible ciphertext raises [CryptoDecryptionException] instead of
+     * being silently presented as an empty (valid) value.
      */
-    fun decrypt(encryptedText: String): String = decryptOrNull(encryptedText) ?: ""
+    fun decrypt(encryptedText: String): String =
+        decryptOrNull(encryptedText) ?: throw CryptoDecryptionException()
 
     internal fun decryptOrNull(encryptedText: String): String? = cipher.decryptOrNull(encryptedText)
 }
+
+class CryptoDecryptionException internal constructor() :
+    GeneralSecurityException("Encrypted value could not be authenticated or decrypted")

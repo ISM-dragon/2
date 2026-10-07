@@ -5,6 +5,7 @@ import com.example.urlintelligence.url.PropertyUrlValidator
 import com.example.urlintelligence.url.UrlValidationError
 import com.example.urlintelligence.url.UrlValidationResult
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -53,6 +54,21 @@ class PropertyUrlValidatorTest {
     }
 
     @Test
+    fun `credential-like query parameters are dropped from canonical URLs`() {
+        val token = "unit-test-query-token"
+        val url = valid(
+            "https://www.zillow.com/homedetails/12345678_zpid?token=$token&access_token=another-unit-test-token" +
+                "&api-key=unit-test-api-secret&email=unit.test%40example.invalid&listing_id=123"
+        )
+        assertFalse(url.canonical.contains(token))
+        assertFalse(url.canonical.contains("access_token"))
+        assertFalse(url.canonical.contains("unit-test-api-secret"))
+        assertFalse(url.canonical.contains("unit.test"))
+        assertEquals("123", url.query["listing_id"])
+        assertTrue(url.droppedParameters.containsAll(listOf("token", "access_token", "api-key", "email")))
+    }
+
+    @Test
     fun `canonical form is stable for idempotency`() {
         val first = valid("https://www.Zillow.com/homedetails/12345678_zpid/?utm_source=x")
         val second = valid("zillow.com/homedetails/12345678_zpid")
@@ -84,7 +100,12 @@ class PropertyUrlValidatorTest {
     }
 
     @Test
-    fun `rejects non http schemes`() {
+    fun `rejects cleartext property URLs`() {
+        assertTrue(invalid("http://www.zillow.com/homedetails/12345678_zpid") is UrlValidationError.UnsupportedScheme)
+    }
+
+    @Test
+    fun `rejects unsupported schemes`() {
         assertTrue(invalid("javascript:alert(1)") is UrlValidationError.UnsupportedScheme)
         assertTrue(invalid("file:///etc/passwd") is UrlValidationError.UnsupportedScheme)
         assertTrue(invalid("ftp://zillow.com/x") is UrlValidationError.UnsupportedScheme)
