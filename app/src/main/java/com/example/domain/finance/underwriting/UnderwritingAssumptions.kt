@@ -261,5 +261,5 @@ object FinancingModelDefaultsRegistry {
         ALL[model] ?: ALL.getValue(FinancingModel.CONVENTIONAL)
 
     /** All models rendered as scenarios for side-by-side comparison. */
-    fun allModels(): List<FinancingModelDefaults> = FinancingModel.entries.toList()
+    fun allModels(): List<FinancingModelDefaults> = FinancingModel.entries.map { of(it) }
 }

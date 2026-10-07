@@ -9,6 +9,7 @@ import kotlinx.coroutines.withContext
 class OnMarketMlsAdapter : PropertySourceAdapter {
     override val sourceName: String = "MLS Feed (Demo Seed Dataset)"
     override val sourceType: String = "ON_MARKET"
+    override val sourceId: String = PropertySourceDefaults.MLS_ID
 
     override suspend fun fetchProperties(
         query: String?,
@@ -26,6 +27,7 @@ class OnMarketMlsAdapter : PropertySourceAdapter {
 class OffMarketWholesaleAdapter : PropertySourceAdapter {
     override val sourceName: String = "Off-Market Wholesale (Demo Seed Dataset)"
     override val sourceType: String = "OFF_MARKET"
+    override val sourceId: String = PropertySourceDefaults.WHOLESALE_ID
 
     override suspend fun fetchProperties(
         query: String?,

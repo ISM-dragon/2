@@ -402,12 +402,12 @@ object EngineSupport {
     }
 }
 
-internal data class SanitizedInput(
+data class SanitizedInput(
     val input: UnderwritingInput,
     val issues: List<ValidationIssue>
 )
 
-internal data class CapitalStackBuild(
+data class CapitalStackBuild(
     val stack: CapitalStack,
     val issues: List<ValidationIssue>
 )

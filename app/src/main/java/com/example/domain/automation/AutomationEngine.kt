@@ -6,6 +6,8 @@ import com.example.data.adapter.toCanonicalPropertyIdentity
 import com.example.data.local.dao.AutomationDao
 import com.example.data.local.dao.PropertyDao
 import com.example.data.local.entity.*
+import com.example.data.repository.ImportOutcome
+import com.example.data.repository.PropertyImportRepository
 import com.example.domain.finance.FinancialResult
 import com.example.domain.qualification.QualificationEngine
 import com.example.domain.qualification.QualificationEvaluation
@@ -140,6 +142,11 @@ class AutomationEngine(
     private val automationDao: AutomationDao,
     private val propertyDao: PropertyDao,
     private val propertySourceManager: PropertySourceGateway,
+    /**
+     * Persists discovered bundles through the canonical/dedup pipeline. Optional so test harnesses
+     * can exercise the engine without the property data layer wired in.
+     */
+    private val propertyImporter: PropertyImportRepository? = null,
     private val financialRepository: FinancialAnalysisGateway,
     private val offerRepository: OfferGateway,
     private val networkMonitor: NetworkStatusProvider,
@@ -412,10 +419,10 @@ class AutomationEngine(
             return false
         }
         val persisted = persistTransition(job, outcome.job, runId = null, correlationId = "CRASH_RECOVERY", details = details)
-        if (persisted) {
+        if (persisted != null) {
             audit.transition(job, from, outcome.job.state(), null, "CRASH_RECOVERY", decision.reason)
         }
-        return persisted
+        return persisted != null
     }
 
     /** Durable evidence needed to decide where an interrupted job continues. */
@@ -652,20 +659,43 @@ class AutomationEngine(
             return null
         }
 
-        val key = "$runId:$propertyId"
-        automationDao.getJobByIdempotencyKey(key)?.let { return it }
+        automationDao.getJobByIdempotencyKey("$runId:$propertyId")?.let { return it }
 
-        propertyDao.insertProperty(bundle.property)
-        propertyDao.insertImages(bundle.images)
-        propertyDao.insertMarketData(bundle.marketData)
-        propertyDao.insertRentEstimate(bundle.rentEstimate)
-        propertyDao.insertTaxRecord(bundle.taxRecord)
+        // One transaction for the canonical row, its provenance and its satellites. When the row
+        // already exists under another source the importer merges it and hands back the survivor,
+        // so the job below tracks the canonical id rather than the incoming listing id.
+        val importer = propertyImporter
+        val canonicalProperty = if (importer != null) {
+            val result = importer.importBundle(bundle)
+            if (result.outcome == ImportOutcome.SKIPPED) {
+                audit.info(
+                    "PROPERTY_SKIPPED",
+                    "Skipped duplicate record: ${result.reason}",
+                    runId = runId
+                )
+                return null
+            }
+            result.property
+        } else {
+            propertyDao.insertProperty(bundle.property)
+            propertyDao.insertImages(bundle.images)
+            propertyDao.insertMarketData(bundle.marketData)
+            propertyDao.insertRentEstimate(bundle.rentEstimate)
+            propertyDao.insertTaxRecord(bundle.taxRecord)
+            bundle.property
+        }
+
+        // The record merged into a row this run already tracks: keep the existing job, never a twin.
+        if (canonicalProperty.id != propertyId) {
+            automationDao.getJobByPropertyId(canonicalProperty.id)?.let { return it }
+        }
+        val key = "$runId:${canonicalProperty.id}"
 
         val job = AutomationJobEntity(
             jobId = "JOB-" + UUID.randomUUID().toString().take(8).uppercase(),
             runId = runId,
-            propertyId = propertyId,
-            propertyAddress = bundle.property.address,
+            propertyId = canonicalProperty.id,
+            propertyAddress = canonicalProperty.address,
             currentState = JobState.DISCOVERED.name,
             lastSuccessfulState = JobState.DISCOVERED.name,
             idempotencyKey = key,
@@ -944,7 +974,7 @@ class AutomationEngine(
             )
             val persisted = persistTransition(job, transitioned.job, runId, correlationId)
             logTransition(job, transitioned.job, persisted, "generation disabled by rules", runId, correlationId)
-            return StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped(blocked = 1))
+            return StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped(blocked = true))
         }
 
         val generating = persistTransition(
@@ -1049,7 +1079,7 @@ class AutomationEngine(
                 val persisted = persistTransition(validating, transitioned.job, runId, correlationId)
                 logTransition(validating, transitioned.job, persisted, "delivery blocked: $reason", runId, correlationId)
                 audit.warn("VALIDATION_BLOCKED", "[${job.jobId}] offer $offerId blocked: $reason", runId, job.jobId, correlationId)
-                StepResult(persisted ?: validating, advanced = false, outcome = JobOutcome.skipped(blocked = 1))
+                StepResult(persisted ?: validating, advanced = false, outcome = JobOutcome.skipped(blocked = true))
             } else {
                 val transitioned = JobStateMachine.transition(validating, JobState.SENDING, clock.now(), buildRetryPolicy(rules), random = random)
                 val persisted = persistTransition(validating, transitioned.job, runId, correlationId)
@@ -1307,7 +1337,7 @@ class AutomationEngine(
                 )
                 if (!outcome.applied) return false
                 val persisted = persistTransition(job, outcome.job, runId = null, correlationId = "OPERATOR_RETRY")
-                if (persisted) {
+                if (persisted != null) {
                     audit.warn(
                         "OPERATOR_RETRY",
                         "[$jobId] retried by $operatorName: ${job.state()} -> ${outcome.job.state()}",
@@ -1315,7 +1345,7 @@ class AutomationEngine(
                     )
                     scheduler.enqueueImmediateCycle(CycleTrigger.OPERATOR_NOW)
                 }
-                persisted
+                persisted != null
             }
         }
     }
@@ -1333,10 +1363,10 @@ class AutomationEngine(
         )
         if (!outcome.applied) return false
         val persisted = persistTransition(job, outcome.job, runId = null, correlationId = "OPERATOR_CANCEL")
-        if (persisted) {
+        if (persisted != null) {
             audit.warn("OPERATOR_CANCEL", "[$jobId] cancelled by $operatorName", jobId = jobId)
         }
-        return persisted
+        return persisted != null
     }
 
     /** Runs one cycle immediately from an operator action (still serialized by the cycle lease). */

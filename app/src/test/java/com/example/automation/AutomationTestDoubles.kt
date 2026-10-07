@@ -663,16 +663,19 @@ fun testRules(
  * a deterministic clock.
  */
 class EngineTestHarness(
-    context: android.content.Context,
-    instanceId: String = "test-1"
+    private val context: android.content.Context,
+    val instanceId: String = "test-1",
+    database: com.example.data.local.AppDatabase? = null,
+    private val ownsDatabase: Boolean = database == null
 ) {
-    val database: com.example.data.local.AppDatabase =
-        androidx.room.Room.inMemoryDatabaseBuilder(context, com.example.data.local.AppDatabase::class.java)
-            .allowMainThreadQueries()
-            .build()
+    /** An isolated in-memory database, or the caller's instance for restart-style tests. */
+    val database: com.example.data.local.AppDatabase = database ?: androidx.room.Room
+        .inMemoryDatabaseBuilder(context, com.example.data.local.AppDatabase::class.java)
+        .allowMainThreadQueries()
+        .build()
 
-    val dao: AutomationDao = database.automationDao()
-    val propertyDao = database.propertyDao()
+    val dao: AutomationDao = this.database.automationDao()
+    val propertyDao = this.database.propertyDao()
     val clock = FakeClock()
     val network = FakeNetworkMonitor()
     val scheduler = RecordingScheduler()
@@ -710,7 +713,7 @@ class EngineTestHarness(
     fun state(): AutomationStateEntity? = kotlinx.coroutines.runBlocking { dao.getAutomationState() }
 
     fun close() {
-        if (ownsDatabase) database.close()
+        if (ownsDatabase) this.database.close()
     }
 }
 

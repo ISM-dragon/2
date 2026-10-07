@@ -228,7 +228,7 @@ object OperatingStatementCalculator {
     internal data class ResolvedExpenseLine(val amount: Double, val basis: ExpenseBasis)
 }
 
-internal data class OperatingStatementBuild(
+data class OperatingStatementBuild(
     val statement: OperatingStatementResult,
     val issues: List<ValidationIssue>
 )

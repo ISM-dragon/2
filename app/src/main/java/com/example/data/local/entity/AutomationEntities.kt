@@ -165,12 +165,21 @@ object AutomationEffect {
     fun idempotencyKey(effect: String, subjectId: String): String = "$effect:$subjectId"
 }
 
+/**
+ * Durable automation job for one property.
+ *
+ * `propertyId` is a soft reference on purpose (no foreign key): the job history must survive
+ * property cleanup so the engine can report what it did, and the engine creates the job row before
+ * the property row exists. The index keeps per-property lookups fast.
+ */
 @Entity(
     tableName = "automation_jobs",
     indices = [
         Index(value = ["propertyId"]),
         Index(value = ["currentState"]),
         Index(value = ["runId"]),
+        Index(value = ["currentState", "attempts"]),
+        Index(value = ["updatedAt"]),
         Index(value = ["idempotencyKey"], unique = true),
         Index(value = ["leaseExpiresAt"]),
         Index(value = ["nextAttemptAt"])
@@ -289,7 +298,13 @@ data class AutomationRuleEntity(
     val cycleLeaseTtlMinutes: Int = 3
 )
 
-@Entity(tableName = "automation_runs")
+@Entity(
+    tableName = "automation_runs",
+    indices = [
+        Index(value = ["startTime"]),
+        Index(value = ["status", "startTime"])
+    ]
+)
 data class AutomationRunEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
@@ -317,7 +332,14 @@ data class AutomationRunEntity(
     val heartbeatAt: Long = startTime
 )
 
-@Entity(tableName = "automation_logs")
+@Entity(
+    tableName = "automation_logs",
+    indices = [
+        Index(value = ["runId"]),
+        Index(value = ["timestamp"]),
+        Index(value = ["level", "timestamp"])
+    ]
+)
 data class AutomationLogEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,

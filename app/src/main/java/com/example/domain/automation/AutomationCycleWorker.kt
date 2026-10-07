@@ -109,7 +109,7 @@ class WorkManagerAutomationScheduler(context: Context) : AutomationWorkScheduler
     }
 
     override fun schedulePeriodic(intervalMinutes: Int) {
-        val minutes = intervalMinutes.coerceAtLeast(MIN_PERIODIC_MINUTES)
+        val minutes = intervalMinutes.coerceAtLeast(MIN_PERIODIC_MINUTES).toLong()
         val request = PeriodicWorkRequestBuilder<AutomationCycleWorker>(minutes, TimeUnit.MINUTES)
             .setInputData(workDataOf(AutomationCycleWorker.KEY_TRIGGER to CycleTrigger.PERIODIC))
             .setConstraints(networkConstraints())
@@ -133,6 +133,6 @@ class WorkManagerAutomationScheduler(context: Context) : AutomationWorkScheduler
         .build()
 
     private companion object {
-        const val MIN_PERIODIC_MINUTES = 15L
+        const val MIN_PERIODIC_MINUTES = 15
     }
 }

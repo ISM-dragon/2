@@ -72,6 +72,9 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
+// Room exports its schema JSON here; migrations are verified against these files in tests.
+ksp { arg("room.schemaLocation", "$projectDir/schemas") }
+
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
@@ -126,6 +129,7 @@ dependencies {
   testImplementation(libs.androidx.junit)
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
+  testImplementation(libs.androidx.room.testing)
   testImplementation(libs.robolectric)
   testImplementation("org.json:json:20231013")
   androidTestImplementation(platform(libs.androidx.compose.bom))

@@ -1,17 +1,25 @@
 package com.example.data.adapter
 
 import com.example.data.local.entity.*
+import com.example.domain.automation.DiscoveredProperty
+import com.example.domain.automation.PropertySourceGateway
 import com.example.domain.identity.CanonicalPropertyIdentity
 import com.example.domain.identity.DeduplicationResult
 import com.example.domain.identity.DeduplicationStatus
-import com.example.domain.automation.DiscoveredProperty
-import com.example.domain.automation.PropertySourceGateway
 import com.example.domain.identity.PropertyIdentityDeduplicationEngine
 import com.example.domain.identity.SourcePropertyIdentity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+/**
+ * A single normalized record coming from a source, ready to be handed to
+ * `PropertyImportRepository`.
+ *
+ * `sourceId` / `externalId` feed the provenance table and are the first deduplication level; when
+ * `externalId` is blank the importer falls back to the property id. `sourceIdentity` carries the
+ * provider-specific identifiers (including the county APN) used by the identity engine.
+ */
 data class NormalizedPropertyBundle(
     val property: PropertyEntity,
     val images: List<PropertyImageEntity>,
@@ -19,7 +27,18 @@ data class NormalizedPropertyBundle(
     val rentEstimate: RentEstimateEntity,
     val taxRecord: TaxRecordEntity,
     val salesHistory: List<SalesHistoryEntity>,
-    val comps: List<ComparablePropertyEntity>,
+    val comps: List<PropertyCompEntity>,
+    // ── provenance & canonical ingestion metadata ───────────────────────────────────────────────
+    val sourceId: String = "",
+    val externalId: String = "",
+    val externalUrl: String = "",
+    val confidence: Double = 1.0,
+    val ingestionMethod: String = PropertyIngestionMethod.API,
+    val payloadHash: String = "",
+    val rawPayloadRef: String = "",
+    val sourceUpdatedAt: Long = 0L,
+    val enrichments: List<PropertyEnrichmentEntity> = emptyList(),
+    val financials: PropertyFinancialEntity? = null,
     /** Optional provider-specific identity data, including APN/parcel ID when available. */
     val sourceIdentity: SourcePropertyIdentity? = null
 )
@@ -27,6 +46,16 @@ data class NormalizedPropertyBundle(
 interface PropertySourceAdapter {
     val sourceName: String
     val sourceType: String // "ON_MARKET" or "OFF_MARKET"
+
+    /**
+     * `property_sources.id` this adapter feeds; see [PropertySourceDefaults].
+     *
+     * Defaults to the adapter name so lightweight/anonymous adapters keep working without a
+     * registered source row.
+     */
+    val sourceId: String
+        get() = sourceName
+
     suspend fun fetchProperties(
         query: String? = null,
         minPrice: Double? = null,
@@ -62,6 +91,10 @@ class PropertySourceManager(
     private val identityEngine: PropertyIdentityDeduplicationEngine = PropertyIdentityDeduplicationEngine()
 ) : PropertySourceGateway {
 
+    /** Source ids this manager can pull from; one import job is created per id. */
+    val availableSourceIds: List<String>
+        get() = adapters.map { it.sourceId }.distinct()
+
     /** [PropertySourceGateway] port: listings that are confidently new. */
     override suspend fun fetchBundles(limitPerSource: Int): List<NormalizedPropertyBundle> =
         fetchAllSources(limitPerSource = limitPerSource)
@@ -88,7 +121,8 @@ class PropertySourceManager(
     /**
      * Fetches source listings and returns only confidently new properties. Use
      * [fetchAllSourcesWithDeduplication] when callers need MATCHED/POSSIBLE_MATCH/CONFLICT
-     * decisions as well.
+     * decisions as well, or [fetchSource] when an already-known listing must be re-imported so the
+     * importer can refresh it.
      */
     suspend fun fetchAllSources(
         query: String? = null,
@@ -125,7 +159,11 @@ class PropertySourceManager(
                 for (bundle in bundles) {
                     val identity = sourceIdentityFor(adapter, bundle)
                     val result = identityEngine.deduplicate(identity, knownIdentities)
-                    decisions += PropertySourceDeduplicationDecision(bundle, identity, result)
+                    decisions += PropertySourceDeduplicationDecision(
+                        bundle = bundle.withProvenance(adapter),
+                        sourceIdentity = identity,
+                        result = result
+                    )
 
                     when (result.status) {
                         DeduplicationStatus.NEW -> knownIdentities += CanonicalPropertyIdentity(
@@ -167,6 +205,65 @@ class PropertySourceManager(
         }
         decisions
     }
+
+    /**
+     * Fetches one source's raw listings, including addresses that are already stored locally, so
+     * the importer can attribute a job to that source and refresh or merge the record it matched.
+     */
+    suspend fun fetchSource(
+        sourceId: String,
+        query: String? = null,
+        minPrice: Double? = null,
+        maxPrice: Double? = null,
+        limit: Int = 20
+    ): List<NormalizedPropertyBundle> = fetchAllRawSources(
+        query = query,
+        minPrice = minPrice,
+        maxPrice = maxPrice,
+        limitPerSource = limit
+    ).filter { it.sourceId == sourceId }
+
+    /** Every adapter's listings, deduplicated by property id, tagged with their provenance. */
+    suspend fun fetchAllRawSources(
+        query: String? = null,
+        minPrice: Double? = null,
+        maxPrice: Double? = null,
+        limitPerSource: Int = 10
+    ): List<NormalizedPropertyBundle> = withContext(Dispatchers.IO) {
+        val results = mutableListOf<NormalizedPropertyBundle>()
+        val seenIds = mutableSetOf<String>()
+
+        for (adapter in adapters) {
+            try {
+                val bundles = adapter.fetchProperties(query, minPrice, maxPrice, limitPerSource)
+                for (bundle in bundles) {
+                    if (seenIds.add(bundle.property.id)) {
+                        results += bundle.withProvenance(adapter)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                // Safe logging: source name and error class without sensitive payload exposure
+                android.util.Log.w(
+                    "PropertySourceManager",
+                    "Source [${adapter.sourceName}] query failed: ${e.javaClass.simpleName} - ${e.message}"
+                )
+            }
+        }
+        results
+    }
+
+    /** Fills in blank provenance fields from the adapter that produced the record. */
+    private fun NormalizedPropertyBundle.withProvenance(adapter: PropertySourceAdapter): NormalizedPropertyBundle =
+        if (sourceId.isNotBlank() && externalId.isNotBlank()) {
+            this
+        } else {
+            copy(
+                sourceId = sourceId.ifBlank { adapter.sourceId },
+                externalId = externalId.ifBlank { property.id }
+            )
+        }
 
     private fun sourceIdentityFor(
         adapter: PropertySourceAdapter,
