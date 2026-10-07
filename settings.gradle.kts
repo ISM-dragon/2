@@ -25,3 +25,4 @@ dependencyResolutionManagement {
 rootProject.name = "RealEstateAI"
 
 include(":app")
+include(":urlintelligence")
