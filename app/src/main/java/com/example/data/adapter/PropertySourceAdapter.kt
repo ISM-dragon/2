@@ -4,6 +4,8 @@ import com.example.data.local.entity.*
 import com.example.domain.identity.CanonicalPropertyIdentity
 import com.example.domain.identity.DeduplicationResult
 import com.example.domain.identity.DeduplicationStatus
+import com.example.domain.automation.DiscoveredProperty
+import com.example.domain.automation.PropertySourceGateway
 import com.example.domain.identity.PropertyIdentityDeduplicationEngine
 import com.example.domain.identity.SourcePropertyIdentity
 import kotlinx.coroutines.CancellationException
@@ -58,7 +60,31 @@ fun PropertyEntity.toCanonicalPropertyIdentity(): CanonicalPropertyIdentity = Ca
 class PropertySourceManager(
     private val adapters: List<PropertySourceAdapter>,
     private val identityEngine: PropertyIdentityDeduplicationEngine = PropertyIdentityDeduplicationEngine()
-) {
+) : PropertySourceGateway {
+
+    /** [PropertySourceGateway] port: listings that are confidently new. */
+    override suspend fun fetchBundles(limitPerSource: Int): List<NormalizedPropertyBundle> =
+        fetchAllSources(limitPerSource = limitPerSource)
+
+    /**
+     * [PropertySourceGateway] port with deduplication: the caller passes the canonical identities
+     * already stored locally, so previously imported properties are reported as known rather than new.
+     */
+    override suspend fun fetchResolvedBundles(
+        existing: Collection<CanonicalPropertyIdentity>,
+        limitPerSource: Int
+    ): List<DiscoveredProperty> = fetchAllSourcesWithDeduplication(
+        existingCanonicalProperties = existing,
+        limitPerSource = limitPerSource
+    ).map { decision ->
+        DiscoveredProperty(
+            bundle = decision.bundle,
+            isNew = decision.result.status == DeduplicationStatus.NEW,
+            needsReview = decision.result.status == DeduplicationStatus.POSSIBLE_MATCH ||
+                decision.result.status == DeduplicationStatus.CONFLICT
+        )
+    }
+
     /**
      * Fetches source listings and returns only confidently new properties. Use
      * [fetchAllSourcesWithDeduplication] when callers need MATCHED/POSSIBLE_MATCH/CONFLICT

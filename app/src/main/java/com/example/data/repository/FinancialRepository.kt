@@ -18,7 +18,17 @@ class FinancialRepository(
     private val financialDao: FinancialDao,
     private val propertyDao: PropertyDao,
     private val automationDao: AutomationDao? = null
-) {
+) : com.example.domain.automation.FinancialAnalysisGateway {
+
+    /**
+     * [com.example.domain.automation.FinancialAnalysisGateway] port used by the automation
+     * execution system. Deterministic and free of external side effects, hence safe to re-run.
+     */
+    override suspend fun runAnalysis(propertyId: String): FinancialResult = analyzeProperty(propertyId)
+
+    /** Durable evidence check used by crash recovery (was the analysis already persisted?). */
+    override suspend fun hasAnalysis(propertyId: String): Boolean = getAnalysis(propertyId) != null
+
     val totalAnalysesCount: Flow<Int> = financialDao.getAnalysesCountFlow()
     val allAnalyses: Flow<List<FinancialAnalysisEntity>> = financialDao.getAllAnalysesFlow()
 

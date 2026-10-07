@@ -36,7 +36,10 @@ fun AutomationScreen(
     viewModel: AutomationViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val isRunning = state.status == AutomationStatus.RUNNING || state.status == AutomationStatus.SCANNING || state.status == AutomationStatus.ANALYZING
+    // The switch reflects the *persisted operator intent*, not a transient in-process status:
+    // automation stays armed across process death, and the durable worker drives the cycles.
+    val isRunning = state.enabled
+    val killSwitchEngaged = state.killSwitch.engaged
 
     Scaffold(
         topBar = {
@@ -50,7 +53,9 @@ fun AutomationScreen(
         if (state.selectedJob != null) {
             JobDetailsDialog(
                 job = state.selectedJob!!,
-                onDismiss = { viewModel.selectJob(null) }
+                onDismiss = { viewModel.selectJob(null) },
+                onRetry = { viewModel.retryJob(state.selectedJob!!.jobId) },
+                onCancel = { viewModel.cancelJob(state.selectedJob!!.jobId) }
             )
         }
 
@@ -87,6 +92,7 @@ fun AutomationScreen(
 
                         Switch(
                             checked = isRunning,
+                            enabled = !killSwitchEngaged,
                             onCheckedChange = { checked ->
                                 if (checked) viewModel.startAutomation() else viewModel.stopAutomation()
                             },
@@ -96,6 +102,55 @@ fun AutomationScreen(
                             ),
                             modifier = Modifier.testTag("auto_mode_switch")
                         )
+                    }
+
+                    state.latestRun?.let { run ->
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Last cycle #${run.id} [${run.trigger}] started " +
+                                formatTimestamp(run.startTime) +
+                                (run.endTime?.let { " - ended ${formatTimestamp(it)}" } ?: " - running") +
+                                " (${run.status})",
+                            fontSize = 10.sp,
+                            color = Slate400
+                        )
+                    }
+
+                    if (killSwitchEngaged) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            color = CrimsonAlert.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(
+                                    "KILL SWITCH ENGAGED",
+                                    color = CrimsonAlert,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 12.sp
+                                )
+                                Text(
+                                    state.killSwitch.reason ?: "All automation is halted and persisted.",
+                                    fontSize = 11.sp,
+                                    color = Slate200
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { viewModel.clearKillSwitch() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(40.dp)
+                                .testTag("clear_kill_switch_action"),
+                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldGain)
+                        ) {
+                            Icon(Icons.Filled.LockOpen, contentDescription = null, tint = Slate950)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("CLEAR KILL SWITCH", color = Slate950, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -551,7 +606,9 @@ private fun JobItemCard(
 @Composable
 private fun JobDetailsDialog(
     job: com.example.data.local.entity.AutomationJobEntity,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit,
+    onCancel: () -> Unit
 ) {
     val fullFormat = SimpleDateFormat("MMM dd, yyyy HH:mm:ss", Locale.US)
     val createdStr = fullFormat.format(Date(job.createdAt))
@@ -593,12 +650,44 @@ private fun JobDetailsDialog(
                     Text("${job.attempts} of ${job.maxRetries}", fontSize = 11.sp, color = Slate200)
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Started At:", fontSize = 11.sp, color = Slate400)
+                    Text("Created:", fontSize = 11.sp, color = Slate400)
                     Text(createdStr, fontSize = 10.sp, color = Slate300)
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Real Start Time:", fontSize = 11.sp, color = Slate400)
+                    Text(
+                        job.startedAt?.let { fullFormat.format(Date(it)) } ?: "not started yet",
+                        fontSize = 10.sp,
+                        color = Slate300
+                    )
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Last Updated:", fontSize = 11.sp, color = Slate400)
                     Text(updatedStr, fontSize = 10.sp, color = Slate300)
+                }
+                job.completedAt?.let { completed ->
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Completed At:", fontSize = 11.sp, color = Slate400)
+                        Text(fullFormat.format(Date(completed)), fontSize = 10.sp, color = EmeraldGain)
+                    }
+                }
+                if (job.recoveryCount > 0) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Crash Recoveries:", fontSize = 11.sp, color = Slate400)
+                        Text("${job.recoveryCount}", fontSize = 11.sp, color = AmberAccent)
+                    }
+                }
+                if (job.nextAttemptAt > 0L) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Next Retry:", fontSize = 11.sp, color = Slate400)
+                        Text(fullFormat.format(Date(job.nextAttemptAt)), fontSize = 10.sp, color = AmberAccent)
+                    }
+                }
+                if (!job.leaseOwner.isNullOrBlank() && job.leaseExpiresAt > 0L) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Execution Lease:", fontSize = 11.sp, color = Slate400)
+                        Text("${job.leaseOwner} (until ${formatTimestamp(job.leaseExpiresAt)})", fontSize = 10.sp, color = Slate300)
+                    }
                 }
 
                 if (!job.offerId.isNullOrBlank()) {
@@ -630,12 +719,44 @@ private fun JobDetailsDialog(
             }
         },
         confirmButton = {
-            Button(
-                onClick = onDismiss,
-                colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
-            ) {
-                Text("Close", color = Slate950, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val isTerminal = job.currentState == "SENT" ||
+                    job.currentState == "CANCELLED" ||
+                    job.currentState == "DISQUALIFIED"
+                if (!isTerminal) {
+                    OutlinedButton(
+                        onClick = onRetry,
+                        modifier = Modifier.testTag("retry_job_action"),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberAccent)
+                    ) {
+                        Icon(Icons.Filled.Replay, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Retry", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                if (job.currentState != "SENT" && job.currentState != "CANCELLED" && job.currentState != "DISQUALIFIED") {
+                    OutlinedButton(
+                        onClick = onCancel,
+                        modifier = Modifier.testTag("cancel_job_action"),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = CrimsonAlert)
+                    ) {
+                        Icon(Icons.Filled.Cancel, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Cancel", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+                ) {
+                    Text("Close", color = Slate950, fontWeight = FontWeight.Bold)
+                }
             }
         }
     )
 }
+
+private fun formatTimestamp(millis: Long): String =
+    SimpleDateFormat("MMM dd HH:mm:ss", Locale.US).format(Date(millis))

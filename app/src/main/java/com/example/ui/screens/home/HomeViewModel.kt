@@ -50,6 +50,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         Triple(status, task, persistentState ?: AutomationStateEntity())
     }
 
+
     private val countsFlow = combine(
         propertyRepo.totalCount,
         financialRepo.totalAnalysesCount,
@@ -87,15 +88,27 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     fun startAutomation() {
-        automationRepo.startAutomation()
+        viewModelScope.launch { automationRepo.startAutomation() }
     }
 
     fun stopAutomation() {
-        automationRepo.stopAutomation()
+        viewModelScope.launch { automationRepo.stopAutomation() }
     }
 
     fun globalKillSwitch() {
-        automationRepo.globalKillSwitch()
+        viewModelScope.launch { automationRepo.globalKillSwitch() }
+    }
+
+    fun clearKillSwitch() {
+        viewModelScope.launch { automationRepo.clearKillSwitch() }
+    }
+
+    fun runCycleNow() {
+        viewModelScope.launch { automationRepo.runCycleNow() }
+    }
+
+    fun reconcileNow() {
+        viewModelScope.launch { automationRepo.reconcileNow() }
     }
 
     fun toggleSave(propertyId: String, currentSaved: Boolean) {

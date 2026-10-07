@@ -29,7 +29,35 @@ class OfferRepository(
     private val configRepository: ConfigRepository,
     private val geminiManager: GeminiManager,
     private val gmailService: GmailService
-) {
+) : com.example.domain.automation.OfferGateway {
+
+    // ---------------------------------------------------------------- OfferGateway port
+    // Thin, explicitly named adapters for the automation execution system. All of them are
+    // idempotent, which is what makes crash recovery and retries safe.
+
+    override suspend fun findOffer(offerId: String): OfferEntity? = getOfferById(offerId)
+
+    override suspend fun findOfferForProperty(propertyId: String): OfferEntity? =
+        offerDao.getOfferByPropertyId(propertyId)
+
+    override suspend fun validateForSend(context: Context, offerId: String): PreSendValidationResult =
+        validateOfferPreSend(context, offerId)
+
+    override suspend fun generateDraftOffer(
+        context: Context,
+        propertyId: String,
+        customPrice: Double?,
+        suggestedRecipientEmail: String?
+    ): OfferEntity = generateOffer(
+        context = context,
+        propertyId = propertyId,
+        customPrice = customPrice,
+        recipientEmail = suggestedRecipientEmail?.takeIf { it.isNotBlank() } ?: "agent@realestateteam.com"
+    )
+
+    override suspend fun transmitOffer(context: Context, offerId: String): Boolean =
+        sendOffer(context, offerId)
+
     val allOffers: Flow<List<OfferEntity>> = offerDao.getAllOffers()
     val generatedCount: Flow<Int> = offerDao.getGeneratedOffersCountFlow()
     val sentCount: Flow<Int> = offerDao.getSentOffersCountFlow()
