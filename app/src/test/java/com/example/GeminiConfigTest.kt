@@ -9,7 +9,7 @@ class GeminiConfigTest {
 
     @Test
     fun testKeyEncryptionAndMasking() {
-        val rawApiKey = "AIzaSyB_TEST_KEY_1234567890"
+        val rawApiKey = "test-only-gemini-key-not-a-credential"
         val encrypted = CryptoManager.encrypt(rawApiKey)
 
         assertFalse("Encrypted string should not contain raw key", encrypted.contains(rawApiKey))

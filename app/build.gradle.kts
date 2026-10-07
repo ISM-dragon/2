@@ -4,9 +4,19 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
-  alias(libs.plugins.secrets)
   alias(libs.plugins.google.services)
 }
+
+// Only the OAuth client ID is a public identifier and may be compiled into the app.
+// Never inject API keys or OAuth tokens from .env into BuildConfig.
+val googleOAuthClientId = providers.gradleProperty("GOOGLE_OAUTH_CLIENT_ID").orNull
+  ?: providers.environmentVariable("GOOGLE_OAUTH_CLIENT_ID").orNull
+  ?: ""
+val escapedGoogleOAuthClientId = googleOAuthClientId
+  .replace("\\", "\\\\")
+  .replace("\"", "\\\"")
+  .replace("\n", "\\n")
+  .replace("\r", "\\r")
 
 android {
   namespace = "com.example"
@@ -20,6 +30,7 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    buildConfigField("String", "GOOGLE_OAUTH_CLIENT_ID", "\"$escapedGoogleOAuthClientId\"")
   }
 
   signingConfigs {
@@ -60,14 +71,6 @@ android {
     includeInApk = false
     includeInBundle = true
   }
-}
-
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
-secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
-  ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
 }
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
@@ -115,7 +118,7 @@ dependencies {
   // implementation(libs.androidx.credentials.play.services)
   // implementation(libs.googleid)
   implementation(libs.firebase.appcheck.recaptcha)
-  implementation(libs.firebase.appcheck.debug)
+  debugImplementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.logging.interceptor)

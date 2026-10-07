@@ -142,8 +142,8 @@ class GmailOAuthSecurityTest {
         val fakeDao = InMemoryConfigDao()
         val repo = ConfigRepository(fakeDao)
 
-        val rawAccessToken = "ya29.a0ARrdaM_REAL_ACCESS_TOKEN_XYZ123"
-        val rawRefreshToken = "1//04_REAL_REFRESH_TOKEN_ABC789"
+        val rawAccessToken = "test-only-oauth-access-token"
+        val rawRefreshToken = "test-only-oauth-refresh-token"
 
         // Save through repository
         val configToSave = GmailConfigurationEntity(
@@ -162,7 +162,7 @@ class GmailOAuthSecurityTest {
         assertNotNull("DAO must contain saved configuration", rawInDao)
         assertNotEquals("DAO must not contain raw access token", rawAccessToken, rawInDao?.accessToken)
         assertNotEquals("DAO must not contain raw refresh token", rawRefreshToken, rawInDao?.refreshToken)
-        assertFalse("Raw token must not be in ciphertext", rawInDao!!.accessToken!!.contains("REAL_ACCESS_TOKEN"))
+        assertFalse("Raw token must not be in ciphertext", rawInDao!!.accessToken!!.contains("test-only-oauth-access-token"))
 
         // 2. Reading through repository must DECRYPT tokens
         val decrypted = repo.getGmailConfig()
@@ -170,7 +170,7 @@ class GmailOAuthSecurityTest {
         assertEquals("Refresh token must be decrypted when read via Repository", rawRefreshToken, decrypted.refreshToken)
 
         // 3. Updating tokens through repository must store them encrypted
-        val newRawToken = "ya29.NEW_REFRESHED_ACCESS_TOKEN_456"
+        val newRawToken = "test-only-oauth-refreshed-access-token"
         repo.updateGmailTokens(
             newAccessToken = newRawToken,
             expiresAt = System.currentTimeMillis() + 3600000L,
@@ -275,7 +275,7 @@ class GmailOAuthSecurityTest {
     @Test
     fun testRefreshFailsCleanlyWhenClientIdMissing() = runBlocking {
         val fakeDao = InMemoryConfigDao()
-        val repo = ConfigRepository(fakeDao)
+        val repo = ConfigRepository(fakeDao, oauthClientId = "")
         val service = GmailService(repo)
 
         val config = GmailConfigurationEntity(

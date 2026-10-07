@@ -14,7 +14,7 @@ class StrictSecurityAndIntegrationTest {
 
     @Test
     fun testAes256GcmCryptoIntegrity() {
-        val sampleSecret = "AIzaSyD_SecretProductionKey9876543210"
+        val sampleSecret = "test-only-gemini-key-not-a-credential"
         val encrypted1 = CryptoManager.encrypt(sampleSecret)
         val encrypted2 = CryptoManager.encrypt(sampleSecret)
 

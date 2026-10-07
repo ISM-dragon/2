@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <include domain="database" path="." />
-    <include domain="file" path="offers" />
-    <exclude domain="sharedpref" path="secrets.xml" />
+    <!-- Defense in depth: keep user data, credentials, generated documents, and local backups off OS backups. -->
+    <exclude domain="database" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="root" path="." />
+    <exclude domain="external" path="." />
 </full-backup-content>
