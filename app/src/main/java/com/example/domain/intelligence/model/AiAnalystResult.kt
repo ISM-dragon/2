@@ -1,7 +1,9 @@
 package com.example.domain.intelligence.model
 
+import com.example.domain.scoring.DealScoreResult
+
 data class DealScoreBreakdown(
-    val dealScore: Int, // 0 to 100
+    val dealScore: Int, // 0 to 100; rounded from the deterministic scoring result
     val cashFlowScore: Int,
     val equityScore: Int,
     val marketScore: Int,
@@ -9,7 +11,9 @@ data class DealScoreBreakdown(
     val dataConfidenceScore: Int,
     val distressScore: Int,
     val positiveFactors: List<String>,
-    val negativeFactors: List<String>
+    val negativeFactors: List<String>,
+    /** Full immutable deterministic trace retained for consumers that need UI/export detail. */
+    val detailedResult: DealScoreResult? = null
 )
 
 enum class KnowledgeType {

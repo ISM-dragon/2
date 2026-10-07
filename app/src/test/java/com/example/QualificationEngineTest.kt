@@ -5,8 +5,11 @@ import com.example.data.local.entity.PropertyEntity
 import com.example.domain.finance.FinancialEngine
 import com.example.domain.finance.FinancialInput
 import com.example.domain.qualification.QualificationEngine
+import com.example.domain.qualification.QualificationPointAdjustment
+import com.example.domain.qualification.QualificationScoringPolicy
 import org.junit.Assert.*
 import org.junit.Test
+import java.util.Locale
 
 class QualificationEngineTest {
 
@@ -60,7 +63,9 @@ class QualificationEngineTest {
         assertTrue("High cash flow deal should qualify", evaluation.isQualified)
         assertTrue(evaluation.score >= 70)
         assertTrue(evaluation.failedChecks.isEmpty())
-        assertTrue(evaluation.suggestedOfferPrice < property.price)
+        assertTrue(evaluation.suggestedOfferPrice!! < property.price)
+        assertEquals(10, evaluation.checkResults.size)
+        assertEquals(evaluation.score, evaluation.score.coerceIn(0, 100))
     }
 
     @Test
@@ -110,4 +115,155 @@ class QualificationEngineTest {
         assertFalse("Overpriced deal should NOT qualify", evaluation.isQualified)
         assertTrue("Should have failed rules", evaluation.failedChecks.isNotEmpty())
     }
+
+    @Test
+    fun qualificationThresholdsAreInclusiveAndEveryAdjustmentIsAuditable() {
+        val property = fixtureProperty(price = 600_000.0, yearBuilt = 2026)
+        val financial = FinancialEngine.calculate(
+            FinancialInput(
+                purchasePrice = property.price,
+                monthlyRent = 1_500.0,
+                renovationCost = 0.0
+            )
+        ).copy(
+            monthlyCashFlow = 300.0,
+            capRate = 7.0,
+            dscr = 1.25,
+            cashOnCashReturn = 8.0
+        )
+        val evaluation = QualificationEngine.evaluate(property, financial, AutomationRuleEntity())
+
+        assertTrue("Equality at each configured minimum/maximum should pass", evaluation.isQualified)
+        assertTrue(evaluation.failedChecks.isEmpty())
+        assertEquals(10, evaluation.checkResults.size)
+        assertEquals(130, evaluation.rawScore)
+        assertEquals(100, evaluation.score)
+        assertTrue(evaluation.scoreWasClamped)
+        assertEquals(
+            listOf("purchase_price", "monthly_cash_flow", "cap_rate", "dscr", "cash_on_cash",
+                "location", "property_type", "estimated_rent", "renovation_cost", "risk_score"),
+            evaluation.checkResults.map { it.id }
+        )
+        assertTrue(evaluation.checkResults.all { it.passed })
+        assertEquals(80, evaluation.checkResults.sumOf { it.scoreDelta })
+        assertEquals(8.5, evaluation.effectiveOfferDiscountPercent!!, 0.0)
+        assertEquals(549_000.0, evaluation.suggestedOfferPrice!!, 0.01)
+        assertEquals(2026, evaluation.asOfYear)
+    }
+
+    @Test
+    fun nonFiniteQualificationInputsFailClosedWithoutProducingAnOffer() {
+        val property = fixtureProperty().copy(price = Double.NaN, yearBuilt = 2040)
+        val financial = FinancialEngine.calculate(
+            FinancialInput(purchasePrice = 300_000.0, monthlyRent = 2_500.0)
+        ).copy(
+            monthlyCashFlow = Double.NaN,
+            capRate = Double.POSITIVE_INFINITY,
+            dscr = Double.NaN,
+            cashOnCashReturn = Double.NaN
+        )
+        val rules = AutomationRuleEntity(
+            maxPurchasePrice = Double.NaN,
+            minCashFlow = Double.NaN
+        )
+        val evaluation = QualificationEngine.evaluate(property, financial, rules)
+
+        assertFalse(evaluation.isQualified)
+        assertNull(evaluation.suggestedOfferPrice)
+        assertTrue(evaluation.checkResults.take(5).all { !it.passed })
+        assertTrue(evaluation.checkResults.take(5).all { it.message.contains("unavailable") })
+        assertTrue(evaluation.warnings.any { it.contains("Suggested offer unavailable") })
+        assertTrue(evaluation.score in 0..100)
+        assertEquals(2026, evaluation.asOfYear)
+    }
+
+    @Test
+    fun qualificationIsRepeatedAndLocaleIndependent() {
+        val property = fixtureProperty()
+        val financial = FinancialEngine.calculate(
+            FinancialInput(
+                purchasePrice = property.price,
+                monthlyRent = 3_200.0,
+                propertyTaxAnnual = 5_400.0,
+                insuranceAnnual = 1_800.0
+            )
+        )
+        val rules = AutomationRuleEntity()
+        val originalLocale = Locale.getDefault()
+        try {
+            Locale.setDefault(Locale.FRANCE)
+            val expected = QualificationEngine.evaluate(property, financial, rules)
+            repeat(25) {
+                assertEquals("qualification repeat $it", expected, QualificationEngine.evaluate(property, financial, rules))
+            }
+            Locale.setDefault(Locale.GERMANY)
+            assertEquals(expected, QualificationEngine.evaluate(property, financial, rules))
+        } finally {
+            Locale.setDefault(originalLocale)
+        }
+    }
+
+
+    @Test
+    fun qualificationPointPolicyIsConfigurableAndEchoedInTheTrace() {
+        val pointAdjustments = QualificationScoringPolicy.DEFAULT.pointAdjustments + mapOf(
+            "monthly_cash_flow" to QualificationPointAdjustment(passed = 3, failed = -4)
+        )
+        val policy = QualificationScoringPolicy.DEFAULT.copy(
+            version = "qualification-test-v1",
+            neutralBaseScore = 40,
+            pointAdjustments = pointAdjustments
+        )
+        val property = fixtureProperty(price = 600_000.0, yearBuilt = 2026)
+        val financial = FinancialEngine.calculate(
+            FinancialInput(purchasePrice = property.price, monthlyRent = 1_500.0)
+        ).copy(monthlyCashFlow = 300.0, capRate = 7.0, dscr = 1.25, cashOnCashReturn = 8.0)
+        val result = QualificationEngine.evaluate(property, financial, AutomationRuleEntity(), scoringPolicy = policy)
+
+        assertEquals("qualification-test-v1", result.policyVersion)
+        assertEquals(3, result.checkResults.first { it.id == "monthly_cash_flow" }.scoreDelta)
+        assertEquals(40 + 80 - 15 + 3, result.rawScore)
+    }
+
+    @Test
+    fun qualificationPolicyRejectsUnknownOrIncompleteRules() {
+        try {
+            QualificationScoringPolicy(pointAdjustments = mapOf(
+                "purchase_price" to QualificationPointAdjustment(1, -1)
+            ))
+            fail("Incomplete policy must be rejected")
+        } catch (_: IllegalArgumentException) {
+        }
+
+        try {
+            QualificationScoringPolicy.DEFAULT.copy(lowDscrRiskThreshold = Double.NaN)
+            fail("Non-finite risk threshold must be rejected")
+        } catch (_: IllegalArgumentException) {
+        }
+    }
+
+    private fun fixtureProperty(price: Double = 300_000.0, yearBuilt: Int = 2000): PropertyEntity =
+        PropertyEntity(
+            id = "qualification-test",
+            sourceType = "ON_MARKET",
+            title = "Qualification fixture",
+            address = "123 Main St",
+            city = "Austin",
+            state = "TX",
+            zipCode = "78701",
+            latitude = 30.26,
+            longitude = -97.74,
+            price = price,
+            propertyType = "Single Family",
+            bedrooms = 3,
+            bathrooms = 2.0,
+            squareFeet = 1_800,
+            yearBuilt = yearBuilt,
+            lotSizeSqFt = 5_000,
+            description = "Deterministic test fixture",
+            status = "Active",
+            primaryImageUrl = "",
+            scannedAt = 0L
+        )
+
 }

@@ -96,11 +96,12 @@ data class DealInput(
  * [DealScoreResult.weights] for full transparency.
  */
 data class ScoringWeights(
-    val cashFlow: Double = 0.30,
+    val cashFlow: Double = 0.35,
     val equity: Double = 0.25,
-    val market: Double = 0.15,
+    val market: Double = 0.20,
     val riskSafety: Double = 0.20,
-    val distressOpportunity: Double = 0.10,
+    /** Distress is an opportunity signal, not investment quality; excluded by default. */
+    val distressOpportunity: Double = 0.0,
     /** 0.0 (default) keeps data confidence out of the composite. */
     val dataConfidence: Double = 0.0,
     /** subscore id -> (component id -> weight). Missing subscore = use its defaults. */
@@ -178,6 +179,12 @@ data class ScoringWeights(
     }
 }
 
+/** One anchor in a piecewise-linear score rule: metric threshold -> score points. */
+data class ScoreBandPoint(
+    val threshold: Double,
+    val score: Double
+)
+
 /** Deterministic engine knobs -- no clocks, no randomness, no environment access. */
 data class ScoringConfig(
     /** Score that unknown data collapses to (fully uncovered subscore). */
@@ -187,7 +194,41 @@ data class ScoringConfig(
     /** Subscores with coverage below this produce a warning. */
     val lowCoverageWarnBelow: Double = 0.5,
     /** Data confidence below this value produces a strong warning. */
-    val lowConfidenceWarnBelow: Double = 40.0
+    val lowConfidenceWarnBelow: Double = 40.0,
+    /**
+     * Complete replacement tables for selected numeric components. Omitted component ids use
+     * the versioned defaults in [DealScoringEngine]. Each table must have strictly increasing
+     * thresholds and monotone 0..100 scores; the exact anchors used are returned per component.
+     */
+    val numericBandOverrides: Map<String, List<ScoreBandPoint>> = emptyMap(),
+    /** Overrides for normalized market-demand keys (e.g. "buyersmarket", "high"). */
+    val marketDemandScoreOverrides: Map<String, Double> = emptyMap(),
+    /** Overrides for normalized distress-source keys (e.g. "FORECLOSURE", "ON_MARKET"). */
+    val distressSourceScoreOverrides: Map<String, Double> = emptyMap(),
+    /** Score used for flood exposure; the non-flood score is separately configurable. */
+    val floodZoneScore: Double = 30.0,
+    val noFloodZoneScore: Double = 90.0,
+    /** All-cash DSCR sentinel understood by the scoring adapter (FinancialEngine uses 999). */
+    val allCashDscrSentinel: Double = 900.0,
+    /** Highest plausible annual interest rate accepted as scored input. */
+    val maxPlausibleInterestRatePct: Double = 30.0,
+    /** Maximum positive/negative adjustment available from a 0..100 rent-provider confidence value. */
+    val rentConfidenceAdjustmentRangePoints: Double = 20.0,
+    /** Comparable-count score adjustments; the no-comps penalty applies only when value estimates exist. */
+    val compsConfidenceNoCompsWithEstimatePoints: Double = -8.0,
+    val compsConfidenceLimitedPoints: Double = 4.0,
+    val compsConfidenceStrongPoints: Double = 8.0,
+    val compsConfidenceLimitedThreshold: Int = 1,
+    val compsConfidenceStrongThreshold: Int = 3,
+    /** Penalty applied once per validation/consistency issue. */
+    val consistencyPenaltyPerIssue: Double = 12.0,
+    /** Special-case scores and reason polarity bounds. */
+    val allCashCashFlowScore: Double = 100.0,
+    val allCashRiskSafetyScore: Double = 95.0,
+    val taxDelinquentScore: Double = 95.0,
+    val noTaxDelinquentScore: Double = 8.0,
+    val positiveReasonThreshold: Double = 70.0,
+    val negativeReasonThreshold: Double = 40.0
 ) {
     init {
         require(neutralScore.isFinite() && neutralScore in 0.0..100.0) {
@@ -196,8 +237,99 @@ data class ScoringConfig(
         require(attenuationExponent.isFinite() && attenuationExponent >= 0.0) {
             "attenuationExponent must be finite and >= 0"
         }
-        require(lowCoverageWarnBelow in 0.0..1.0) { "lowCoverageWarnBelow must be within 0..1" }
-        require(lowConfidenceWarnBelow in 0.0..100.0) { "lowConfidenceWarnBelow must be within 0..100" }
+        require(lowCoverageWarnBelow.isFinite() && lowCoverageWarnBelow in 0.0..1.0) {
+            "lowCoverageWarnBelow must be within 0..1"
+        }
+        require(lowConfidenceWarnBelow.isFinite() && lowConfidenceWarnBelow in 0.0..100.0) {
+            "lowConfidenceWarnBelow must be within 0..100"
+        }
+        require(floodZoneScore.isFinite() && floodZoneScore in 0.0..100.0) {
+            "floodZoneScore must be within 0..100"
+        }
+        require(noFloodZoneScore.isFinite() && noFloodZoneScore in 0.0..100.0) {
+            "noFloodZoneScore must be within 0..100"
+        }
+        require(allCashDscrSentinel.isFinite() && allCashDscrSentinel > 0.0) {
+            "allCashDscrSentinel must be finite and > 0"
+        }
+        require(maxPlausibleInterestRatePct.isFinite() && maxPlausibleInterestRatePct > 0.0) {
+            "maxPlausibleInterestRatePct must be finite and > 0"
+        }
+        require(rentConfidenceAdjustmentRangePoints.isFinite() && rentConfidenceAdjustmentRangePoints in 0.0..100.0) {
+            "rentConfidenceAdjustmentRangePoints must be within 0..100"
+        }
+        require(listOf(
+            compsConfidenceNoCompsWithEstimatePoints,
+            compsConfidenceLimitedPoints,
+            compsConfidenceStrongPoints
+        ).all { it.isFinite() && it in -100.0..100.0 }) {
+            "Comparable-sales confidence adjustments must be within -100..100"
+        }
+        require(compsConfidenceLimitedThreshold >= 1 && compsConfidenceStrongThreshold > compsConfidenceLimitedThreshold) {
+            "Comparable count thresholds must be positive and strictly increasing"
+        }
+        require(consistencyPenaltyPerIssue.isFinite() && consistencyPenaltyPerIssue in 0.0..100.0) {
+            "consistencyPenaltyPerIssue must be within 0..100"
+        }
+        require(listOf(
+            allCashCashFlowScore,
+            allCashRiskSafetyScore,
+            taxDelinquentScore,
+            noTaxDelinquentScore,
+            positiveReasonThreshold,
+            negativeReasonThreshold
+        ).all { it.isFinite() && it in 0.0..100.0 }) {
+            "Special-case scores and reason thresholds must be within 0..100"
+        }
+        require(positiveReasonThreshold > negativeReasonThreshold) {
+            "positiveReasonThreshold must be > negativeReasonThreshold"
+        }
+        numericBandOverrides.forEach { (componentId, points) ->
+            require(componentId in NUMERIC_BAND_COMPONENT_IDS) {
+                "Unknown component id in numeric band overrides: '$componentId'"
+            }
+            require(points.size >= 2) { "Band override for '$componentId' needs at least two points" }
+            require(points.all { it.threshold.isFinite() && it.score.isFinite() && it.score in 0.0..100.0 }) {
+                "Band override for '$componentId' must contain finite thresholds and scores in 0..100"
+            }
+            require(points.zipWithNext().all { (left, right) -> left.threshold < right.threshold }) {
+                "Band thresholds for '$componentId' must be strictly increasing"
+            }
+            val scoreDeltas = points.zipWithNext().map { (left, right) -> right.score - left.score }
+            require(scoreDeltas.all { it >= 0.0 } || scoreDeltas.all { it <= 0.0 }) {
+                "Band scores for '$componentId' must be monotone"
+            }
+        }
+        marketDemandScoreOverrides.forEach { (key, score) ->
+            require(key in MARKET_DEMAND_KEYS) { "Unknown normalized market-demand key: '$key'" }
+            require(score.isFinite() && score in 0.0..100.0) {
+                "Market-demand override '$key' must be within 0..100"
+            }
+        }
+        distressSourceScoreOverrides.forEach { (key, score) ->
+            require(key in DISTRESS_SOURCE_KEYS) { "Unknown normalized distress-source key: '$key'" }
+            require(score.isFinite() && score in 0.0..100.0) {
+                "Distress-source override '$key' must be within 0..100"
+            }
+        }
+    }
+
+    companion object {
+        private val NUMERIC_BAND_COMPONENT_IDS = setOf(
+            "capRatePct", "cashOnCashPct", "monthlyCashFlow", "dscr",
+            "instantEquityPct", "arvSpreadPct", "priceVsMedianPct",
+            "neighborhoodAppreciationPct", "areaDaysOnMarket", "pricePerSqFtVsAreaPct",
+            "propertyAgeYears", "riskDscr", "vacancyRatePct", "renovationPctOfPrice", "interestRatePct",
+            "listingDaysOnMarket", "cumulativePriceDropPct"
+        )
+        private val MARKET_DEMAND_KEYS = setOf(
+            "high", "strong", "sellersmarket", "hot", "moderate", "medium", "warm",
+            "balanced", "neutral", "stable", "buyersmarket", "low", "weak", "cold", "slow"
+        )
+        private val DISTRESS_SOURCE_KEYS = setOf(
+            "FORECLOSURE", "BANK_OWNED", "REO", "SHORT_SALE", "AUCTION", "WHOLESALE",
+            "OFF_MARKET", "OFFMARKET", "PRE_FORECLOSURE", "ON_MARKET", "ONMARKET", "MLS"
+        )
     }
 }
 
@@ -216,6 +348,33 @@ data class ScoreReason(
     val subscoreId: String
 )
 
+/** Shape of the explicit deterministic rule applied to one scoring component. */
+enum class ScoreRuleKind {
+    PIECEWISE_LINEAR,
+    CATEGORY_LOOKUP,
+    BOOLEAN_RULE,
+    SPECIAL_CASE,
+    COVERAGE_CALIBRATION,
+    MISSING_DATA
+}
+
+/**
+ * Machine-readable rule trace suitable for UI rendering or export. Thresholds are the exact
+ * anchors used for interpolation (or the exact category/special-case key); no model narration
+ * is needed to reconstruct why a component received its points.
+ */
+data class ScoreRuleTrace(
+    val ruleId: String,
+    val inputFields: List<String>,
+    val kind: ScoreRuleKind,
+    val lowerThreshold: Double? = null,
+    val lowerScore: Double? = null,
+    val upperThreshold: Double? = null,
+    val upperScore: Double? = null,
+    val interpolationFraction: Double? = null,
+    val matchKey: String? = null
+)
+
 /** Explainable breakdown of a single metric inside a subscore. */
 data class ComponentBreakdown(
     val componentId: String,
@@ -228,7 +387,11 @@ data class ComponentBreakdown(
     /** True when the metric was available and scored. */
     val covered: Boolean,
     /** Exact explanation: value, threshold band used, interpolation. */
-    val rationale: String
+    val rationale: String,
+    /** DealInput fields used directly or to derive [value]. */
+    val inputFields: List<String> = emptyList(),
+    /** Explicit rule and interpolation trace; null only for legacy external construction. */
+    val ruleTrace: ScoreRuleTrace? = null
 )
 
 /** One subscore with its full explainable breakdown. */
@@ -258,6 +421,17 @@ data class ReasonsSummary(
     val positive: List<String>,
     val neutral: List<String>,
     val negative: List<String>
+)
+
+/** Exact arithmetic inputs used to produce the Data Confidence Score. */
+data class ConfidenceScoreBreakdown(
+    val weightedCoverage: Double,
+    val coveragePoints: Double,
+    val rentConfidenceAdjustment: Double,
+    val comparableSalesAdjustment: Double,
+    val scoreBeforeConsistencyPenalty: Double,
+    val consistencyPenalty: Double,
+    val finalScore: Double
 )
 
 /** Effective weights used for this evaluation, echoed back for transparency. */
@@ -297,5 +471,14 @@ data class DealScoreResult(
      * These are never read by the engine and never influence any number --
      * see [DealScoringEngine.attachAiObservations].
      */
-    val aiObservations: List<String> = emptyList()
+    val aiObservations: List<String> = emptyList(),
+    /** Version of the deterministic threshold/calibration set used. */
+    val scoringModelVersion: String = "deal-scoring-v2",
+    /** Explicit reference year used for property-age scoring. */
+    val asOfYear: Int = DealScoringEngine.DEFAULT_AS_OF_YEAR,
+    /** Coverage-to-neutral settings used for all fact-driven subscores. */
+    val neutralScore: Double = 50.0,
+    val attenuationExponent: Double = 1.0,
+    /** Structured calculation path behind [dataConfidence]. */
+    val confidenceBreakdown: ConfidenceScoreBreakdown? = null
 )

@@ -3,8 +3,21 @@ package com.example.domain.intelligence.scoring
 import com.example.domain.intelligence.model.CanonicalProperty
 import com.example.domain.intelligence.model.DataProvenanceManifest
 import com.example.domain.intelligence.model.DealScoreBreakdown
+import com.example.domain.intelligence.model.ProvenanceSourceTier
 import com.example.domain.intelligence.model.StrategyFinancialMetrics
+import com.example.domain.scoring.DealInput
+import com.example.domain.scoring.DealScoringEngine as DeterministicScoringEngine
+import com.example.domain.scoring.ScoringWeights
+import kotlin.math.roundToInt
 
+/**
+ * Compatibility adapter for the property-import pipeline.
+ *
+ * All score arithmetic and explanation is delegated to the standalone deterministic engine. This
+ * adapter only maps explicitly available canonical/listing and underwriting facts; portal names
+ * are not mistaken for seller motivation, generated enrichment/comps are not treated as verified
+ * facts, and absent value/flood/delinquency metrics remain absent.
+ */
 object DealScoringEngine {
 
     fun calculateScore(
@@ -12,107 +25,77 @@ object DealScoringEngine {
         financials: StrategyFinancialMetrics,
         provenance: DataProvenanceManifest
     ): DealScoreBreakdown {
-        val positive = mutableListOf<String>()
-        val negative = mutableListOf<String>()
+        // The legacy financial model applies an assumed rent when the property has no estimate.
+        // Do not feed that fallback, or an explicitly AI-inferred metric, into deal scoring.
+        fun isNotAiInferred(field: String): Boolean =
+            provenance.getProvenanceFor(field)?.tier != ProvenanceSourceTier.AI_INFERENCE
 
-        // 1. Cash Flow Score (0 - 100)
-        var cashFlowScore = 50
-        if (financials.cashOnCashReturn >= 10.0) {
-            cashFlowScore += 40
-            positive.add("Strong Cash-on-Cash Return (${String.format("%.1f", financials.cashOnCashReturn)}%)")
-        } else if (financials.cashOnCashReturn >= 6.0) {
-            cashFlowScore += 25
-            positive.add("Healthy Cash-on-Cash Return (${String.format("%.1f", financials.cashOnCashReturn)}%)")
-        } else if (financials.cashOnCashReturn < 0.0) {
-            cashFlowScore -= 35
-            negative.add("Negative monthly cash flow ($${String.format("%,.0f", financials.monthlyCashFlow)}/mo)")
+        val rentProvenance = provenance.getProvenanceFor("estimatedRent")
+        val explicitRent = property.estimatedRent
+            ?.takeIf { it.isFinite() && it > 0.0 && rentProvenance?.tier != ProvenanceSourceTier.AI_INFERENCE }
+        val explicitListPriceAvailable = isNotAiInferred("listPrice")
+        val rentConfidencePct = if (explicitRent != null && rentProvenance?.tier != ProvenanceSourceTier.AI_INFERENCE) {
+            rentProvenance?.confidence?.times(100.0)
         } else {
-            cashFlowScore -= 10
-            negative.add("Modest cash flow margin below 6% target")
+            null
         }
-        cashFlowScore = cashFlowScore.coerceIn(0, 100)
 
-        // 2. Equity & Value Score (0 - 100)
-        var equityScore = 60
-        val rentToPricePct = (financials.grossMonthlyRent / financials.purchasePrice) * 100.0
-        if (rentToPricePct >= 0.8) {
-            equityScore += 25
-            positive.add("Favorable rent-to-price ratio (${String.format("%.2f", rentToPricePct)}%)")
-        } else if (rentToPricePct < 0.6) {
-            equityScore -= 15
-            negative.add("Rent-to-price ratio is compressed (${String.format("%.2f", rentToPricePct)}%)")
+        val originalPrice = property.originalListPrice
+        val listingPrice = property.listPrice
+        val priceDropPct = if (
+            explicitListPriceAvailable && isNotAiInferred("originalListPrice") &&
+            originalPrice != null && originalPrice.isFinite() && originalPrice > 0.0 &&
+            listingPrice.isFinite() && listingPrice >= 0.0
+        ) {
+            (((originalPrice - listingPrice) / originalPrice) * 100.0)
+                .takeIf { it.isFinite() }
+                ?.coerceIn(0.0, 100.0)
+        } else {
+            null
         }
-        equityScore = equityScore.coerceIn(0, 100)
 
-        // 3. Market Score (0 - 100)
-        var marketScore = 75
-        if (property.daysOnMarket != null && property.daysOnMarket < 20) {
-            marketScore += 10
-            positive.add("High market velocity (only ${property.daysOnMarket} days on market)")
-        }
-        if (property.zipCode in setOf("78701", "78702", "78704", "78745", "78751")) {
-            marketScore += 10
-            positive.add("Tier-1 high appreciation submarket (${property.zipCode})")
-        }
-        marketScore = marketScore.coerceIn(0, 100)
+        val underwritingMetricsAvailable = explicitRent != null && explicitListPriceAvailable
+        val input = DealInput(
+            purchasePrice = financials.purchasePrice.takeIf { explicitListPriceAvailable },
+            // Cash-flow outputs are scenario projections; only score them when rent and list price
+            // are explicit non-AI inputs, not finance-model fallbacks or AI-inferred values.
+            monthlyCashFlow = financials.monthlyCashFlow.takeIf { underwritingMetricsAvailable },
+            annualNoi = financials.netOperatingIncomeAnnual.takeIf { underwritingMetricsAvailable },
+            capRatePct = financials.capRate.takeIf { underwritingMetricsAvailable },
+            cashOnCashPct = financials.cashOnCashReturn.takeIf { underwritingMetricsAvailable },
+            dscr = financials.dscr.takeIf { underwritingMetricsAvailable },
+            monthlyDebtService = financials.monthlyDebtService.takeIf { underwritingMetricsAvailable },
+            grossMonthlyRent = explicitRent,
+            // Vacancy, rehab, closing costs and ARV in the legacy model are fixed strategy
+            // assumptions/projections, not observed property inputs; leave these unscored.
+            interestRatePct = financials.interestRate,
+            propertyPricePerSqFt = property.pricePerSqft.takeIf {
+                explicitListPriceAvailable && isNotAiInferred("pricePerSqFt")
+            },
+            yearBuilt = property.yearBuilt.takeIf { isNotAiInferred("yearBuilt") },
+            listingDaysOnMarket = property.daysOnMarket.takeIf { isNotAiInferred("daysOnMarket") },
+            cumulativePriceDropPct = priceDropPct,
+            rentConfidenceScore = rentConfidencePct
+        )
+        val result = DeterministicScoringEngine.evaluate(input)
 
-        // 4. Risk Score (Higher score = lower risk)
-        var riskScore = 70
-        if (financials.dscr >= 1.30) {
-            riskScore += 15
-            positive.add("Robust debt service coverage ratio (DSCR: ${String.format("%.2f", financials.dscr)})")
-        } else if (financials.dscr < 1.15) {
-            riskScore -= 25
-            negative.add("Tight debt service coverage (DSCR: ${String.format("%.2f", financials.dscr)})")
-        }
-        val taxRatePct = ((property.propertyTax ?: 0.0) / financials.purchasePrice) * 100.0
-        if (taxRatePct > 2.2) {
-            riskScore -= 15
-            negative.add("High property tax burden (${String.format("%.2f", taxRatePct)}% annual rate)")
-        }
-        riskScore = riskScore.coerceIn(0, 100)
-
-        // 5. Data Confidence Score
-        val hasDirectSource = provenance.records.any { it.source in setOf("Zillow", "Redfin", "Realtor.com", "Homes.com") }
-        val hasGovData = provenance.records.any { it.tier == com.example.domain.intelligence.model.ProvenanceSourceTier.GOVERNMENT_DATA }
-        var dataConfidenceScore = 60
-        if (hasDirectSource) dataConfidenceScore += 20
-        if (hasGovData) dataConfidenceScore += 15
-        if (property.bedrooms != null && property.bathrooms != null && property.squareFeet != null) dataConfidenceScore += 5
-        dataConfidenceScore = dataConfidenceScore.coerceIn(0, 100)
-
-        // 6. Distress Score
-        var distressScore = 20
-        if (property.daysOnMarket != null && property.daysOnMarket > 45) {
-            distressScore += 30
-            positive.add("Motivated seller opportunity (${property.daysOnMarket} days on market)")
-        }
-        if (property.originalListPrice != null && property.originalListPrice > property.listPrice) {
-            val discount = property.originalListPrice - property.listPrice
-            distressScore += 25
-            positive.add("Recent price reduction of $${String.format("%,.0f", discount)}")
-        }
-        distressScore = distressScore.coerceIn(0, 100)
-
-        // Overall Weighted Deal Score
-        val compositeScore = (
-            cashFlowScore * 0.35 +
-            equityScore * 0.20 +
-            marketScore * 0.15 +
-            riskScore * 0.20 +
-            dataConfidenceScore * 0.10
-        ).toInt().coerceIn(0, 100)
+        fun score(id: String): Int = result.subscores
+            .first { it.id == id }
+            .score
+            .roundToInt()
+            .coerceIn(0, 100)
 
         return DealScoreBreakdown(
-            dealScore = compositeScore,
-            cashFlowScore = cashFlowScore,
-            equityScore = equityScore,
-            marketScore = marketScore,
-            riskScore = riskScore,
-            dataConfidenceScore = dataConfidenceScore,
-            distressScore = distressScore,
-            positiveFactors = positive,
-            negativeFactors = negative
+            dealScore = result.score.roundToInt().coerceIn(0, 100),
+            cashFlowScore = score(ScoringWeights.CASH_FLOW),
+            equityScore = score(ScoringWeights.EQUITY),
+            marketScore = score(ScoringWeights.MARKET),
+            riskScore = score(ScoringWeights.RISK_SAFETY),
+            dataConfidenceScore = result.dataConfidence.roundToInt().coerceIn(0, 100),
+            distressScore = score(ScoringWeights.DISTRESS),
+            positiveFactors = result.reasons.positive,
+            negativeFactors = result.reasons.negative,
+            detailedResult = result
         )
     }
 }
