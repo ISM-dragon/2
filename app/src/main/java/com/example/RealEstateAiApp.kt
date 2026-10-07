@@ -4,17 +4,25 @@ import android.app.Application
 import com.example.data.adapter.OffMarketWholesaleAdapter
 import com.example.data.adapter.OnMarketMlsAdapter
 import com.example.data.adapter.PropertySourceManager
+import com.example.data.adapter.PropertyUrlImportBridge
 import com.example.data.local.AppDatabase
 import com.example.data.repository.*
 import com.example.domain.ai.GeminiManager
 import com.example.domain.automation.AutomationEngine
 import com.example.domain.automation.WorkManagerAutomationScheduler
+import com.example.domain.propertyurl.pipeline.PropertyImportQueue
+import com.example.domain.propertyurl.pipeline.PropertyUrlIntelligence
+import com.example.domain.propertyurl.pipeline.PropertyUrlIntelligenceFactory
+import com.example.domain.propertyurl.port.CredentialProvider
+import com.example.domain.propertyurl.store.FilePropertyImportJobStore
 import com.example.domain.gmail.GmailService
 import com.example.util.NetworkMonitor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.io.File
 
 class RealEstateAiApp : Application() {
 
@@ -25,6 +33,12 @@ class RealEstateAiApp : Application() {
         private set
 
     lateinit var propertyRepository: PropertyRepository
+        private set
+    lateinit var propertyUrlIntelligence: PropertyUrlIntelligence
+        private set
+    lateinit var propertyUrlImporter: PropertyUrlImportBridge
+        private set
+    lateinit var propertyImportQueue: PropertyImportQueue
         private set
 
     lateinit var propertyImportRepository: PropertyImportRepository
@@ -103,6 +117,20 @@ class RealEstateAiApp : Application() {
             sourceManager = propertySourceManager,
             importer = propertyImportRepository
         )
+        val propertyImportJobStore = FilePropertyImportJobStore(File(filesDir, "property-url-intelligence"))
+        propertyUrlIntelligence = PropertyUrlIntelligenceFactory.create(
+            jobStore = propertyImportJobStore,
+            options = PropertyUrlIntelligenceFactory.mobileOptions(),
+            credentialProvider = CredentialProvider.NONE,
+            useRobotsTxt = true
+        )
+        propertyUrlImporter = PropertyUrlImportBridge(propertyUrlIntelligence, propertyRepository)
+        propertyImportQueue = PropertyUrlIntelligenceFactory.createQueue(
+            intelligence = propertyUrlIntelligence,
+            jobStore = propertyImportJobStore,
+            clock = com.example.domain.propertyurl.port.SystemClock(),
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        )
         financialRepository = FinancialRepository(database.financialDao(), database.propertyDao(), database.automationDao())
         configRepository = ConfigRepository(database.configDao())
 
@@ -145,6 +173,7 @@ class RealEstateAiApp : Application() {
             automationEngine = automationEngine
         )
 
+        propertyImportQueue.start()
         // Seed default dataset, configs, and pre-underwrite
         CoroutineScope(Dispatchers.IO).launch {
             configRepository.seedDefaultsIfEmpty()
