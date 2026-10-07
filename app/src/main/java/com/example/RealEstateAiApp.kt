@@ -8,6 +8,7 @@ import com.example.data.adapter.PropertyUrlImportBridge
 import com.example.data.local.AppDatabase
 import com.example.data.repository.*
 import com.example.domain.ai.GeminiManager
+import com.example.domain.ai.analyst.RealEstateAnalyst
 import com.example.domain.automation.AutomationEngine
 import com.example.domain.automation.WorkManagerAutomationScheduler
 import com.example.domain.propertyurl.pipeline.PropertyImportQueue
@@ -57,6 +58,9 @@ class RealEstateAiApp : Application() {
         private set
 
     lateinit var geminiManager: GeminiManager
+        private set
+
+    lateinit var realEstateAnalyst: RealEstateAnalyst
         private set
 
     lateinit var gmailService: GmailService
@@ -135,6 +139,7 @@ class RealEstateAiApp : Application() {
         configRepository = ConfigRepository(database.configDao())
 
         geminiManager = GeminiManager(database.configDao())
+        realEstateAnalyst = RealEstateAnalyst(geminiManager)
         gmailService = GmailService(configRepository)
 
         offerRepository = OfferRepository(

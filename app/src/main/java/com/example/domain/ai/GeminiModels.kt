@@ -8,11 +8,11 @@ data class GeminiGenerationResponse(
     val errorMessage: String? = null
 )
 
-data class AiPropertyAnalysis(
-    val summary: String,
-    val strengths: List<String>,
-    val risks: List<String>,
-    val rentalAssessment: String,
-    val financialAssessment: String,
-    val recommendedStrategy: String
-)
+/** Shared generation boundary; GeminiManager remains responsible for API slots and failover. */
+interface GeminiContentGenerator {
+    suspend fun generateContent(
+        prompt: String,
+        systemPrompt: String? = null,
+        responseMimeType: String? = null
+    ): GeminiGenerationResponse
+}

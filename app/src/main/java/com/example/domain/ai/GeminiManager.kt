@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
 
 class GeminiManager(
     private val configDao: ConfigDao
-) {
+) : GeminiContentGenerator {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(25, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
@@ -72,7 +72,11 @@ class GeminiManager(
         }
     }
 
-    suspend fun generateContent(prompt: String, systemPrompt: String? = null): GeminiGenerationResponse = withContext(Dispatchers.IO) {
+    override suspend fun generateContent(
+        prompt: String,
+        systemPrompt: String?,
+        responseMimeType: String?
+    ): GeminiGenerationResponse = withContext(Dispatchers.IO) {
         val configs = configDao.getAllApiConfigsList()
         val now = System.currentTimeMillis()
 
@@ -107,7 +111,7 @@ class GeminiManager(
             // Try with up to 2 attempts for transient errors with exponential backoff
             for (attempt in 0..1) {
                 try {
-                    val (success, resultOrError) = generateContentInternal(prompt, systemPrompt, apiKey, model)
+                    val (success, resultOrError) = generateContentInternal(prompt, systemPrompt, apiKey, model, responseMimeType)
                     if (success) {
                         configDao.incrementSlotUsage(slotIndex, System.currentTimeMillis())
                         configDao.updateSlotStatus(slotIndex, "READY", 0L, null)
@@ -163,7 +167,8 @@ class GeminiManager(
         prompt: String,
         systemPrompt: String?,
         apiKey: String,
-        model: String
+        model: String,
+        responseMimeType: String? = null
     ): Pair<Boolean, String> {
         val requestJson = JSONObject().apply {
             val contentsArray = JSONArray()
@@ -189,6 +194,7 @@ class GeminiManager(
 
             val genConfig = JSONObject().apply {
                 put("temperature", 0.4)
+                responseMimeType?.takeIf { it.isNotBlank() }?.let { put("responseMimeType", it) }
             }
             put("generationConfig", genConfig)
         }

@@ -25,6 +25,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.data.local.entity.AIMessageEntity
+import com.example.domain.ai.analyst.AnalystClaim
+import com.example.domain.ai.analyst.AnalystClaimType
+import com.example.domain.ai.analyst.AnalystDueDiligenceQuestion
 import com.example.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -36,7 +39,6 @@ fun AiScreen(
 ) {
     LaunchedEffect(propertyId) {
         viewModel.loadContext(propertyId)
-        viewModel.runStructuredAnalysis()
     }
 
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -101,13 +103,12 @@ fun AiScreen(
 
             when (state.selectedTab) {
                 0 -> {
-                    // Property Analysis Tab
                     if (state.isAnalyzing) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 CircularProgressIndicator(color = CyanPrimary)
                                 Spacer(modifier = Modifier.height(12.dp))
-                                Text("Gemini analyzing property fundamentals...", fontSize = 12.sp, color = Slate400)
+                                Text("Validating source-backed analysis...", fontSize = 12.sp, color = Slate400)
                             }
                         }
                     } else {
@@ -119,44 +120,88 @@ fun AiScreen(
                                 verticalArrangement = Arrangement.spacedBy(14.dp)
                             ) {
                                 item {
-                                    AiSectionCard(title = "EXECUTIVE SUMMARY", icon = Icons.Filled.Summarize, color = CyanPrimary) {
-                                        Text(analysis.summary, style = MaterialTheme.typography.bodyMedium, color = Slate200)
+                                    AiSectionCard(title = "INVESTMENT THESIS", icon = Icons.Filled.Summarize, color = CyanPrimary) {
+                                        AnalystClaimContent(analysis.investmentThesis)
                                     }
                                 }
 
                                 item {
-                                    AiSectionCard(title = "KEY DEAL STRENGTHS", icon = Icons.Filled.CheckCircle, color = EmeraldGain) {
-                                        analysis.strengths.forEach { s ->
-                                            Row(modifier = Modifier.padding(vertical = 3.dp)) {
-                                                Icon(Icons.Filled.Check, contentDescription = null, tint = EmeraldGain, modifier = Modifier.size(16.dp))
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(s.replace("•", "").trim(), style = MaterialTheme.typography.bodySmall, color = Slate200)
-                                            }
+                                    AiSectionCard(title = "SUPPORTED STRENGTHS", icon = Icons.Filled.CheckCircle, color = EmeraldGain) {
+                                        if (analysis.strengths.isEmpty()) {
+                                            Text("No strengths could be established from the supplied evidence.", style = MaterialTheme.typography.bodySmall, color = Slate400)
+                                        } else {
+                                            analysis.strengths.forEach { claim -> AnalystClaimContent(claim) }
                                         }
                                     }
                                 }
 
                                 item {
-                                    AiSectionCard(title = "RISK FACTORS & BLINDSPOTS", icon = Icons.Filled.Warning, color = CrimsonAlert) {
-                                        analysis.risks.forEach { r ->
-                                            Row(modifier = Modifier.padding(vertical = 3.dp)) {
-                                                Icon(Icons.Filled.Warning, contentDescription = null, tint = CrimsonAlert, modifier = Modifier.size(16.dp))
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(r.replace("•", "").trim(), style = MaterialTheme.typography.bodySmall, color = Slate200)
-                                            }
+                                    AiSectionCard(title = "RISKS", icon = Icons.Filled.Warning, color = CrimsonAlert) {
+                                        if (analysis.risks.isEmpty()) {
+                                            Text("No evidence-backed risks were returned.", style = MaterialTheme.typography.bodySmall, color = Slate400)
+                                        } else {
+                                            analysis.risks.forEach { claim -> AnalystClaimContent(claim) }
                                         }
                                     }
                                 }
 
                                 item {
-                                    AiSectionCard(title = "RENTAL & DEMAND ASSESSMENT", icon = Icons.Filled.TrendingUp, color = AmberAccent) {
-                                        Text(analysis.rentalAssessment, style = MaterialTheme.typography.bodyMedium, color = Slate200)
+                                    AiSectionCard(title = "RED FLAGS", icon = Icons.Filled.ReportProblem, color = CrimsonAlert) {
+                                        if (analysis.redFlags.isEmpty()) {
+                                            Text("No red flag was established from the supplied evidence.", style = MaterialTheme.typography.bodySmall, color = Slate400)
+                                        } else {
+                                            analysis.redFlags.forEach { claim -> AnalystClaimContent(claim) }
+                                        }
                                     }
                                 }
 
                                 item {
-                                    AiSectionCard(title = "RECOMMENDED ACQUISITION STRATEGY", icon = Icons.Filled.Lightbulb, color = PurpleAccent) {
-                                        Text(analysis.recommendedStrategy, style = MaterialTheme.typography.bodyMedium, color = Slate200)
+                                    AiSectionCard(title = "UNKNOWN / NOT PROVIDED", icon = Icons.Filled.HelpOutline, color = AmberAccent) {
+                                        if (analysis.unknowns.isEmpty()) {
+                                            Text("No explicit data gaps were reported.", style = MaterialTheme.typography.bodySmall, color = Slate400)
+                                        } else {
+                                            analysis.unknowns.forEach { claim -> AnalystClaimContent(claim) }
+                                        }
+                                    }
+                                }
+
+                                item {
+                                    AiSectionCard(title = "RECOMMENDED STRATEGY", icon = Icons.Filled.Lightbulb, color = PurpleAccent) {
+                                        AnalystClaimContent(analysis.recommendedStrategy)
+                                    }
+                                }
+
+                                item {
+                                    AiSectionCard(title = "DUE DILIGENCE QUESTIONS", icon = Icons.Filled.FactCheck, color = AmberAccent) {
+                                        analysis.dueDiligenceQuestions.forEach { question -> AnalystQuestionContent(question) }
+                                    }
+                                }
+
+                                item {
+                                    Text(
+                                        "Qualitative AI analysis only. Financial calculations remain with the deterministic local engine.",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Slate400
+                                    )
+                                }
+                            }
+                        } else {
+                            Column(
+                                modifier = Modifier.fillMaxSize().padding(24.dp),
+                                verticalArrangement = Arrangement.Center,
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Icon(Icons.Filled.Info, contentDescription = null, tint = AmberAccent, modifier = Modifier.size(32.dp))
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    state.analysisError ?: "No validated analysis is available.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = Slate200
+                                )
+                                if (state.property != null) {
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    OutlinedButton(onClick = { viewModel.runStructuredAnalysis() }) {
+                                        Text("Retry analysis")
                                     }
                                 }
                             }
@@ -183,8 +228,7 @@ fun AiScreen(
 
                         item {
                             AiSectionCard(title = "MARKET CONTEXT", icon = Icons.Filled.Public, color = AmberAccent) {
-                                Text("Target Submarket: High growth Sunbelt corridor with steady corporate relocation demand.", fontSize = 12.sp, color = Slate200)
-                                Text("Underwriting Stance: Conservative vacancy buffer (5%) and management reserve (8%) factored into all models.", fontSize = 12.sp, color = Slate300)
+                                Text("Market claims are shown only when supported by the selected property's supplied evidence. Missing market data is treated as unknown.", fontSize = 12.sp, color = Slate200)
                             }
                         }
 
@@ -323,6 +367,69 @@ fun AiScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AnalystClaimContent(claim: AnalystClaim) {
+    val classificationColor = when (claim.classification) {
+        AnalystClaimType.FACT -> EmeraldGain
+        AnalystClaimType.ESTIMATE -> AmberAccent
+        AnalystClaimType.INFERENCE -> CyanPrimary
+        AnalystClaimType.UNKNOWN -> Slate400
+    }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(color = classificationColor.copy(alpha = 0.16f), shape = RoundedCornerShape(12.dp)) {
+                Text(
+                    claim.classification.name,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                    color = classificationColor,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                String.format(java.util.Locale.US, "%.0f%% confidence", claim.confidence * 100.0),
+                style = MaterialTheme.typography.labelSmall,
+                color = Slate400
+            )
+        }
+        Spacer(modifier = Modifier.height(5.dp))
+        Text(claim.statement, style = MaterialTheme.typography.bodySmall, color = Slate200)
+        if (claim.evidenceRefs.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(
+                "Evidence: ${claim.evidenceRefs.joinToString()}",
+                style = MaterialTheme.typography.labelSmall,
+                color = Slate400
+            )
+        }
+    }
+}
+
+@Composable
+private fun AnalystQuestionContent(question: AnalystDueDiligenceQuestion) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                color = if (question.priority.name == "HIGH") CrimsonAlert.copy(alpha = 0.16f) else AmberAccent.copy(alpha = 0.16f),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text(
+                    question.priority.name,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                    color = if (question.priority.name == "HIGH") CrimsonAlert else AmberAccent,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(5.dp))
+        Text(question.question, style = MaterialTheme.typography.bodySmall, color = Slate200)
+        AnalystClaimContent(question.basis)
     }
 }
 
