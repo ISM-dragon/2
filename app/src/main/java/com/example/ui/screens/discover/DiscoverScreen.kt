@@ -25,6 +25,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.components.PropertyCard
 import com.example.ui.components.PropertyMapCanvas
+import com.example.ui.components.PropertyUrlIntelligenceCard
 import com.example.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -32,6 +33,7 @@ import com.example.ui.theme.*
 fun DiscoverScreen(
     onNavigateToDetail: (String) -> Unit,
     onNavigateToAnalyzer: (String) -> Unit,
+    onNavigateToDealRoom: (String) -> Unit = {},
     viewModel: DiscoverViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -220,16 +222,34 @@ fun DiscoverScreen(
                 }
 
                 DiscoverViewMode.GRID -> {
-                    if (state.properties.isEmpty()) {
-                        EmptyDiscoverState()
-                    } else {
-                        LazyVerticalGrid(
-                            columns = GridCells.Adaptive(minSize = 320.dp),
-                            contentPadding = PaddingValues(16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(16.dp),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 320.dp),
+                        contentPadding = PaddingValues(16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                            PropertyUrlIntelligenceCard(
+                                urlInput = state.urlInput,
+                                onUrlChange = { viewModel.setUrlInput(it) },
+                                onAnalyze = { force ->
+                                    viewModel.analyzePropertyUrl(forceRefresh = force) { propId ->
+                                        onNavigateToDealRoom(propId)
+                                    }
+                                },
+                                jobProgress = state.jobProgress,
+                                onCancelJob = { id -> viewModel.cancelJob(id) },
+                                onClearJob = { viewModel.clearJob() },
+                                onOpenDealRoom = { propId -> onNavigateToDealRoom(propId) }
+                            )
+                        }
+
+                        if (state.properties.isEmpty()) {
+                            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                                EmptyDiscoverState()
+                            }
+                        } else {
                             items(state.properties, key = { it.id }) { property ->
                                 PropertyCard(
                                     property = property,
@@ -244,14 +264,32 @@ fun DiscoverScreen(
                 }
 
                 DiscoverViewMode.LIST -> {
-                    if (state.properties.isEmpty()) {
-                        EmptyDiscoverState()
-                    } else {
-                        LazyColumn(
-                            contentPadding = PaddingValues(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(16.dp),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
+                    LazyColumn(
+                        contentPadding = PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        item {
+                            PropertyUrlIntelligenceCard(
+                                urlInput = state.urlInput,
+                                onUrlChange = { viewModel.setUrlInput(it) },
+                                onAnalyze = { force ->
+                                    viewModel.analyzePropertyUrl(forceRefresh = force) { propId ->
+                                        onNavigateToDealRoom(propId)
+                                    }
+                                },
+                                jobProgress = state.jobProgress,
+                                onCancelJob = { id -> viewModel.cancelJob(id) },
+                                onClearJob = { viewModel.clearJob() },
+                                onOpenDealRoom = { propId -> onNavigateToDealRoom(propId) }
+                            )
+                        }
+
+                        if (state.properties.isEmpty()) {
+                            item {
+                                EmptyDiscoverState()
+                            }
+                        } else {
                             items(state.properties, key = { it.id }) { property ->
                                 PropertyCard(
                                     property = property,

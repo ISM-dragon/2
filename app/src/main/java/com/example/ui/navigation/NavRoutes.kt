@@ -17,4 +17,7 @@ sealed class Screen(val route: String) {
     object Automation : Screen("automation")
     object Saved : Screen("saved")
     object Settings : Screen("settings")
+    object DealRoom : Screen("deal_room/{propertyId}") {
+        fun createRoute(propertyId: String) = "deal_room/$propertyId"
+    }
 }

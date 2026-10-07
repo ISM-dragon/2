@@ -1,0 +1,45 @@
+package com.example.domain.intelligence.model
+
+data class CanonicalProperty(
+    val propertyId: String,
+    val sourceUrl: String,
+    val source: String, // "Zillow", "Redfin", "Realtor.com", "Homes.com", "Generic"
+    val listingId: String? = null,
+    val address: String,
+    val street: String? = null,
+    val city: String,
+    val state: String,
+    val zipCode: String,
+    val county: String? = null,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    val propertyType: String = "Single Family", // "Single Family", "Multi-Family", "Condo", "Townhouse", "Commercial"
+    val status: String = "Active", // "Active", "Pending", "Off-Market", "Sold"
+    val listPrice: Double,
+    val originalListPrice: Double? = null,
+    val pricePerSqft: Double? = null,
+    val bedrooms: Int? = null,
+    val bathrooms: Double? = null,
+    val squareFeet: Int? = null,
+    val lotSquareFeet: Int? = null,
+    val yearBuilt: Int? = null,
+    val stories: Int? = null,
+    val parking: String? = null,
+    val description: String? = null,
+    val hoa: Boolean = false,
+    val hoaFee: Double? = null,
+    val propertyTax: Double? = null,
+    val taxYear: Int? = null,
+    val estimatedRent: Double? = null,
+    val rentSource: String? = null,
+    val lastSalePrice: Double? = null,
+    val lastSaleDate: String? = null,
+    val photos: List<String> = emptyList(),
+    val virtualTour: String? = null,
+    val listingDate: String? = null,
+    val daysOnMarket: Int? = null,
+    val parcelId: String? = null,
+    val apn: String? = null,
+    val agentName: String? = null,
+    val brokerage: String? = null
+)

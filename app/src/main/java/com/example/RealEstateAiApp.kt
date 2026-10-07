@@ -84,6 +84,9 @@ class RealEstateAiApp : Application() {
     lateinit var backupRestoreManager: BackupRestoreManager
         private set
 
+    lateinit var intelligenceRepository: IntelligenceRepository
+        private set
+
     override fun onCreate() {
         super.onCreate()
         database = AppDatabase.getInstance(this)
@@ -141,6 +144,12 @@ class RealEstateAiApp : Application() {
         geminiManager = GeminiManager(database.configDao())
         realEstateAnalyst = RealEstateAnalyst(geminiManager)
         gmailService = GmailService(configRepository)
+
+        intelligenceRepository = IntelligenceRepository(
+            intelligenceDao = database.intelligenceDao(),
+            propertyDao = database.propertyDao(),
+            geminiManager = geminiManager
+        )
 
         offerRepository = OfferRepository(
             offerDao = database.offerDao(),

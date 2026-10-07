@@ -5,6 +5,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.RealEstateAiApp
 import com.example.data.local.entity.PropertyEntity
+import com.example.domain.intelligence.job.JobProgressState
+import com.example.domain.intelligence.job.JobStatus
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -41,18 +43,22 @@ data class DiscoverUiState(
     val filter: DiscoverFilterState = DiscoverFilterState(),
     val properties: List<PropertyEntity> = emptyList(),
     val isFilterSheetOpen: Boolean = false,
-    val isRefreshing: Boolean = false
+    val isRefreshing: Boolean = false,
+    val urlInput: String = "",
+    val jobProgress: JobProgressState? = null
 )
 
 class DiscoverViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as RealEstateAiApp
     private val propertyRepo = app.propertyRepository
+    private val intelligenceRepo = app.intelligenceRepository
 
     private val _filterState = MutableStateFlow(DiscoverFilterState())
     private val _isFilterSheetOpen = MutableStateFlow(false)
     private val _isRefreshing = MutableStateFlow(false)
+    private val _urlInput = MutableStateFlow("")
 
-    val uiState: StateFlow<DiscoverUiState> = combine(
+    private val propertiesFlow = combine(
         propertyRepo.allProperties,
         _filterState,
         _isFilterSheetOpen,
@@ -81,18 +87,50 @@ class DiscoverViewModel(application: Application) : AndroidViewModel(application
                 DiscoverSortOption.HIGHEST_CAP_RATE -> b.dealScore.compareTo(a.dealScore)
             }
         }
+        Triple(filter, filtered, isSheetOpen to refreshing)
+    }
 
+    val uiState: StateFlow<DiscoverUiState> = combine(
+        propertiesFlow,
+        _urlInput,
+        intelligenceRepo.currentJobProgress
+    ) { (filter, filtered, sheetAndRefresh), url, jobProg ->
         DiscoverUiState(
             filter = filter,
             properties = filtered,
-            isFilterSheetOpen = isSheetOpen,
-            isRefreshing = refreshing
+            isFilterSheetOpen = sheetAndRefresh.first,
+            isRefreshing = sheetAndRefresh.second,
+            urlInput = url,
+            jobProgress = jobProg
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = DiscoverUiState()
     )
+
+    fun setUrlInput(url: String) {
+        _urlInput.value = url
+    }
+
+    fun analyzePropertyUrl(forceRefresh: Boolean = false, onSuccess: (String) -> Unit = {}) {
+        val url = _urlInput.value.trim()
+        if (url.isBlank()) return
+        viewModelScope.launch {
+            val result = intelligenceRepo.importPropertyUrl(url, forceRefresh)
+            if (result.status == JobStatus.COMPLETED && result.propertyId != null) {
+                onSuccess(result.propertyId)
+            }
+        }
+    }
+
+    fun cancelJob(jobId: String) {
+        intelligenceRepo.cancelJob(jobId)
+    }
+
+    fun clearJob() {
+        intelligenceRepo.clearJob()
+    }
 
     fun setSearchQuery(query: String) {
         _filterState.update { it.copy(searchQuery = query) }
@@ -203,7 +241,6 @@ class DiscoverViewModel(application: Application) : AndroidViewModel(application
                 rentEstimate = rentEst,
                 marketData = marketData
             )
-            // Immediately run deterministic underwrite
             app.financialRepository.analyzeProperty(propId)
         }
     }

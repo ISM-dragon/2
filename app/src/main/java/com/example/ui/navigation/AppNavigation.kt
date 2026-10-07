@@ -15,6 +15,7 @@ import androidx.navigation.navArgument
 import com.example.ui.screens.ai.AiScreen
 import com.example.ui.screens.analyzer.AnalyzerScreen
 import com.example.ui.screens.automation.AutomationScreen
+import com.example.ui.screens.dealroom.DealRoomScreen
 import com.example.ui.screens.discover.DiscoverScreen
 import com.example.ui.screens.home.HomeScreen
 import com.example.ui.screens.offers.OffersScreen
@@ -120,7 +121,21 @@ fun AppNavigation() {
             composable(Screen.Discover.route) {
                 DiscoverScreen(
                     onNavigateToDetail = { propId -> navController.navigate(Screen.PropertyDetail.createRoute(propId)) },
-                    onNavigateToAnalyzer = { propId -> navController.navigate(Screen.Analyzer.createRoute(propId)) }
+                    onNavigateToAnalyzer = { propId -> navController.navigate(Screen.Analyzer.createRoute(propId)) },
+                    onNavigateToDealRoom = { propId -> navController.navigate(Screen.DealRoom.createRoute(propId)) }
+                )
+            }
+
+            // Property Deal Room
+            composable(
+                route = Screen.DealRoom.route,
+                arguments = listOf(navArgument("propertyId") { type = NavType.StringType })
+            ) { backStackEntry ->
+                val propId = backStackEntry.arguments?.getString("propertyId") ?: ""
+                DealRoomScreen(
+                    propertyId = propId,
+                    onBack = { navController.popBackStack() },
+                    onNavigateToOffer = { navController.navigate(Screen.Offers.route) }
                 )
             }
 
