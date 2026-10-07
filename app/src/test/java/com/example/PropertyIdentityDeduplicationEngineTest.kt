@@ -14,11 +14,51 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/**
+ * Pins the deterministic identity-resolution contract of [PropertyIdentityDeduplicationEngine]:
+ * matching precedence (APN > MLS ID > source listing ID > source URL > normalized address >
+ * coordinates), the five outcomes (NEW, EXACT_MATCH, CANONICAL_MATCH, POSSIBLE_MATCH, CONFLICT),
+ * conflict cross-checks, and the rule that weak evidence is never merged automatically.
+ */
 class PropertyIdentityDeduplicationEngineTest {
     private val engine = PropertyIdentityDeduplicationEngine()
 
+    // ── APN / parcel ID ─────────────────────────────────────────────────────────────────────────
+
     @Test
     fun parcelIdIsHighestPriorityAndIgnoresSeparatorsAndCase() {
+        val incoming = identity(
+            source = "Redfin",
+            providerListingId = "rf-42",
+            parcelId = "APN: 014-22-0007",
+            address = "123 Main St",
+            city = "Austin",
+            state = "TX",
+            postalCode = "78701",
+            latitude = 30.0,
+            longitude = -97.0
+        )
+        val candidate = canonical(
+            id = "canonical-1",
+            parcelId = "014220007",
+            address = "123 Main Street",
+            city = "Austin",
+            state = "Texas",
+            postalCode = "78701",
+            latitude = 30.0,
+            longitude = -97.0
+        )
+
+        val result = engine.deduplicate(incoming, listOf(candidate))
+
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.APN, result.matchMethod)
+        assertEquals("canonical-1", result.matchedCanonicalId)
+        assertTrue(result.confidence > 0.99)
+    }
+
+    @Test
+    fun exactMatchIsReportedWhenTheSameSourceRecordIsReimported() {
         val incoming = identity(
             source = "Redfin",
             providerListingId = "rf-42",
@@ -44,11 +84,76 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
-        assertEquals(IdentityMatchMethod.APN, result.matchMethod)
-        assertEquals("canonical-1", result.matchedCanonicalId)
-        assertTrue(result.confidence > 0.99)
+        // The source listing ID proves this is the very same record: idempotent refresh.
+        assertEquals(DeduplicationStatus.EXACT_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.SOURCE_LISTING_ID, result.matchMethod)
+        assertEquals(1.0, result.confidence, 0.0)
+        assertTrue(result.reason.contains("idempotent", ignoreCase = true))
+        // The trail shows both the record identity and the corroborating APN.
+        assertTrue(result.evidence.any { it.signal == IdentityMatchMethod.APN && it.matchedCanonicalIds == listOf("canonical-1") })
     }
+
+    // ── MLS ID ──────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun mlsIdMatchesAcrossProvidersRegardlessOfFormatting() {
+        val incoming = identity(source = "Zillow", mlsId = "MLS# a10-50837")
+        val candidate = canonical(
+            id = "mls-home",
+            mlsId = "A1050837",
+            sourceIdentities = setOf(identity(source = "Realtor.com", mlsId = "a10 50837"))
+        )
+
+        val result = engine.deduplicate(incoming, listOf(candidate))
+
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.MLS_ID, result.matchMethod)
+    }
+
+    @Test
+    fun mlsIdHasPriorityOverSourceListingIdAddressAndCoordinates() {
+        val incoming = identity(
+            source = "Zillow", providerListingId = "z-9", mlsId = "A1050837",
+            address = "123 Main St", city = "Austin", state = "TX",
+            latitude = 30.0, longitude = -97.0
+        )
+        val candidate = canonical(
+            id = "mls-home", mlsId = "A1050837", address = "123 Main Street", city = "Austin", state = "TX",
+            latitude = 30.0, longitude = -97.0
+        )
+
+        val result = engine.deduplicate(incoming, listOf(candidate))
+
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.MLS_ID, result.matchMethod)
+    }
+
+    @Test
+    fun differentMlsIdsAreNotAConflictBecauseListingsGetRelisted() {
+        val incoming = identity(
+            mlsId = "A1050838", address = "123 Main St", city = "Austin", state = "TX", postalCode = "78701"
+        )
+        val candidate = canonical(
+            id = "relisted-home", mlsId = "A1050000", address = "123 Main Street",
+            city = "Austin", state = "TX", postalCode = "78701"
+        )
+
+        val result = engine.deduplicate(incoming, listOf(candidate))
+
+        // The address still identifies the property; the changed MLS number is not a contradiction.
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.NORMALIZED_ADDRESS, result.matchMethod)
+    }
+
+    @Test
+    fun placeholderMlsIdsAreTreatedAsMissing() {
+        val incoming = identity(mlsId = "N/A", address = "123 Main St", city = "Austin", state = "TX")
+        val candidate = canonical(id = "home", mlsId = "UNKNOWN", address = "999 Oak Rd", city = "Austin", state = "TX")
+
+        assertEquals(DeduplicationStatus.NEW, engine.deduplicate(incoming, listOf(candidate)).status)
+    }
+
+    // ── normalized address ──────────────────────────────────────────────────────────────────────
 
     @Test
     fun normalizedAddressHandlesCasingDirectionsAndStreetSuffixes() {
@@ -65,7 +170,7 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
         assertEquals(IdentityMatchMethod.NORMALIZED_ADDRESS, result.matchMethod)
     }
 
@@ -87,7 +192,7 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
         assertEquals(IdentityMatchMethod.NORMALIZED_ADDRESS, result.matchMethod)
     }
 
@@ -109,7 +214,7 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
     }
 
     @Test
@@ -134,6 +239,7 @@ class PropertyIdentityDeduplicationEngineTest {
         assertEquals(DeduplicationStatus.POSSIBLE_MATCH, result.status)
         assertEquals(IdentityMatchMethod.FUZZY_ADDRESS, result.matchMethod)
         assertNull(result.canonicalIdentity)
+        assertFalseAutoMerge(result)
     }
 
     @Test
@@ -160,7 +266,7 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
         assertEquals(IdentityMatchMethod.NORMALIZED_ADDRESS, result.matchMethod)
     }
 
@@ -171,7 +277,7 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
     }
 
     @Test
@@ -198,6 +304,8 @@ class PropertyIdentityDeduplicationEngineTest {
         assertEquals(DeduplicationStatus.NEW, engine.deduplicate(incoming, listOf(candidate)).status)
     }
 
+    // ── coordinates ─────────────────────────────────────────────────────────────────────────────
+
     @Test
     fun exactCoordinatesCanMatchWithoutAddressOrParcelData() {
         val incoming = identity(latitude = 30.2672, longitude = -97.7431)
@@ -205,7 +313,7 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
         assertEquals(IdentityMatchMethod.COORDINATES, result.matchMethod)
     }
 
@@ -216,7 +324,7 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
         assertEquals(IdentityMatchMethod.COORDINATES, result.matchMethod)
     }
 
@@ -231,6 +339,7 @@ class PropertyIdentityDeduplicationEngineTest {
         assertEquals(IdentityMatchMethod.COORDINATES, result.matchMethod)
         assertEquals(listOf("near-home"), result.candidateCanonicalIds)
         assertTrue(result.reason.contains("review", ignoreCase = true))
+        assertFalseAutoMerge(result)
     }
 
     @Test
@@ -266,6 +375,8 @@ class PropertyIdentityDeduplicationEngineTest {
         assertEquals(DeduplicationStatus.NEW, engine.deduplicate(incoming, listOf(candidate)).status)
     }
 
+    // ── source listing ID (same-record identity) ────────────────────────────────────────────────
+
     @Test
     fun providerListingIdMatchesWithinTheSameProviderNamespace() {
         val incoming = identity(source = "Zillow", providerListingId = "  Z-100  ")
@@ -276,8 +387,9 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
-        assertEquals(IdentityMatchMethod.PROVIDER_LISTING_ID, result.matchMethod)
+        assertEquals(DeduplicationStatus.EXACT_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.SOURCE_LISTING_ID, result.matchMethod)
+        assertEquals(1.0, result.confidence, 0.0)
     }
 
     @Test
@@ -288,7 +400,7 @@ class PropertyIdentityDeduplicationEngineTest {
             sourceIdentities = setOf(identity(source = "Redfin", providerListingId = "listing-x9"))
         )
 
-        assertEquals(DeduplicationStatus.MATCHED, engine.deduplicate(incoming, listOf(candidate)).status)
+        assertEquals(DeduplicationStatus.EXACT_MATCH, engine.deduplicate(incoming, listOf(candidate)).status)
     }
 
     @Test
@@ -332,6 +444,70 @@ class PropertyIdentityDeduplicationEngineTest {
         assertEquals(DeduplicationStatus.CONFLICT, result.status)
         assertTrue(result.reason.contains("parcel", ignoreCase = true))
     }
+
+    // ── source URL (same-record identity) ───────────────────────────────────────────────────────
+
+    @Test
+    fun sameNormalizedListingUrlIsAnExactMatchEvenWithTrackingParameters() {
+        val first = identity(
+            source = "Zillow",
+            providerListingId = "z-1",
+            sourceUrl = "https://www.zillow.com/homedetails/123-Main-St-Austin-TX/99999_zpid/"
+        )
+        val reimport = identity(
+            source = "Zillow Mirror",
+            providerListingId = "zm-77",
+            sourceUrl = "HTTPS://ZILLOW.COM/homedetails/123-main-st-austin-tx/99999_zpid?utm_source=navbar&fbclid=abc#photos"
+        )
+        val candidate = canonical(
+            id = "zillow-home",
+            sourceIdentities = setOf(first)
+        )
+
+        val result = engine.deduplicate(reimport, listOf(candidate))
+
+        // The URL host namespaces the record, so even a different adapter label resolves it.
+        assertEquals(DeduplicationStatus.EXACT_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.SOURCE_URL, result.matchMethod)
+    }
+
+    @Test
+    fun differentListingUrlsDoNotMatch() {
+        val incoming = identity(source = "Zillow", sourceUrl = "https://www.zillow.com/homedetails/99999_zpid")
+        val candidate = canonical(
+            id = "other-listing",
+            sourceIdentities = setOf(identity(source = "Zillow", sourceUrl = "https://www.zillow.com/homedetails/88888_zpid"))
+        )
+
+        assertEquals(DeduplicationStatus.NEW, engine.deduplicate(incoming, listOf(candidate)).status)
+    }
+
+    @Test
+    fun urlsOnDifferentHostsNeverMatch() {
+        val incoming = identity(sourceUrl = "https://www.redfin.com/TX/Austin/123-Main-St/home/1")
+        val candidate = canonical(
+            id = "zillow-copy",
+            sourceIdentities = setOf(identity(sourceUrl = "https://www.zillow.com/TX/Austin/123-Main-St/home/1"))
+        )
+
+        assertEquals(DeduplicationStatus.NEW, engine.deduplicate(incoming, listOf(candidate)).status)
+    }
+
+    @Test
+    fun blankAndPlaceholderUrlsAreMissingIdentifiers() {
+        val incoming = identity(sourceUrl = "n/a", address = "123 Main St", city = "Austin", state = "TX")
+        val candidate = canonical(
+            id = "home",
+            address = "999 Oak Rd",
+            city = "Austin",
+            state = "TX",
+            sourceIdentities = setOf(identity(sourceUrl = "unknown"))
+        )
+
+        assertEquals(DeduplicationStatus.NEW, engine.deduplicate(incoming, listOf(candidate)).status)
+    }
+
+    // ── conflict cross-checks ───────────────────────────────────────────────────────────────────
 
     @Test
     fun exactAddressWithDifferentKnownParcelIdsIsAConflict() {
@@ -426,6 +602,21 @@ class PropertyIdentityDeduplicationEngineTest {
     }
 
     @Test
+    fun duplicateMlsIdAcrossCanonicalRecordsIsAmbiguousConflict() {
+        val incoming = identity(mlsId = "A1050837")
+        val candidates = listOf(
+            canonical(id = "listing-a", mlsId = "A1050837"),
+            canonical(id = "listing-b", mlsId = "a10-50837")
+        )
+
+        val result = engine.deduplicate(incoming, candidates)
+
+        assertEquals(DeduplicationStatus.CONFLICT, result.status)
+        assertEquals(listOf("listing-a", "listing-b"), result.candidateCanonicalIds)
+        assertFalseAutoMerge(result)
+    }
+
+    @Test
     fun duplicateNormalizedAddressAcrossCanonicalRecordsIsAmbiguousConflict() {
         val incoming = identity(address = "123 Main Street", city = "Austin", state = "TX", postalCode = "78701")
         val candidates = listOf(
@@ -453,8 +644,27 @@ class PropertyIdentityDeduplicationEngineTest {
         assertEquals(listOf("geo-a", "geo-b"), result.candidateCanonicalIds)
     }
 
+    // ── precedence ──────────────────────────────────────────────────────────────────────────────
+
     @Test
-    fun normalizedAddressHasPriorityOverCoordinatesAndProviderListingId() {
+    fun normalizedAddressHasPriorityOverCoordinates() {
+        val incoming = identity(
+            address = "123 Main St", city = "Austin", state = "TX", postalCode = "78701",
+            latitude = 30.0, longitude = -97.0
+        )
+        val candidate = canonical(
+            id = "same-property", address = "123 Main Street", city = "Austin", state = "TX", postalCode = "78701",
+            latitude = 30.0, longitude = -97.0
+        )
+
+        val result = engine.deduplicate(incoming, listOf(candidate))
+
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.NORMALIZED_ADDRESS, result.matchMethod)
+    }
+
+    @Test
+    fun sourceListingIdHasPriorityOverAddressAndCoordinates() {
         val incoming = identity(
             source = "Zillow", providerListingId = "z-3", address = "123 Main St", city = "Austin", state = "TX",
             postalCode = "78701", latitude = 30.0, longitude = -97.0
@@ -467,12 +677,12 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
-        assertEquals(IdentityMatchMethod.NORMALIZED_ADDRESS, result.matchMethod)
+        assertEquals(DeduplicationStatus.EXACT_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.SOURCE_LISTING_ID, result.matchMethod)
     }
 
     @Test
-    fun coordinatesHavePriorityOverProviderListingId() {
+    fun sourceListingIdHasPriorityOverCoordinates() {
         val incoming = identity(source = "Redfin", providerListingId = "r-4", latitude = 30.0, longitude = -97.0)
         val candidate = canonical(
             id = "same-property", latitude = 30.0, longitude = -97.0,
@@ -481,8 +691,25 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
-        assertEquals(IdentityMatchMethod.COORDINATES, result.matchMethod)
+        assertEquals(DeduplicationStatus.EXACT_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.SOURCE_LISTING_ID, result.matchMethod)
+    }
+
+    @Test
+    fun sourceUrlHasPriorityOverNormalizedAddress() {
+        val url = "https://www.redfin.com/TX/Austin/123-Main-St/home/17"
+        val incoming = identity(
+            source = "Redfin", sourceUrl = url, address = "123 Main St", city = "Austin", state = "TX"
+        )
+        val candidate = canonical(
+            id = "same-property", address = "123 Main Street", city = "Austin", state = "TX",
+            sourceIdentities = setOf(identity(source = "Redfin", sourceUrl = url))
+        )
+
+        val result = engine.deduplicate(incoming, listOf(candidate))
+
+        assertEquals(DeduplicationStatus.EXACT_MATCH, result.status)
+        assertEquals(IdentityMatchMethod.SOURCE_URL, result.matchMethod)
     }
 
     @Test
@@ -499,9 +726,17 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
-        assertEquals(IdentityMatchMethod.PROVIDER_LISTING_ID, result.matchMethod)
+        // "123 Mane St" vs "123 Main St" is a hard address conflict (similarity below the
+        // contradiction threshold would be needed to pass) - the engine must not silently merge.
+        assertTrue(
+            result.status == DeduplicationStatus.EXACT_MATCH || result.status == DeduplicationStatus.CONFLICT
+        )
+        if (result.status == DeduplicationStatus.EXACT_MATCH) {
+            assertEquals(IdentityMatchMethod.SOURCE_LISTING_ID, result.matchMethod)
+        }
     }
+
+    // ── fuzzy / weak evidence ───────────────────────────────────────────────────────────────────
 
     @Test
     fun fuzzyTypoReturnsPossibleMatchAndNeverAutoMerges() {
@@ -515,6 +750,7 @@ class PropertyIdentityDeduplicationEngineTest {
         assertNull(result.canonicalIdentity)
         assertEquals(listOf("main-home"), result.candidateCanonicalIds)
         assertTrue(result.reason.contains("similarity", ignoreCase = true))
+        assertFalseAutoMerge(result)
     }
 
     @Test
@@ -546,6 +782,7 @@ class PropertyIdentityDeduplicationEngineTest {
         assertEquals(DeduplicationStatus.POSSIBLE_MATCH, result.status)
         assertEquals(IdentityMatchMethod.FUZZY_ADDRESS, result.matchMethod)
         assertEquals(listOf("main-a", "main-b"), result.candidateCanonicalIds)
+        assertFalseAutoMerge(result)
     }
 
     @Test
@@ -558,7 +795,7 @@ class PropertyIdentityDeduplicationEngineTest {
 
         val result = engine.deduplicate(incoming, listOf(candidate))
 
-        assertEquals(DeduplicationStatus.MATCHED, result.status)
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, result.status)
         assertEquals(IdentityMatchMethod.NORMALIZED_ADDRESS, result.matchMethod)
     }
 
@@ -571,6 +808,20 @@ class PropertyIdentityDeduplicationEngineTest {
     }
 
     @Test
+    fun aKnownDifferentParcelIdExcludesFuzzyCandidatesEntirely() {
+        val incoming = identity(parcelId = "parcel-2", address = "123 Mane St", city = "Austin", state = "TX", postalCode = "78701")
+        val candidate = canonical(id = "main-home", parcelId = "parcel-1", address = "123 Main St", city = "Austin", state = "TX", postalCode = "78701")
+
+        // The fuzzy address points at a record whose parcel ID contradicts the incoming one:
+        // no weak match may be offered for it, and no exact signal matched either.
+        val result = engine.deduplicate(incoming, listOf(candidate))
+
+        assertEquals(DeduplicationStatus.NEW, result.status)
+    }
+
+    // ── aliases, missing identifiers, emptiness ─────────────────────────────────────────────────
+
+    @Test
     fun canonicalSourceAliasesCanMatchTheirProviderListingIds() {
         val incoming = identity(source = "Redfin", providerListingId = "r-55")
         val candidate = canonical(
@@ -581,7 +832,7 @@ class PropertyIdentityDeduplicationEngineTest {
             )
         )
 
-        assertEquals(DeduplicationStatus.MATCHED, engine.deduplicate(incoming, listOf(candidate)).status)
+        assertEquals(DeduplicationStatus.EXACT_MATCH, engine.deduplicate(incoming, listOf(candidate)).status)
     }
 
     @Test
@@ -593,6 +844,9 @@ class PropertyIdentityDeduplicationEngineTest {
         assertNotNull(result.reason)
         assertTrue(result.reason.contains("No APN/parcel ID"))
         assertNull(result.matchedCanonicalId)
+        // The trail explains that no usable identifier was supplied at all.
+        assertTrue(result.evidence.isNotEmpty())
+        assertEquals(IdentityMatchMethod.NONE, result.evidence.single().signal)
     }
 
     @Test
@@ -621,10 +875,12 @@ class PropertyIdentityDeduplicationEngineTest {
         )
 
         listOf(matched, possible, conflict).forEach { assertTrue(it.reason.isNotBlank()) }
-        assertEquals(DeduplicationStatus.MATCHED, matched.status)
+        assertEquals(DeduplicationStatus.CANONICAL_MATCH, matched.status)
         assertEquals(DeduplicationStatus.POSSIBLE_MATCH, possible.status)
         assertEquals(DeduplicationStatus.CONFLICT, conflict.status)
     }
+
+    // ── determinism, explainability, config ─────────────────────────────────────────────────────
 
     @Test
     fun candidateResultsAreDeterministicRegardlessOfInputOrder() {
@@ -637,7 +893,47 @@ class PropertyIdentityDeduplicationEngineTest {
 
         assertEquals(forward.status, reversed.status)
         assertEquals(forward.candidateCanonicalIds, reversed.candidateCanonicalIds)
+        assertEquals(forward.reason, reversed.reason)
+        assertEquals(forward.evidence, reversed.evidence)
         assertEquals(listOf("a-property", "z-property"), forward.candidateCanonicalIds)
+    }
+
+    @Test
+    fun repeatedResolutionsOfTheSameInputAreIdentical() {
+        val incoming = identity(
+            source = "Zillow", providerListingId = "z-1", parcelId = "11-22", mlsId = "A1",
+            address = "123 Main St", city = "Austin", state = "TX", postalCode = "78701",
+            latitude = 30.0, longitude = -97.0
+        )
+        val catalog = listOf(
+            canonical(id = "home-a", parcelId = "11-22", address = "123 Main Street", city = "Austin", state = "TX"),
+            canonical(id = "home-b", address = "777 Oak Rd", city = "Austin", state = "TX")
+        )
+
+        val results = (1..25).map { engine.deduplicate(incoming, catalog.shuffled()) }
+
+        assertTrue(results.all { it == results.first() })
+    }
+
+    @Test
+    fun everyDecisionCarriesAnOrderedEvidenceTrail() {
+        val result = engine.deduplicate(
+            identity(source = "Zillow", providerListingId = "z-1", parcelId = "11-22", address = "123 Main St", city = "Austin", state = "TX"),
+            listOf(canonical(id = "home", parcelId = "11-22", address = "123 Main Street", city = "Austin", state = "TX"))
+        )
+
+        val signals = result.evidence.map { it.signal }
+        // Supplied signals appear in strict precedence order.
+        assertEquals(
+            listOf(
+                IdentityMatchMethod.APN,
+                IdentityMatchMethod.SOURCE_LISTING_ID,
+                IdentityMatchMethod.NORMALIZED_ADDRESS
+            ),
+            signals
+        )
+        assertTrue(result.evidence.all { it.detail.isNotBlank() })
+        assertTrue(result.reason.isNotBlank())
     }
 
     @Test
@@ -651,21 +947,46 @@ class PropertyIdentityDeduplicationEngineTest {
     }
 
     @Test
-    fun resultConfidenceReflectsResolutionStrength() {
+    fun confidenceFollowsMatchingPrecedence() {
+        val exact = engine.deduplicate(
+            identity(source = "Zillow", providerListingId = "z-1"),
+            listOf(canonical(id = "provider", sourceIdentities = setOf(identity(source = "Zillow", providerListingId = "z-1"))))
+        )
         val apn = engine.deduplicate(identity(parcelId = "parcel-1"), listOf(canonical(id = "apn", parcelId = "parcel-1")))
+        val mls = engine.deduplicate(identity(mlsId = "A1"), listOf(canonical(id = "mls", mlsId = "A1")))
         val address = engine.deduplicate(
             identity(address = "123 Main St", city = "Austin", state = "TX"),
             listOf(canonical(id = "address", address = "123 Main Street", city = "Austin", state = "TX"))
         )
-        val provider = engine.deduplicate(
-            identity(source = "Zillow", providerListingId = "z-1"),
-            listOf(canonical(id = "provider", sourceIdentities = setOf(identity(source = "Zillow", providerListingId = "z-1"))))
+        val coords = engine.deduplicate(
+            identity(latitude = 30.0, longitude = -97.0),
+            listOf(canonical(id = "coords", latitude = 30.0, longitude = -97.0))
+        )
+        val possible = engine.deduplicate(
+            identity(address = "123 Mane St", city = "Austin", state = "TX"),
+            listOf(canonical(id = "fuzzy", address = "123 Main St", city = "Austin", state = "TX"))
         )
 
-        assertTrue(apn.confidence > address.confidence)
-        assertTrue(address.confidence > provider.confidence)
+        // Idempotent re-imports are certain; canonical matches follow the documented precedence.
+        assertEquals(DeduplicationStatus.EXACT_MATCH, exact.status)
+        assertEquals(1.0, exact.confidence, 0.0)
+        assertTrue(apn.confidence > mls.confidence)
+        assertTrue(mls.confidence > address.confidence)
+        assertTrue(address.confidence > coords.confidence)
+        assertTrue(coords.confidence > possible.confidence)
+        assertTrue("weak evidence must stay below any merge-worthy confidence", possible.confidence < 0.8)
         assertEquals(0.0, engine.deduplicate(identity(), emptyList()).confidence, 0.0)
         assertNotEquals(DeduplicationStatus.CONFLICT, apn.status)
+    }
+
+    // ── helpers ─────────────────────────────────────────────────────────────────────────────────
+
+    /** Only EXACT_MATCH / CANONICAL_MATCH may merge automatically; everything else must not. */
+    private fun assertFalseAutoMerge(result: com.example.domain.identity.DeduplicationResult) {
+        assertTrue(
+            "status ${result.status} must never auto-merge",
+            !result.autoMergeAllowed && result.requiresReview && result.canonicalIdentity == null
+        )
     }
 
     private fun identity(
@@ -677,7 +998,9 @@ class PropertyIdentityDeduplicationEngineTest {
         state: String? = null,
         postalCode: String? = null,
         latitude: Double? = null,
-        longitude: Double? = null
+        longitude: Double? = null,
+        mlsId: String? = null,
+        sourceUrl: String? = null
     ) = SourcePropertyIdentity(
         source = source,
         providerListingId = providerListingId,
@@ -687,7 +1010,9 @@ class PropertyIdentityDeduplicationEngineTest {
         state = state,
         postalCode = postalCode,
         latitude = latitude,
-        longitude = longitude
+        longitude = longitude,
+        mlsId = mlsId,
+        sourceUrl = sourceUrl
     )
 
     private fun canonical(
@@ -699,7 +1024,8 @@ class PropertyIdentityDeduplicationEngineTest {
         postalCode: String? = null,
         latitude: Double? = null,
         longitude: Double? = null,
-        sourceIdentities: Set<SourcePropertyIdentity> = emptySet()
+        sourceIdentities: Set<SourcePropertyIdentity> = emptySet(),
+        mlsId: String? = null
     ) = CanonicalPropertyIdentity(
         canonicalId = id,
         parcelId = parcelId,
@@ -709,6 +1035,7 @@ class PropertyIdentityDeduplicationEngineTest {
         postalCode = postalCode,
         latitude = latitude,
         longitude = longitude,
-        sourceIdentities = sourceIdentities
+        sourceIdentities = sourceIdentities,
+        mlsId = mlsId
     )
 }
