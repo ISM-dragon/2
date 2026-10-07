@@ -43,6 +43,76 @@ interface ConfigDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveGmailConfig(config: GmailConfigurationEntity)
 
+    @Query("UPDATE gmail_configuration SET authStatus = :status, lastError = :lastError WHERE id = 1")
+    suspend fun updateGmailAuthStatus(status: String, lastError: String?): Int
+
+    @Query("""
+        UPDATE gmail_configuration
+        SET accountEmail = :accountEmail,
+            senderName = :senderName,
+            signature = :signature,
+            defaultSubjectTemplate = :defaultSubjectTemplate
+        WHERE id = 1
+    """)
+    suspend fun updateGmailAccountSettings(
+        accountEmail: String,
+        senderName: String,
+        signature: String,
+        defaultSubjectTemplate: String
+    ): Int
+
+    @Query("""
+        UPDATE gmail_configuration
+        SET isConnected = 0,
+            authStatus = :authStatus,
+            accessToken = NULL,
+            refreshToken = NULL,
+            expiresAt = 0,
+            lastError = NULL
+        WHERE id = 1
+    """)
+    suspend fun disconnectGmail(authStatus: String): Int
+
+    @Query("""
+        UPDATE gmail_configuration
+        SET accessToken = :accessToken,
+            refreshToken = COALESCE(:refreshToken, refreshToken),
+            expiresAt = :expiresAt,
+            authStatus = :authStatus,
+            isConnected = :isConnected,
+            lastError = :lastError
+        WHERE id = 1
+    """)
+    suspend fun updateGmailTokens(
+        accessToken: String?,
+        refreshToken: String?,
+        expiresAt: Long,
+        authStatus: String,
+        isConnected: Boolean,
+        lastError: String?
+    ): Int
+
+    @Query("""
+        UPDATE gmail_configuration
+        SET accessToken = :accessToken,
+            refreshToken = COALESCE(:refreshToken, refreshToken),
+            expiresAt = :expiresAt,
+            authStatus = :authStatus,
+            isConnected = :isConnected,
+            lastError = :lastError
+        WHERE id = 1 AND accessToken IS :expectedStoredAccessToken AND refreshToken = :expectedStoredRefreshToken
+    """)
+    suspend fun updateGmailTokensIfUnchanged(
+        expectedStoredAccessToken: String?,
+        expectedStoredRefreshToken: String,
+        accessToken: String,
+        refreshToken: String?,
+        expiresAt: Long,
+        authStatus: String,
+        isConnected: Boolean,
+        lastError: String?
+    ): Int
+
     // Offer Templates
     @Query("SELECT * FROM offer_templates WHERE id = 'DEFAULT' LIMIT 1")
     fun getOfferTemplateFlow(): Flow<OfferTemplateEntity?>

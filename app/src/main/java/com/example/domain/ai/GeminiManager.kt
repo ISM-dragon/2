@@ -209,29 +209,29 @@ class GeminiManager(
             .post(body)
             .build()
 
-        val response = httpClient.newCall(request).execute()
-        val responseBody = response.body?.string() ?: ""
-
-        return if (response.isSuccessful) {
-            val rootJson = JSONObject(if (responseBody.isNotBlank()) responseBody else "{}")
-            val candidates = rootJson.optJSONArray("candidates")
-            val candidate = candidates?.optJSONObject(0)
-            val content = candidate?.optJSONObject("content")
-            val parts = content?.optJSONArray("parts")
-            val text = parts?.optJSONObject(0)?.optString("text", "") ?: ""
-            if (text.isBlank()) {
-                Pair(false, "Gemini returned empty response")
+        return httpClient.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string() ?: ""
+            if (response.isSuccessful) {
+                val rootJson = JSONObject(if (responseBody.isNotBlank()) responseBody else "{}")
+                val candidates = rootJson.optJSONArray("candidates")
+                val candidate = candidates?.optJSONObject(0)
+                val content = candidate?.optJSONObject("content")
+                val parts = content?.optJSONArray("parts")
+                val text = parts?.optJSONObject(0)?.optString("text", "") ?: ""
+                if (text.isBlank()) {
+                    Pair(false, "Gemini returned empty response")
+                } else {
+                    Pair(true, text.trim())
+                }
             } else {
-                Pair(true, text.trim())
-            }
-        } else {
-            // Mask any key if present in error message
-            val sanitized = responseBody.replace(apiKey, "[REDACTED]")
-            when (response.code) {
-                401, 403 -> Pair(false, "HTTP ${response.code} (Unauthorized): API key is invalid or lacks permission.")
-                429 -> Pair(false, "HTTP 429 (Rate Limit): Quota exhausted for slot.")
-                in 500..599 -> Pair(false, "HTTP ${response.code} (Service Unavailable): Upstream Gemini service error.")
-                else -> Pair(false, "HTTP ${response.code}: $sanitized")
+                // Mask any key if present in error message
+                val sanitized = responseBody.replace(apiKey, "[REDACTED]")
+                when (response.code) {
+                    401, 403 -> Pair(false, "HTTP ${response.code} (Unauthorized): API key is invalid or lacks permission.")
+                    429 -> Pair(false, "HTTP 429 (Rate Limit): Quota exhausted for slot.")
+                    in 500..599 -> Pair(false, "HTTP ${response.code} (Service Unavailable): Upstream Gemini service error.")
+                    else -> Pair(false, "HTTP ${response.code}: $sanitized")
+                }
             }
         }
     }

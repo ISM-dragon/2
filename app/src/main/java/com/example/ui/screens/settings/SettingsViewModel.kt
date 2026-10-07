@@ -74,22 +74,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         subjectTemplate: String
     ) {
         viewModelScope.launch {
-            val cleanEmail = email.trim()
-            val current = uiState.value.gmailConfig
-            val isConnected = current.isConnected && !current.accessToken.isNullOrBlank()
-            val updated = current.copy(
-                accountEmail = cleanEmail,
+            // Update only editable settings columns; never overwrite a newer OAuth token with stale UI state.
+            configRepo.updateGmailAccountSettings(
+                accountEmail = email.trim(),
                 senderName = senderName.trim(),
                 signature = signature,
-                defaultSubjectTemplate = subjectTemplate,
-                isConnected = isConnected,
-                authStatus = if (isConnected) current.authStatus else if (cleanEmail.isNotBlank()) {
-                    com.example.data.local.entity.GmailAuthStatus.AUTH_REQUIRED
-                } else {
-                    com.example.data.local.entity.GmailAuthStatus.NOT_CONFIGURED
-                }
+                defaultSubjectTemplate = subjectTemplate
             )
-            configRepo.saveGmailConfig(updated)
         }
     }
 
@@ -122,16 +113,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun disconnectGmail() {
         viewModelScope.launch {
-            val current = uiState.value.gmailConfig
-            val updated = current.copy(
-                isConnected = false,
-                authStatus = com.example.data.local.entity.GmailAuthStatus.NOT_CONFIGURED,
-                accessToken = null,
-                refreshToken = null,
-                expiresAt = 0L,
-                lastError = null
-            )
-            configRepo.saveGmailConfig(updated)
+            configRepo.disconnectGmail()
         }
     }
 

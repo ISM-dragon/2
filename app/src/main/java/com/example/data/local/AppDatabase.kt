@@ -51,9 +51,11 @@ import com.example.data.local.migration.DatabaseMigrations
         AutomationExecutionEntity::class,
         ApiConfigurationEntity::class,
         GmailConfigurationEntity::class,
-        OfferTemplateEntity::class
+        OfferTemplateEntity::class,
+        OfferEmailSendEntity::class,
+        OfferAuditEventEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -69,6 +71,17 @@ abstract class AppDatabase : RoomDatabase() {
 
     companion object {
         const val DATABASE_NAME = "real_estate_ai.db"
+        private val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `offer_email_sends` (`idempotencyKey` TEXT NOT NULL, `offerId` TEXT NOT NULL, `status` TEXT NOT NULL, `attemptCount` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `startedAt` INTEGER, `sentAt` INTEGER, `messageId` TEXT, `nextAttemptAt` INTEGER, `lastError` TEXT, `lastFailureKind` TEXT, PRIMARY KEY(`idempotencyKey`))""")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_offer_email_sends_offerId` ON `offer_email_sends` (`offerId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_offer_email_sends_status` ON `offer_email_sends` (`status`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_offer_email_sends_nextAttemptAt` ON `offer_email_sends` (`nextAttemptAt`)")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `offer_audit_events` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `offerId` TEXT NOT NULL, `idempotencyKey` TEXT, `eventType` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `status` TEXT, `details` TEXT)""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_offer_audit_events_offerId_timestamp` ON `offer_audit_events` (`offerId`, `timestamp`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_offer_audit_events_idempotencyKey` ON `offer_audit_events` (`idempotencyKey`)")
+            }
+        }
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -80,7 +93,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     DATABASE_NAME
                 )
-                    .addMigrations(*DatabaseMigrations.ALL)
+                    .addMigrations(*DatabaseMigrations.ALL, MIGRATION_4_5)
                     .build()
                 INSTANCE = instance
                 instance
