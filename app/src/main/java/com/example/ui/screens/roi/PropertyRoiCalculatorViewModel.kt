@@ -11,13 +11,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
 
 enum class CalculationSource {
     NONE,
-    GEMINI_AI,
-    LOCAL_ENGINE_FALLBACK
+    DETERMINISTIC_LOCAL_ENGINE
 }
 
 data class PropertyDetailsInput(
@@ -91,7 +88,6 @@ class PropertyRoiCalculatorViewModel(application: Application) : AndroidViewMode
     private val app = application as RealEstateAiApp
     private val propertyRepo = app.propertyRepository
     private val financialRepo = app.financialRepository
-    private val geminiManager = app.geminiManager
 
     private val _uiState = MutableStateFlow(PropertyRoiUiState())
     val uiState: StateFlow<PropertyRoiUiState> = _uiState.asStateFlow()
@@ -169,7 +165,7 @@ class PropertyRoiCalculatorViewModel(application: Application) : AndroidViewMode
                     )
                 }
 
-                // Automatically trigger Gemini ROI calculation with loaded market data
+                // The financial engine is the sole owner of ROI metric calculations.
                 calculateRoiMetrics()
             } catch (e: Exception) {
                 _uiState.update {
@@ -182,151 +178,33 @@ class PropertyRoiCalculatorViewModel(application: Application) : AndroidViewMode
         }
     }
 
+    /** Financial metrics are computed only by the deterministic local engine, never by Gemini. */
     fun calculateRoiMetrics() {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, errorMessage = null) }
 
-            val prop = _uiState.value.propertyDetails
-            val mkt = _uiState.value.marketData
-
-            val prompt = buildPrompt(prop, mkt)
-            val systemInstruction = """
-                You are a senior real estate investment analyst specializing in residential underwriting, cap rate estimation, and ROI forecasting.
-                Analyze the subject property against its local market indicators and compute exact return on investment metrics.
-                Output MUST be strict raw JSON without markdown fences.
-                Required JSON keys:
-                - "capRatePct": number (e.g. 7.2)
-                - "cashOnCashReturnPct": number (e.g. 9.4)
-                - "monthlyCashFlow": number (e.g. 520.0)
-                - "annualCashFlow": number (e.g. 6240.0)
-                - "netOperatingIncomeAnnual": number (e.g. 31200.0)
-                - "grossRentalIncomeAnnual": number (e.g. 42000.0)
-                - "totalCashRequired": number (e.g. 105000.0)
-                - "debtServiceCoverageRatio": number (e.g. 1.35)
-                - "grossRentMultiplier": number (e.g. 10.7)
-                - "projected5YearRoiPct": number (e.g. 58.5)
-                - "breakEvenOccupancyPct": number (e.g. 72.0)
-                - "investmentVerdict": string ("Strong Buy", "Moderate Opportunity", "High Risk / Overpriced", or "Borderline Deal")
-                - "recommendedStrategy": string (e.g. "Long-Term Buy & Hold", "Value-Add BRRRR", "Medium-Term Rental")
-                - "marketInsights": string (concise explanation of ROI dynamics relative to local market appreciation and rents)
-                - "riskFactors": array of strings (top 2-3 risk factors)
-                - "localMarketScore": integer between 1 and 100
-            """.trimIndent()
-
-            val aiResponse = geminiManager.generateContent(
-                prompt = prompt,
-                systemPrompt = systemInstruction
-            )
-
-            if (aiResponse.success && aiResponse.text.isNotBlank()) {
-                val parsed = parseGeminiMetrics(aiResponse.text, prop, mkt)
-                if (parsed != null) {
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            metrics = parsed,
-                            calculationSource = CalculationSource.GEMINI_AI,
-                            lastCalculatedAt = System.currentTimeMillis()
-                        )
-                    }
-                    return@launch
+            val property = _uiState.value.propertyDetails
+            val market = _uiState.value.marketData
+            try {
+                val metrics = computeLocalEngineMetrics(property, market)
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        metrics = metrics,
+                        calculationSource = CalculationSource.DETERMINISTIC_LOCAL_ENGINE,
+                        errorMessage = null,
+                        lastCalculatedAt = System.currentTimeMillis()
+                    )
+                }
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        calculationSource = CalculationSource.NONE,
+                        errorMessage = "Local financial calculation failed: ${error.message ?: "invalid input"}."
+                    )
                 }
             }
-
-            // Fallback to local financial engine if Gemini fails or is unavailable
-            val fallbackMetrics = computeLocalEngineMetrics(prop, mkt)
-            val fallbackReason = if (aiResponse.errorMessage != null) {
-                "Gemini AI note: ${aiResponse.errorMessage}. Computed via local financial engine."
-            } else {
-                "Computed via local financial engine with local market indicators."
-            }
-
-            _uiState.update {
-                it.copy(
-                    isLoading = false,
-                    metrics = fallbackMetrics,
-                    calculationSource = CalculationSource.LOCAL_ENGINE_FALLBACK,
-                    errorMessage = fallbackReason,
-                    lastCalculatedAt = System.currentTimeMillis()
-                )
-            }
-        }
-    }
-
-    private fun buildPrompt(prop: PropertyDetailsInput, mkt: LocalMarketDataInput): String {
-        return """
-            Please analyze the following property and calculate comprehensive return on investment (ROI) metrics based on local market data.
-            
-            [SUBJECT PROPERTY DETAILS]
-            - Title: ${prop.title.ifBlank { prop.address }}
-            - Address: ${prop.address}, ${prop.city}, ${prop.state} ${prop.zipCode}
-            - Purchase Price: $${prop.purchasePrice}
-            - Property Type: ${prop.propertyType}
-            - Layout: ${prop.bedrooms} Bed / ${prop.bathrooms} Bath | ${prop.squareFeet} sq ft
-            - Year Built: ${prop.yearBuilt}
-            - Condition: ${prop.condition}
-            - Estimated Renovation Cost: $${prop.renovationCost}
-            - Financing: ${prop.downPaymentPct}% down payment at ${prop.interestRatePct}% annual interest (${prop.loanTermYears}-year fixed)
-            - Estimated Closing Cost Rate: ${prop.closingCostRatePct}%
-            
-            [LOCAL MARKET INDICATORS]
-            - Local Median Area Price: $${mkt.medianAreaPrice}
-            - Local Price Per Sq Ft: $${mkt.pricePerSqFt}
-            - Average Days on Market: ${mkt.averageDaysOnMarket} days
-            - Neighborhood Appreciation Rate: ${mkt.neighborhoodAppreciationRatePct}% annually
-            - Local Market Demand: ${mkt.marketDemand}
-            - Estimated Monthly Market Rent: $${mkt.estimatedMonthlyRent} (Range: $${mkt.fairMarketRentRangeLow} - $${mkt.fairMarketRentRangeHigh})
-            - Local Expected Vacancy Rate: ${mkt.vacancyRatePct}%
-            - Local Annual Property Tax: $${mkt.propertyTaxAnnual}
-            - Annual Insurance: $${mkt.insuranceAnnual}
-            - Maintenance Reserve: ${mkt.maintenancePct}%
-            - Property Management Fee: ${mkt.propertyManagementPct}%
-            - Monthly Utilities: $${mkt.utilitiesMonthly}
-            
-            Evaluate cash flow, cap rate, cash-on-cash return, DSCR, and 5-year total ROI. Return strict JSON.
-        """.trimIndent()
-    }
-
-    private fun parseGeminiMetrics(
-        jsonString: String,
-        prop: PropertyDetailsInput,
-        mkt: LocalMarketDataInput
-    ): CalculatedRoiMetrics? {
-        return try {
-            val clean = jsonString
-                .replace("```json", "")
-                .replace("```", "")
-                .trim()
-            val obj = JSONObject(clean)
-
-            val riskList = mutableListOf<String>()
-            val riskArray = obj.optJSONArray("riskFactors")
-            if (riskArray != null) {
-                for (i in 0 until riskArray.length()) {
-                    riskList.add(riskArray.optString(i))
-                }
-            }
-
-            CalculatedRoiMetrics(
-                capRatePct = obj.optDouble("capRatePct", 0.0),
-                cashOnCashReturnPct = obj.optDouble("cashOnCashReturnPct", 0.0),
-                monthlyCashFlow = obj.optDouble("monthlyCashFlow", 0.0),
-                annualCashFlow = obj.optDouble("annualCashFlow", 0.0),
-                netOperatingIncomeAnnual = obj.optDouble("netOperatingIncomeAnnual", 0.0),
-                grossRentalIncomeAnnual = obj.optDouble("grossRentalIncomeAnnual", mkt.estimatedMonthlyRent * 12),
-                totalCashRequired = obj.optDouble("totalCashRequired", 0.0),
-                debtServiceCoverageRatio = obj.optDouble("debtServiceCoverageRatio", 1.0),
-                grossRentMultiplier = obj.optDouble("grossRentMultiplier", 0.0),
-                projected5YearRoiPct = obj.optDouble("projected5YearRoiPct", 0.0),
-                breakEvenOccupancyPct = obj.optDouble("breakEvenOccupancyPct", 0.0),
-                investmentVerdict = obj.optString("investmentVerdict", "Analyzed"),
-                recommendedStrategy = obj.optString("recommendedStrategy", "Long-Term Buy & Hold"),
-                marketInsights = obj.optString("marketInsights", "AI ROI analysis completed."),
-                riskFactors = riskList,
-                localMarketScore = obj.optInt("localMarketScore", 70)
-            )
-        } catch (e: Exception) {
-            null
         }
     }
 

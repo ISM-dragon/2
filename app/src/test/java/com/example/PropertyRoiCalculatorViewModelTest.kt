@@ -4,7 +4,6 @@ import com.example.ui.screens.roi.CalculatedRoiMetrics
 import com.example.ui.screens.roi.CalculationSource
 import com.example.ui.screens.roi.LocalMarketDataInput
 import com.example.ui.screens.roi.PropertyDetailsInput
-import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -41,38 +40,11 @@ class PropertyRoiCalculatorViewModelTest {
     }
 
     @Test
-    fun testGeminiResponseJsonParsing() {
-        val sampleAiJson = """
-            {
-                "capRatePct": 7.4,
-                "cashOnCashReturnPct": 9.8,
-                "monthlyCashFlow": 620.0,
-                "annualCashFlow": 7440.0,
-                "netOperatingIncomeAnnual": 38480.0,
-                "grossRentalIncomeAnnual": 50400.0,
-                "totalCashRequired": 150000.0,
-                "debtServiceCoverageRatio": 1.34,
-                "grossRentMultiplier": 10.3,
-                "projected5YearRoiPct": 68.2,
-                "breakEvenOccupancyPct": 71.5,
-                "investmentVerdict": "Strong Buy",
-                "recommendedStrategy": "Long-Term Buy & Hold",
-                "marketInsights": "Submarket exhibits 5% annual appreciation with solid rental demand.",
-                "riskFactors": ["Interest rate sensitivity", "Property tax reassessment"],
-                "localMarketScore": 88
-            }
-        """.trimIndent()
-
-        val obj = JSONObject(sampleAiJson)
-        val capRate = obj.getDouble("capRatePct")
-        val coc = obj.getDouble("cashOnCashReturnPct")
-        val verdict = obj.getString("investmentVerdict")
-        val dscr = obj.getDouble("debtServiceCoverageRatio")
-
-        assertEquals(7.4, capRate, 0.01)
-        assertEquals(9.8, coc, 0.01)
-        assertEquals("Strong Buy", verdict)
-        assertEquals(1.34, dscr, 0.01)
+    fun roiCalculationSourceIsDeterministicAndLocal() {
+        assertEquals(
+            listOf(CalculationSource.NONE, CalculationSource.DETERMINISTIC_LOCAL_ENGINE),
+            CalculationSource.values().toList()
+        )
     }
 
     @Test

@@ -92,6 +92,9 @@ class PropertyRepository(
     fun getComps(propertyId: String): Flow<List<ComparablePropertyEntity>> =
         propertyDao.getCompsForProperty(propertyId)
 
+    suspend fun getCompsListForProperty(propertyId: String): List<ComparablePropertyEntity> =
+        propertyDao.getCompsListForProperty(propertyId)
+
     suspend fun seedInitialDataIfEmpty() = withContext(Dispatchers.IO) {
         val count = propertyDao.getPropertiesCount()
         if (count == 0) {

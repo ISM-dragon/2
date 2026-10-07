@@ -117,17 +117,21 @@ class OfferRepository(
         val offerId = "OFFER-" + UUID.randomUUID().toString().take(8).uppercase()
 
         // Generate Letter with Gemini AI if available, else high-quality fallback
-        val prompt = "Write a formal 2-paragraph real estate Letter of Intent purchase offer statement from an institutional investor for property at ${property.address}, ${property.city}, ${property.state}. The offer price is $${String.format("%,.0f", offerPrice)}. Highlight clean terms, pre-funded earnest money of $${String.format("%,.0f", earnestMoney)}, a ${template.defaultInspectionDays}-day inspection contingency, and closing in ${template.defaultClosingDays} days. Keep it persuasive, professional, and clear."
+        val prompt = "Write a formal 2-paragraph real estate Letter of Intent purchase offer statement from an institutional investor for property at ${property.address}, ${property.city}, ${property.state}. The offer price is $${String.format("%,.0f", offerPrice)}. Include the earnest-money deposit of $${String.format("%,.0f", earnestMoney)}, a ${template.defaultInspectionDays}-day inspection contingency, and closing in ${template.defaultClosingDays} days. Keep it persuasive, professional, and clear."
 
         val aiResponse = geminiManager.generateContent(
             prompt = prompt,
-            systemPrompt = "You are a senior real estate acquisitions director writing concise, legally polished purchase letters of intent."
+            systemPrompt = """
+                You draft offer language using only the exact property and transaction terms in the user prompt.
+                Preserve all supplied amounts and timelines exactly. Do not invent proof of funds, financing approval, property condition, dates, additional contingencies, warranties, or legal commitments.
+                This is draft language and must not imply legal review or guaranteed performance.
+            """.trimIndent()
         )
 
         val letterContent = if (aiResponse.success && aiResponse.text.isNotBlank()) {
             aiResponse.text
         } else {
-            "Real Estate AI Investment Group is pleased to present this formal Letter of Intent to acquire the property located at ${property.address}, ${property.city}, ${property.state} for the total purchase consideration of $${String.format("%,.0f", offerPrice)}.\n\nOur offer reflects an expedited closing timeline of ${template.defaultClosingDays} days, supported by proof of funds and an initial earnest money deposit of $${String.format("%,.0f", earnestMoney)} to be deposited in escrow upon mutual execution. We respect the seller's schedule and maintain an expeditious ${template.defaultInspectionDays}-day inspection window."
+            "Real Estate AI Investment Group is pleased to present this formal Letter of Intent to acquire the property located at ${property.address}, ${property.city}, ${property.state} for the total purchase consideration of $${String.format("%,.0f", offerPrice)}.\n\nThe proposed closing timeline is ${template.defaultClosingDays} days, with an earnest-money deposit of $${String.format("%,.0f", earnestMoney)} and a ${template.defaultInspectionDays}-day inspection contingency. These terms are subject to review and acceptance by the parties."
         }
 
         val draftOffer = OfferEntity(
