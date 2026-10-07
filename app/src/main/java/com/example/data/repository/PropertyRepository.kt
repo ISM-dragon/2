@@ -2,7 +2,10 @@ package com.example.data.repository
 
 import com.example.data.adapter.NormalizedPropertyBundle
 import com.example.data.adapter.PropertySeedData
+import com.example.data.adapter.PropertySourceDeduplicationDecision
 import com.example.data.adapter.PropertySourceManager
+import com.example.data.adapter.toCanonicalPropertyIdentity
+import com.example.domain.identity.DeduplicationStatus
 import com.example.data.local.dao.PropertyDao
 import com.example.data.local.entity.*
 import kotlinx.coroutines.Dispatchers
@@ -112,10 +115,21 @@ class PropertyRepository(
         propertyDao.insertComps(bundle.comps)
     }
 
-    suspend fun syncFromSources() = withContext(Dispatchers.IO) {
-        val bundles = sourceManager.fetchAllSources()
-        for (bundle in bundles) {
-            insertBundle(bundle)
+    /**
+     * Syncs only confidently new properties. Matched listings are not re-inserted, and possible
+     * matches/conflicts are returned to the caller for review rather than silently merged.
+     */
+    suspend fun syncFromSources(): List<PropertySourceDeduplicationDecision> = withContext(Dispatchers.IO) {
+        val existingIdentities = propertyDao.getAllPropertiesList()
+            .map { it.toCanonicalPropertyIdentity() }
+        val decisions = sourceManager.fetchAllSourcesWithDeduplication(
+            existingCanonicalProperties = existingIdentities
+        )
+        for (decision in decisions) {
+            if (decision.result.status == DeduplicationStatus.NEW) {
+                insertBundle(decision.bundle)
+            }
         }
+        decisions
     }
 }
