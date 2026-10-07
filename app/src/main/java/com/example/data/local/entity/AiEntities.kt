@@ -1,9 +1,29 @@
 package com.example.data.local.entity
 
 import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "ai_conversations")
+/**
+ * AI conversation. `propertyId` is a nullable soft relationship: conversations survive the deletion
+ * of the property they were started from (the FK nulls the column instead of dropping the thread).
+ */
+@Entity(
+    tableName = "ai_conversations",
+    indices = [
+        Index(value = ["propertyId"]),
+        Index(value = ["updatedAt"])
+    ],
+    foreignKeys = [
+        ForeignKey(
+            entity = PropertyEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["propertyId"],
+            onDelete = ForeignKey.SET_NULL
+        )
+    ]
+)
 data class AIConversationEntity(
     @PrimaryKey
     val id: String,
@@ -13,7 +33,20 @@ data class AIConversationEntity(
     val updatedAt: Long
 )
 
-@Entity(tableName = "ai_messages")
+@Entity(
+    tableName = "ai_messages",
+    indices = [
+        Index(value = ["conversationId", "timestamp"])
+    ],
+    foreignKeys = [
+        ForeignKey(
+            entity = AIConversationEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["conversationId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ]
+)
 data class AIMessageEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,

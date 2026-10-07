@@ -1,18 +1,33 @@
 package com.example.data.repository
 
+import androidx.room.withTransaction
 import com.example.data.adapter.NormalizedPropertyBundle
 import com.example.data.adapter.PropertySeedData
 import com.example.data.adapter.PropertySourceManager
+import com.example.data.local.AppDatabase
 import com.example.data.local.dao.PropertyDao
+import com.example.data.local.dao.PropertySourceDao
 import com.example.data.local.entity.*
+import com.example.domain.property.PropertyMapper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 
+/**
+ * Read model used by the UI plus the write facade for property data.
+ *
+ * Everything that touches more than one table runs inside `withTransaction`: a property, its
+ * satellites and its provenance row are written atomically. Ingestion goes through
+ * [PropertyImportRepository] so deduplication and provenance are always applied.
+ */
 class PropertyRepository(
+    private val database: AppDatabase,
     private val propertyDao: PropertyDao,
-    private val sourceManager: PropertySourceManager
+    private val sourceManager: PropertySourceManager,
+    private val importer: PropertyImportRepository
 ) {
+    private val sourceDao: PropertySourceDao get() = database.propertySourceDao()
+
     val allProperties: Flow<List<PropertyEntity>> = propertyDao.getAllProperties()
     val savedProperties: Flow<List<PropertyEntity>> = propertyDao.getSavedProperties()
     val savedDeals: Flow<List<PropertyEntity>> = propertyDao.getSavedDeals()
@@ -29,6 +44,18 @@ class PropertyRepository(
     suspend fun getPropertyById(id: String): PropertyEntity? =
         propertyDao.getPropertyById(id)
 
+    suspend fun getPropertyByCanonicalKey(canonicalKey: String): PropertyEntity? =
+        propertyDao.getPropertyByCanonicalKey(canonicalKey)
+
+    /** Every source record known for a property (MLS, wholesaler, county records, ...). */
+    fun getProvenance(propertyId: String): Flow<List<PropertyProvenanceEntity>> =
+        sourceDao.observeProvenanceForProperty(propertyId)
+
+    suspend fun getProvenanceList(propertyId: String): List<PropertyProvenanceEntity> =
+        sourceDao.getProvenanceForProperty(propertyId)
+
+    // ── Writes ──────────────────────────────────────────────────────────────────────────────────
+
     suspend fun createProperty(
         property: PropertyEntity,
         images: List<PropertyImageEntity> = emptyList(),
@@ -36,25 +63,29 @@ class PropertyRepository(
         rentEstimate: RentEstimateEntity? = null,
         taxRecord: TaxRecordEntity? = null
     ) = withContext(Dispatchers.IO) {
-        propertyDao.insertProperty(property)
-        if (images.isNotEmpty()) propertyDao.insertImages(images)
-        marketData?.let { propertyDao.insertMarketData(it) }
-        rentEstimate?.let { propertyDao.insertRentEstimate(it) }
-        taxRecord?.let { propertyDao.insertTaxRecord(it) }
+        val canonical = PropertyMapper.canonicalized(property)
+        database.withTransaction {
+            propertyDao.insertProperty(canonical)
+            if (images.isNotEmpty()) {
+                propertyDao.insertImages(images.map { it.copy(id = 0, propertyId = canonical.id) })
+            }
+            marketData?.let { propertyDao.insertMarketData(it.copy(propertyId = canonical.id)) }
+            rentEstimate?.let { propertyDao.insertRentEstimate(it.copy(propertyId = canonical.id)) }
+            taxRecord?.let { propertyDao.insertTaxRecord(it.copy(propertyId = canonical.id)) }
+        }
     }
 
     suspend fun updateProperty(property: PropertyEntity) = withContext(Dispatchers.IO) {
-        propertyDao.updateProperty(property)
+        database.withTransaction {
+            propertyDao.updateProperty(PropertyMapper.canonicalized(property))
+        }
     }
 
+    /** Deleting the canonical row cascades to every child table (FKs own the cleanup). */
     suspend fun deleteProperty(id: String) = withContext(Dispatchers.IO) {
-        propertyDao.deletePropertyById(id)
-        propertyDao.deleteImagesByPropertyId(id)
-        propertyDao.deleteMarketDataByPropertyId(id)
-        propertyDao.deleteRentEstimateByPropertyId(id)
-        propertyDao.deleteTaxRecordByPropertyId(id)
-        propertyDao.deleteSalesHistoryByPropertyId(id)
-        propertyDao.deleteCompsByPropertyId(id)
+        database.withTransaction {
+            propertyDao.deletePropertyById(id)
+        }
     }
 
     suspend fun toggleSaved(id: String, currentSaved: Boolean) {
@@ -64,6 +95,8 @@ class PropertyRepository(
     suspend fun setDealStatus(id: String, isDeal: Boolean, score: Int) {
         propertyDao.setDealStatus(id, isDeal, score)
     }
+
+    // ── Reads of satellite tables ───────────────────────────────────────────────────────────────
 
     fun getImages(propertyId: String): Flow<List<PropertyImageEntity>> =
         propertyDao.getImagesForProperty(propertyId)
@@ -92,30 +125,41 @@ class PropertyRepository(
     fun getComps(propertyId: String): Flow<List<ComparablePropertyEntity>> =
         propertyDao.getCompsForProperty(propertyId)
 
+    // ── Ingestion ───────────────────────────────────────────────────────────────────────────────
+
+    /** Seeds sources, the demo dataset (through the dedup pipeline) and canonical identities. */
     suspend fun seedInitialDataIfEmpty() = withContext(Dispatchers.IO) {
+        importer.seedDefaultSources()
         val count = propertyDao.getPropertiesCount()
         if (count == 0) {
-            val bundles = PropertySeedData.getSeedBundles()
-            for (bundle in bundles) {
-                insertBundle(bundle)
+            for (bundle in PropertySeedData.getSeedBundles()) {
+                importer.importBundle(bundle)
             }
         }
+        importer.reconcileCanonicalKeys()
     }
 
-    suspend fun insertBundle(bundle: NormalizedPropertyBundle) = withContext(Dispatchers.IO) {
-        propertyDao.insertProperty(bundle.property)
-        propertyDao.insertImages(bundle.images)
-        propertyDao.insertMarketData(bundle.marketData)
-        propertyDao.insertRentEstimate(bundle.rentEstimate)
-        propertyDao.insertTaxRecord(bundle.taxRecord)
-        propertyDao.insertSalesHistory(bundle.salesHistory)
-        propertyDao.insertComps(bundle.comps)
-    }
+    /** Imports one bundle (dedup + provenance + satellites) atomically. */
+    suspend fun insertBundle(bundle: NormalizedPropertyBundle): ImportResult =
+        importer.importBundle(bundle)
 
-    suspend fun syncFromSources() = withContext(Dispatchers.IO) {
-        val bundles = sourceManager.fetchAllSources()
-        for (bundle in bundles) {
-            insertBundle(bundle)
+    /** One import job per configured source, so sync status and counters stay attributable. */
+    suspend fun syncFromSources(): List<ImportSummary> = withContext(Dispatchers.IO) {
+        importer.seedDefaultSources()
+        val sourceIds = sourceManager.availableSourceIds.ifEmpty { listOf(PropertySourceDefaults.INTERNAL_ID) }
+        sourceIds.map { sourceId ->
+            importer.runImport(
+                sourceId = sourceId,
+                triggerKind = "MANUAL",
+                fetch = { sourceManager.fetchSource(sourceId, limit = 20) }
+            )
         }
     }
+
+    /** Claims canonical keys for rows migrated from v2 and merges legacy duplicates. */
+    suspend fun reconcileIdentities(limit: Int = 250): ReconcileSummary =
+        importer.reconcileCanonicalKeys(limit)
+
+    fun observeImportJobs(limit: Int = 50): Flow<List<PropertyImportJobEntity>> =
+        importer.observeRecentJobs(limit)
 }

@@ -6,7 +6,20 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.example.data.local.dao.*
 import com.example.data.local.entity.*
+import com.example.data.local.migration.DatabaseMigrations
 
+/**
+ * The single source of truth for persisted state.
+ *
+ * Version history:
+ *  - 1 -> 2: repair migration for pre-release installs (see [DatabaseMigrations]).
+ *  - 2 -> 3: canonical US property model, source/provenance/import-job tracking, comps,
+ *    enrichments and asset-level financials.
+ *
+ * There is deliberately **no** `fallbackToDestructiveMigration`: every schema change must ship a
+ * migration that copies data forward. If Room cannot find a migration path it will throw at open
+ * time instead of silently wiping the investor's data.
+ */
 @Database(
     entities = [
         PropertyEntity::class,
@@ -15,7 +28,12 @@ import com.example.data.local.entity.*
         RentEstimateEntity::class,
         TaxRecordEntity::class,
         SalesHistoryEntity::class,
-        ComparablePropertyEntity::class,
+        PropertyCompEntity::class,
+        PropertySourceEntity::class,
+        PropertyProvenanceEntity::class,
+        PropertyImportJobEntity::class,
+        PropertyEnrichmentEntity::class,
+        PropertyFinancialEntity::class,
         FinancialAnalysisEntity::class,
         FinancingScenarioEntity::class,
         SavedPropertyEntity::class,
@@ -33,8 +51,8 @@ import com.example.data.local.entity.*
         GmailConfigurationEntity::class,
         OfferTemplateEntity::class
     ],
-    version = 2,
-    exportSchema = false
+    version = 3,
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun propertyDao(): PropertyDao
@@ -43,8 +61,13 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun automationDao(): AutomationDao
     abstract fun aiChatDao(): AiChatDao
     abstract fun configDao(): ConfigDao
+    abstract fun propertySourceDao(): PropertySourceDao
+    abstract fun propertyEnrichmentDao(): PropertyEnrichmentDao
+    abstract fun propertyFinancialDao(): PropertyFinancialDao
 
     companion object {
+        const val DATABASE_NAME = "real_estate_ai.db"
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -53,9 +76,9 @@ abstract class AppDatabase : RoomDatabase() {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "real_estate_ai.db"
+                    DATABASE_NAME
                 )
-                    .fallbackToDestructiveMigration(dropAllTables = true)
+                    .addMigrations(*DatabaseMigrations.ALL)
                     .build()
                 INSTANCE = instance
                 instance

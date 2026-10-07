@@ -1,9 +1,25 @@
 package com.example.data.local.entity
 
 import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "offers")
+/**
+ * Purchase offer.
+ *
+ * `propertyId` is deliberately a *soft* relationship (no foreign key): offers are legal/commercial
+ * records that must never be silently removed because a listing row was cleaned up. The index keeps
+ * the per-property lookups fast instead.
+ */
+@Entity(
+    tableName = "offers",
+    indices = [
+        Index(value = ["propertyId", "createdAt"]),
+        Index(value = ["status", "createdAt"]),
+        Index(value = ["createdAt"])
+    ]
+)
 data class OfferEntity(
     @PrimaryKey
     val id: String,
@@ -26,7 +42,19 @@ data class OfferEntity(
     val lastError: String? = null
 )
 
-@Entity(tableName = "offer_documents")
+/** Generated document for an offer. Cascade delete: a document cannot outlive its offer. */
+@Entity(
+    tableName = "offer_documents",
+    indices = [Index(value = ["offerId"])],
+    foreignKeys = [
+        ForeignKey(
+            entity = OfferEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["offerId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ]
+)
 data class OfferDocumentEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,

@@ -1,9 +1,26 @@
 package com.example.data.local.entity
 
 import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "financial_analyses")
+/**
+ * Result of an underwriting run for a property (the investor's deal model).
+ *
+ * Note: asset-level facts (taxes, HOA, achievable rent, ...) live in [PropertyFinancialEntity].
+ */
+@Entity(
+    tableName = "financial_analyses",
+    foreignKeys = [
+        ForeignKey(
+            entity = PropertyEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["propertyId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ]
+)
 data class FinancialAnalysisEntity(
     @PrimaryKey
     val propertyId: String,
@@ -21,7 +38,7 @@ data class FinancialAnalysisEntity(
     val downPaymentPct: Double,
     val interestRatePct: Double,
     val loanTermYears: Int,
-    
+
     // Core Calculated Metrics
     val grossRentalIncome: Double,
     val effectiveRentalIncome: Double,
@@ -41,7 +58,21 @@ data class FinancialAnalysisEntity(
     val qualificationSummary: String = ""
 )
 
-@Entity(tableName = "financing_scenarios")
+@Entity(
+    tableName = "financing_scenarios",
+    indices = [
+        Index(value = ["propertyId"]),
+        Index(value = ["propertyId", "scenarioName"])
+    ],
+    foreignKeys = [
+        ForeignKey(
+            entity = PropertyEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["propertyId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ]
+)
 data class FinancingScenarioEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
@@ -57,7 +88,22 @@ data class FinancingScenarioEntity(
     val dscr: Double
 )
 
-@Entity(tableName = "saved_properties")
+/**
+ * Watchlist entry. Kept in sync with the `properties.isSaved` flag which remains the value the UI
+ * reads; the FK guarantees a watchlist row cannot outlive its property.
+ */
+@Entity(
+    tableName = "saved_properties",
+    indices = [Index(value = ["savedAt"])],
+    foreignKeys = [
+        ForeignKey(
+            entity = PropertyEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["propertyId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ]
+)
 data class SavedPropertyEntity(
     @PrimaryKey
     val propertyId: String,
@@ -66,7 +112,21 @@ data class SavedPropertyEntity(
     val tag: String = "Watchlist"
 )
 
-@Entity(tableName = "saved_deals")
+@Entity(
+    tableName = "saved_deals",
+    indices = [
+        Index(value = ["propertyId"]),
+        Index(value = ["savedAt"])
+    ],
+    foreignKeys = [
+        ForeignKey(
+            entity = PropertyEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["propertyId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ]
+)
 data class SavedDealEntity(
     @PrimaryKey
     val dealId: String,

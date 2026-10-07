@@ -26,6 +26,15 @@ class RealEstateAiApp : Application() {
     lateinit var propertyRepository: PropertyRepository
         private set
 
+    lateinit var propertyImportRepository: PropertyImportRepository
+        private set
+
+    lateinit var propertyEnrichmentRepository: PropertyEnrichmentRepository
+        private set
+
+    lateinit var propertyFinancialRepository: PropertyFinancialRepository
+        private set
+
     lateinit var financialRepository: FinancialRepository
         private set
 
@@ -66,7 +75,30 @@ class RealEstateAiApp : Application() {
             )
         )
 
-        propertyRepository = PropertyRepository(database.propertyDao(), propertySourceManager)
+        propertyImportRepository = PropertyImportRepository(
+            database = database,
+            propertyDao = database.propertyDao(),
+            sourceDao = database.propertySourceDao(),
+            enrichmentDao = database.propertyEnrichmentDao(),
+            financialDao = database.propertyFinancialDao(),
+            analysisDao = database.financialDao(),
+            clock = System::currentTimeMillis
+        )
+        propertyEnrichmentRepository = PropertyEnrichmentRepository(
+            database = database,
+            enrichmentDao = database.propertyEnrichmentDao()
+        )
+        propertyFinancialRepository = PropertyFinancialRepository(
+            database = database,
+            financialDao = database.propertyFinancialDao(),
+            propertyDao = database.propertyDao()
+        )
+        propertyRepository = PropertyRepository(
+            database = database,
+            propertyDao = database.propertyDao(),
+            sourceManager = propertySourceManager,
+            importer = propertyImportRepository
+        )
         financialRepository = FinancialRepository(database.financialDao(), database.propertyDao(), database.automationDao())
         configRepository = ConfigRepository(database.configDao())
 
@@ -93,6 +125,7 @@ class RealEstateAiApp : Application() {
             automationDao = database.automationDao(),
             propertyDao = database.propertyDao(),
             propertySourceManager = propertySourceManager,
+            propertyImporter = propertyImportRepository,
             financialRepository = financialRepository,
             offerRepository = offerRepository,
             geminiManager = geminiManager,
@@ -109,6 +142,7 @@ class RealEstateAiApp : Application() {
             configRepository.seedDefaultsIfEmpty()
             automationRepository.seedDefaultsIfEmpty()
             propertyRepository.seedInitialDataIfEmpty()
+            propertyRepository.reconcileIdentities()
 
             // Pre-calculate finances for initial seed properties so Dashboard is rich immediately
             val allProps = propertyRepository.allProperties.first()

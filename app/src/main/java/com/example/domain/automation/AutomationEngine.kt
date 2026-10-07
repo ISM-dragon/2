@@ -6,7 +6,9 @@ import com.example.data.local.dao.AutomationDao
 import com.example.data.local.dao.PropertyDao
 import com.example.data.local.entity.*
 import com.example.data.repository.FinancialRepository
+import com.example.data.repository.ImportOutcome
 import com.example.data.repository.OfferRepository
+import com.example.data.repository.PropertyImportRepository
 import com.example.domain.ai.GeminiManager
 import com.example.domain.qualification.QualificationEngine
 import com.example.util.NetworkMonitor
@@ -34,6 +36,7 @@ class AutomationEngine(
     private val automationDao: AutomationDao,
     private val propertyDao: PropertyDao,
     private val propertySourceManager: PropertySourceManager,
+    private val propertyImporter: PropertyImportRepository,
     private val financialRepository: FinancialRepository,
     private val offerRepository: OfferRepository,
     private val geminiManager: GeminiManager,
@@ -231,15 +234,25 @@ class AutomationEngine(
                 for (bundle in bundles) {
                     if (!isRunningFlag.get()) break
 
+                    // Deduplicate and persist atomically: canonical row + provenance + satellites.
+                    // `property` may be an existing canonical row that this record was merged into,
+                    // so every later step (job row, underwriting, offers) keys off its id.
+                    val importResult = propertyImporter.importBundle(bundle)
+                    val property = importResult.property
+                    if (importResult.outcome == ImportOutcome.SKIPPED) {
+                        log("INFO", "PROPERTY_SKIPPED", "Skipped duplicate record: ${importResult.reason}")
+                        continue
+                    }
+
                     // Persistent Job initialization with state machine
-                    val existingJob = automationDao.getJobByPropertyId(bundle.property.id)
+                    val existingJob = automationDao.getJobByPropertyId(property.id)
                     val jobId = existingJob?.jobId ?: ("JOB-" + UUID.randomUUID().toString().take(8).uppercase())
 
                     var currentJob = existingJob ?: AutomationJobEntity(
                         jobId = jobId,
                         runId = runId,
-                        propertyId = bundle.property.id,
-                        propertyAddress = bundle.property.address,
+                        propertyId = property.id,
+                        propertyAddress = property.address,
                         currentState = JobState.DISCOVERED.name,
                         lastSuccessfulState = JobState.DISCOVERED.name,
                         attempts = 0,
@@ -249,13 +262,6 @@ class AutomationEngine(
                     )
                     automationDao.insertOrUpdateJob(currentJob)
 
-                    // Save property & satellite tables
-                    propertyDao.insertProperty(bundle.property)
-                    propertyDao.insertImages(bundle.images)
-                    propertyDao.insertMarketData(bundle.marketData)
-                    propertyDao.insertRentEstimate(bundle.rentEstimate)
-                    propertyDao.insertTaxRecord(bundle.taxRecord)
-
                     // Check run analysis limit
                     if (propAnalyzed >= rules.maxAnalysesPerRun) {
                         log("INFO", "LIMIT_REACHED", "Reached max analyses per run limit (${rules.maxAnalysesPerRun})")
@@ -264,14 +270,14 @@ class AutomationEngine(
 
                     // 2. ANALYZE
                     _status.value = AutomationStatus.ANALYZING
-                    _currentTaskDescription.value = "Analyzing finances for ${bundle.property.address}..."
+                    _currentTaskDescription.value = "Analyzing finances for ${property.address}..."
                     updatePersistentState(
                         isEnabled = true,
-                        op = "Underwriting ${bundle.property.address}",
+                        op = "Underwriting ${property.address}",
                         stage = "ANALYZING",
-                        addr = bundle.property.address
+                        addr = property.address
                     )
-                    log("INFO", "ANALYSIS_STARTED", "Starting deterministic underwriting for ${bundle.property.address}")
+                    log("INFO", "ANALYSIS_STARTED", "Starting deterministic underwriting for ${property.address}")
 
                     currentJob = currentJob.copy(
                         currentState = JobState.ANALYZING.name,
@@ -279,18 +285,18 @@ class AutomationEngine(
                     )
                     automationDao.insertOrUpdateJob(currentJob)
 
-                    val finResult = financialRepository.analyzeProperty(bundle.property.id)
+                    val finResult = financialRepository.analyzeProperty(property.id)
                     propAnalyzed++
 
                     currentJob = currentJob.copy(
                         currentState = JobState.ANALYZED.name,
                         lastSuccessfulState = JobState.ANALYZED.name,
-                        analysisId = bundle.property.id,
+                        analysisId = property.id,
                         updatedAt = System.currentTimeMillis()
                     )
                     automationDao.insertOrUpdateJob(currentJob)
 
-                    log("SUCCESS", "ANALYSIS_COMPLETED", "Analyzed ${bundle.property.address}: NOI $${finResult.noiAnnual.toInt()}, Cash Flow $${finResult.monthlyCashFlow.toInt()}/mo, Cap ${String.format("%.1f", finResult.capRate)}%, DSCR ${String.format("%.2f", finResult.dscr)}")
+                    log("SUCCESS", "ANALYSIS_COMPLETED", "Analyzed ${property.address}: NOI $${finResult.noiAnnual.toInt()}, Cash Flow $${finResult.monthlyCashFlow.toInt()}/mo, Cap ${String.format("%.1f", finResult.capRate)}%, DSCR ${String.format("%.2f", finResult.dscr)}")
 
                     // 3. QUALIFY
                     _status.value = AutomationStatus.QUALIFYING
@@ -300,12 +306,12 @@ class AutomationEngine(
                     )
                     automationDao.insertOrUpdateJob(currentJob)
 
-                    val qualEval = QualificationEngine.evaluate(bundle.property, finResult, rules)
+                    val qualEval = QualificationEngine.evaluate(property, finResult, rules)
 
                     if (qualEval.isQualified) {
                         dealsQualified++
-                        propertyDao.setDealStatus(bundle.property.id, true, qualEval.score)
-                        log("SUCCESS", "QUALIFICATION_RESULT", "DEAL QUALIFIED: ${bundle.property.address} (Score: ${qualEval.score}/100, Suggested: $${qualEval.suggestedOfferPrice.toInt()})")
+                        propertyDao.setDealStatus(property.id, true, qualEval.score)
+                        log("SUCCESS", "QUALIFICATION_RESULT", "DEAL QUALIFIED: ${property.address} (Score: ${qualEval.score}/100, Suggested: $${qualEval.suggestedOfferPrice.toInt()})")
 
                         currentJob = currentJob.copy(
                             currentState = JobState.QUALIFIED.name,
@@ -318,19 +324,19 @@ class AutomationEngine(
                             isEnabled = true,
                             op = "Deal Qualified: Score ${qualEval.score}/100",
                             stage = "QUALIFIED",
-                            addr = bundle.property.address,
-                            successAction = "Qualified ${bundle.property.address}"
+                            addr = property.address,
+                            successAction = "Qualified ${property.address}"
                         )
 
                         // 4. GENERATE OFFER (Idempotent: will not duplicate existing offer)
                         if (rules.autoGenerateOffers && offersCreated < rules.maxOffersPerRun) {
                             _status.value = AutomationStatus.GENERATING_OFFERS
-                            _currentTaskDescription.value = "Drafting institutional purchase offer for ${bundle.property.address}..."
+                            _currentTaskDescription.value = "Drafting institutional purchase offer for ${property.address}..."
                             updatePersistentState(
                                 isEnabled = true,
-                                op = "Generating LOI for ${bundle.property.address}",
+                                op = "Generating LOI for ${property.address}",
                                 stage = "OFFER_GENERATION",
-                                addr = bundle.property.address
+                                addr = property.address
                             )
 
                             currentJob = currentJob.copy(
@@ -341,7 +347,7 @@ class AutomationEngine(
 
                             val offer = offerRepository.generateOffer(
                                 context = context,
-                                propertyId = bundle.property.id,
+                                propertyId = property.id,
                                 customPrice = qualEval.suggestedOfferPrice
                             )
                             offersCreated++
@@ -361,7 +367,7 @@ class AutomationEngine(
                                 isEnabled = true,
                                 op = "Offer Generated: ${offer.id}",
                                 stage = "OFFER_READY",
-                                addr = bundle.property.address,
+                                addr = property.address,
                                 successAction = "Generated Offer ${offer.id}"
                             )
 
@@ -412,7 +418,7 @@ class AutomationEngine(
                                             isEnabled = true,
                                             op = "Offer Sent via Gmail",
                                             stage = "OFFER_SENT",
-                                            addr = bundle.property.address,
+                                            addr = property.address,
                                             successAction = "Sent offer ${offer.id} to ${offer.recipientEmail}"
                                         )
                                     } else {
@@ -434,7 +440,7 @@ class AutomationEngine(
                             }
                         }
                     } else {
-                        propertyDao.setDealStatus(bundle.property.id, false, qualEval.score)
+                        propertyDao.setDealStatus(property.id, false, qualEval.score)
                         val disqReason = qualEval.failedChecks.joinToString("; ").ifBlank { qualEval.summary }
                         currentJob = currentJob.copy(
                             currentState = JobState.DISQUALIFIED.name,
