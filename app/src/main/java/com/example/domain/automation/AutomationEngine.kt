@@ -2,12 +2,14 @@ package com.example.domain.automation
 
 import android.content.Context
 import com.example.data.adapter.PropertySourceManager
+import com.example.data.adapter.toCanonicalPropertyIdentity
 import com.example.data.local.dao.AutomationDao
 import com.example.data.local.dao.PropertyDao
 import com.example.data.local.entity.*
 import com.example.data.repository.FinancialRepository
 import com.example.data.repository.OfferRepository
 import com.example.domain.ai.GeminiManager
+import com.example.domain.identity.DeduplicationStatus
 import com.example.domain.qualification.QualificationEngine
 import com.example.util.NetworkMonitor
 import kotlinx.coroutines.*
@@ -224,9 +226,27 @@ class AutomationEngine(
                 _currentTaskDescription.value = "Scanning property feeds (MLS & Distressed)..."
                 updatePersistentState(isEnabled = true, op = "Scanning property feeds", stage = "DISCOVERY")
 
-                val bundles = propertySourceManager.fetchAllSources(limitPerSource = rules.maxPropertiesPerCycle)
+                val existingIdentities = propertyDao.getAllPropertiesList()
+                    .map { it.toCanonicalPropertyIdentity() }
+                val deduplicationDecisions = propertySourceManager.fetchAllSourcesWithDeduplication(
+                    existingCanonicalProperties = existingIdentities,
+                    limitPerSource = rules.maxPropertiesPerCycle
+                )
+                val bundles = deduplicationDecisions
+                    .filter { it.result.status == DeduplicationStatus.NEW }
+                    .map { it.bundle }
+                val unresolvedIdentities = deduplicationDecisions.count {
+                    it.result.status == DeduplicationStatus.POSSIBLE_MATCH ||
+                        it.result.status == DeduplicationStatus.CONFLICT
+                }
                 propFound = bundles.size
-                log("INFO", "PROPERTY_DISCOVERED", "Discovered $propFound target candidate properties across feeds")
+                log(
+                    "INFO",
+                    "PROPERTY_DISCOVERED",
+                    "Discovered $propFound new properties across feeds; " +
+                        "${deduplicationDecisions.count { it.result.status == DeduplicationStatus.MATCHED }} already matched, " +
+                        "$unresolvedIdentities require identity review"
+                )
 
                 for (bundle in bundles) {
                     if (!isRunningFlag.get()) break
