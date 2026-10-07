@@ -14,6 +14,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
+internal fun sanitizeGeminiError(message: String, apiKey: String): String =
+    if (apiKey.isBlank()) message else message.replace(apiKey, "[REDACTED]")
+
 class GeminiManager(
     private val configDao: ConfigDao
 ) {
@@ -66,7 +69,7 @@ class GeminiManager(
                 Pair(false, testResponse.second)
             }
         } catch (e: Exception) {
-            val err = e.message ?: "Connection test failed"
+            val err = sanitizeGeminiError(e.message ?: "Connection test failed", rawKey)
             configDao.updateSlotStatus(slotIndex, "ERROR", 0L, err)
             Pair(false, err)
         }
@@ -140,7 +143,7 @@ class GeminiManager(
                         }
                     }
                 } catch (e: Exception) {
-                    val msg = (e.message ?: "Network error").replace(apiKey, "[REDACTED]")
+                    val msg = sanitizeGeminiError(e.message ?: "Network error", apiKey)
                     lastError = msg
                     if (attempt == 1) {
                         configDao.updateSlotStatus(slotIndex, "ERROR", 0L, msg)
@@ -220,7 +223,7 @@ class GeminiManager(
             }
         } else {
             // Mask any key if present in error message
-            val sanitized = responseBody.replace(apiKey, "[REDACTED]")
+            val sanitized = sanitizeGeminiError(responseBody, apiKey)
             when (response.code) {
                 401, 403 -> Pair(false, "HTTP ${response.code} (Unauthorized): API key is invalid or lacks permission.")
                 429 -> Pair(false, "HTTP 429 (Rate Limit): Quota exhausted for slot.")

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.withTransaction
 import com.example.data.local.AppDatabase
 import com.example.data.local.entity.*
+import com.example.domain.pdf.OfferPdfStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -311,7 +312,7 @@ class BackupRestoreManager(
                                 conditions = obj.optString("conditions", ""),
                                 expirationDate = obj.optString("expirationDate", ""),
                                 generatedLetterContent = obj.optString("generatedLetterContent", ""),
-                                pdfPath = obj.optString("pdfPath").takeIf { it.isNotBlank() },
+                                pdfPath = OfferPdfStorage.resolveExistingPdf(context, obj.optString("pdfPath"))?.absolutePath,
                                 status = obj.optString("status", "READY"),
                                 createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
                                 sentAt = obj.optLong("sentAt").takeIf { it > 0 },

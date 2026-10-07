@@ -9,6 +9,7 @@ import androidx.core.content.FileProvider
 import com.example.data.local.entity.GmailAuthStatus
 import com.example.data.local.entity.GmailConfigurationEntity
 import com.example.data.repository.ConfigRepository
+import com.example.domain.pdf.OfferPdfStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
@@ -27,6 +28,19 @@ data class GmailSendResult(
     val messageId: String? = null,
     val error: String? = null
 )
+
+internal fun sanitizeMimeHeader(value: String): String = buildString(value.length) {
+    var previousWasControl = false
+    value.forEach { character ->
+        val isControl = character.code < 0x20 || character.code == 0x7f
+        if (isControl) {
+            if (!previousWasControl) append(' ')
+        } else {
+            append(character)
+        }
+        previousWasControl = isControl
+    }
+}.trim()
 
 class GmailService(
     private val configRepository: ConfigRepository
@@ -67,11 +81,12 @@ class GmailService(
             return@withContext GmailSendResult(success = false, error = "Email content body cannot be empty.")
         }
 
-        // 3. Validate PDF attachment
-        if (pdfFile == null || !pdfFile.exists() || pdfFile.length() == 0L) {
+        // 3. Validate the attachment is a regular PDF inside the private offers directory.
+        val safePdfFile = OfferPdfStorage.resolveExistingPdf(context, pdfFile?.path)
+        if (safePdfFile == null || safePdfFile.length() == 0L) {
             return@withContext GmailSendResult(
                 success = false,
-                error = "Required offer PDF attachment is missing or empty on local disk."
+                error = "Required offer PDF attachment is missing, empty, or outside private offer storage."
             )
         }
 
@@ -105,7 +120,7 @@ class GmailService(
         // Update status to SENDING
         configRepository.updateGmailAuthStatus(GmailAuthStatus.SENDING, null)
 
-        val result = transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
+        val result = transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, safePdfFile)
         if (!result.success && result.error?.contains("401") == true && !config.refreshToken.isNullOrBlank()) {
             // Attempt one token refresh on 401 Unauthorized
             configRepository.updateGmailAuthStatus(GmailAuthStatus.AUTH_EXPIRED, "HTTP 401 Unauthorized received from Gmail API")
@@ -113,7 +128,7 @@ class GmailService(
             if (refreshed != null && !refreshed.accessToken.isNullOrBlank()) {
                 config = refreshed
                 configRepository.updateGmailAuthStatus(GmailAuthStatus.SENDING, null)
-                val retryResult = transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
+                val retryResult = transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, safePdfFile)
                 if (retryResult.success) {
                     configRepository.updateGmailAuthStatus(GmailAuthStatus.SENT, null)
                 } else {
@@ -153,20 +168,23 @@ class GmailService(
             val boundary = "==Multipart_Boundary_${System.currentTimeMillis()}=="
             val baos = ByteArrayOutputStream()
 
-            val fromHeader = if (config.senderName.isNotBlank() && config.accountEmail.isNotBlank()) {
-                "${config.senderName} <${config.accountEmail}>"
-            } else if (config.accountEmail.isNotBlank()) {
-                config.accountEmail
+            val safeAccountEmail = sanitizeMimeHeader(config.accountEmail)
+            val safeRecipientEmail = sanitizeMimeHeader(recipientEmail)
+            val fromHeader = if (safeAccountEmail.isNotBlank()) {
+                formatMailboxHeader(config.senderName, safeAccountEmail)
             } else {
                 "me"
             }
-
-            val toHeader = if (recipientName.isNotBlank()) "$recipientName <$recipientEmail>" else recipientEmail
+            val toHeader = formatMailboxHeader(recipientName, safeRecipientEmail)
+            val safeSubject = sanitizeMimeHeader(subject)
+            val safeAttachmentName = sanitizeMimeHeader(pdfFile.name)
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
 
             val headerBuilder = StringBuilder()
             headerBuilder.append("From: $fromHeader\r\n")
             headerBuilder.append("To: $toHeader\r\n")
-            headerBuilder.append("Subject: $subject\r\n")
+            headerBuilder.append("Subject: $safeSubject\r\n")
             headerBuilder.append("MIME-Version: 1.0\r\n")
             headerBuilder.append("Content-Type: multipart/mixed; boundary=\"$boundary\"\r\n\r\n")
 
@@ -178,8 +196,8 @@ class GmailService(
 
             // Part 2: PDF attachment
             headerBuilder.append("--$boundary\r\n")
-            headerBuilder.append("Content-Type: application/pdf; name=\"${pdfFile.name}\"\r\n")
-            headerBuilder.append("Content-Disposition: attachment; filename=\"${pdfFile.name}\"\r\n")
+            headerBuilder.append("Content-Type: application/pdf; name=\"$safeAttachmentName\"\r\n")
+            headerBuilder.append("Content-Disposition: attachment; filename=\"$safeAttachmentName\"\r\n")
             headerBuilder.append("Content-Transfer-Encoding: base64\r\n\r\n")
 
             baos.write(headerBuilder.toString().toByteArray(StandardCharsets.UTF_8))
@@ -312,6 +330,13 @@ class GmailService(
         }
     }
 
+    private fun formatMailboxHeader(displayName: String, email: String): String {
+        val safeName = sanitizeMimeHeader(displayName)
+        if (safeName.isBlank()) return email
+        val quotedName = safeName.replace("\\", "\\\\").replace("\"", "\\\"")
+        return "\"$quotedName\" <$email>"
+    }
+
     private fun sanitizeSensitiveData(message: String, config: GmailConfigurationEntity?): String {
         var sanitized = message
         config?.accessToken?.let { token ->
@@ -330,18 +355,19 @@ class GmailService(
         bodyText: String,
         pdfFile: File?
     ): Intent {
+        val safePdfFile = OfferPdfStorage.resolveExistingPdf(context, pdfFile?.path)
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = if (pdfFile != null && pdfFile.exists()) "application/pdf" else "message/rfc822"
+            type = if (safePdfFile != null) "application/pdf" else "message/rfc822"
             putExtra(Intent.EXTRA_EMAIL, arrayOf(recipientEmail))
             putExtra(Intent.EXTRA_SUBJECT, subject)
             putExtra(Intent.EXTRA_TEXT, bodyText)
             setPackage("com.google.android.gm")
 
-            if (pdfFile != null && pdfFile.exists()) {
+            if (safePdfFile != null) {
                 val uri: Uri = FileProvider.getUriForFile(
                     context,
                     "${context.packageName}.fileprovider",
-                    pdfFile
+                    safePdfFile
                 )
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

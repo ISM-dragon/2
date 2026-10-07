@@ -9,10 +9,10 @@ import com.example.data.local.entity.OfferEntity
 import com.example.domain.ai.GeminiManager
 import com.example.domain.gmail.GmailService
 import com.example.domain.pdf.OfferPdfGenerator
+import com.example.domain.pdf.OfferPdfStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -72,9 +72,9 @@ class OfferRepository(
             return@withContext PreSendValidationResult(false, "Recipient email '$email' is not a valid email address.")
         }
 
-        val pdfFile = offer.pdfPath?.let { File(it) }
-        if (pdfFile == null || !pdfFile.exists() || pdfFile.length() == 0L) {
-            return@withContext PreSendValidationResult(false, "Offer PDF contract document is missing or corrupted on disk.")
+        val pdfFile = OfferPdfStorage.resolveExistingPdf(context, offer.pdfPath)
+        if (pdfFile == null || pdfFile.length() == 0L) {
+            return@withContext PreSendValidationResult(false, "Offer PDF is missing or outside the private offers directory.")
         }
 
         val gmailConfig = configRepository.getGmailConfig()
@@ -205,6 +205,17 @@ class OfferRepository(
             return@withContext false
         }
 
+        val pdfFile = OfferPdfStorage.resolveExistingPdf(context, offer.pdfPath)
+        if (pdfFile == null || pdfFile.length() == 0L) {
+            offerDao.updateOfferStatus(
+                id = offerId,
+                status = "FAILED",
+                sentAt = null,
+                error = "BLOCKED: Offer PDF is missing or outside the private offers directory."
+            )
+            return@withContext false
+        }
+
         // Lock state to prevent race conditions during transmission
         offerDao.updateOfferStatus(
             id = offerId,
@@ -212,8 +223,6 @@ class OfferRepository(
             sentAt = null,
             error = null
         )
-
-        val pdfFile = offer.pdfPath?.let { File(it) }
 
         val subject = "Purchase Offer & Letter of Intent - ${property.address}, ${property.city}"
         val htmlBody = """

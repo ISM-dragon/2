@@ -12,7 +12,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
 class ConfigRepository(
-    private val configDao: ConfigDao
+    private val configDao: ConfigDao,
+    private val oauthClientId: String = BuildConfig.GOOGLE_OAUTH_CLIENT_ID
 ) {
     // Flow exposes decrypted configurations for internal and UI consumption
     val apiConfigs: Flow<List<ApiConfigurationEntity>> = configDao.getAllApiConfigs().map { list ->
@@ -87,22 +88,9 @@ class ConfigRepository(
         saveGmailConfig(updated)
     }
 
-    fun getOAuthClientId(): String? {
-        return try {
-            val field = BuildConfig::class.java.getField("GOOGLE_OAUTH_CLIENT_ID")
-            val value = field.get(null) as? String
-            if (!value.isNullOrBlank()) value.trim() else null
-        } catch (e: Throwable) {
-            try {
-                val field = BuildConfig::class.java.getField("OAUTH_CLIENT_ID")
-                val value = field.get(null) as? String
-                if (!value.isNullOrBlank()) value.trim() else null
-            } catch (e2: Throwable) {
-                val envVal = System.getenv("GOOGLE_OAUTH_CLIENT_ID")
-                if (!envVal.isNullOrBlank()) envVal.trim() else null
-            }
-        }
-    }
+    fun getOAuthClientId(): String? = oauthClientId
+        .trim()
+        .takeIf { it.isNotBlank() }
 
     suspend fun saveApiConfig(config: ApiConfigurationEntity) = withContext(Dispatchers.IO) {
         val encryptedKey = CryptoManager.encrypt(config.apiKey.trim())
@@ -116,22 +104,14 @@ class ConfigRepository(
     suspend fun seedDefaultsIfEmpty() = withContext(Dispatchers.IO) {
         val existingConfigs = configDao.getAllApiConfigsList()
         if (existingConfigs.isEmpty()) {
-            val defaultKey = try {
-                // Check if BuildConfig has GEMINI_API_KEY injected
-                val field = BuildConfig::class.java.getField("GEMINI_API_KEY")
-                val keyVal = field.get(null) as? String
-                if (keyVal.isNullOrBlank() || keyVal == "MY_GEMINI_API_KEY") "" else keyVal
-            } catch (e: Exception) {
-                ""
-            }
-
+            // API keys are entered by the user at runtime and must never be sourced from BuildConfig.
             val defaultSlots = listOf(
                 ApiConfigurationEntity(
                     slotIndex = 1,
                     label = "Slot 1: Primary Flash",
-                    apiKey = CryptoManager.encrypt(defaultKey),
+                    apiKey = "",
                     model = "gemini-2.5-flash",
-                    status = if (defaultKey.isNotBlank()) "READY" else "DISABLED"
+                    status = "DISABLED"
                 ),
                 ApiConfigurationEntity(
                     slotIndex = 2,

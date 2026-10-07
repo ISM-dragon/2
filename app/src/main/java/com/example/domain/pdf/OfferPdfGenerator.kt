@@ -22,8 +22,7 @@ object OfferPdfGenerator {
         offer: OfferEntity,
         property: PropertyEntity
     ): File = withContext(Dispatchers.IO) {
-        val pdfDir = File(context.filesDir, "offers").apply { mkdirs() }
-        val pdfFile = File(pdfDir, "Offer_${offer.id}.pdf")
+        val pdfFile = OfferPdfStorage.createPdfFile(context, offer.id)
 
         val document = PdfDocument()
         val pageWidth = 595
