@@ -4,12 +4,14 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Base64
-import android.util.Patterns
 import androidx.core.content.FileProvider
 import com.example.data.local.entity.GmailAuthStatus
 import com.example.data.local.entity.GmailConfigurationEntity
 import com.example.data.repository.ConfigRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
@@ -17,234 +19,226 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
-data class GmailSendResult(
-    val success: Boolean,
-    val messageId: String? = null,
-    val error: String? = null
-)
-
-class GmailService(
-    private val configRepository: ConfigRepository
-) {
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(25, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
-
-    suspend fun getConfiguration(): GmailConfigurationEntity {
-        // Reads via ConfigRepository which decrypts access & refresh tokens
-        return configRepository.getGmailConfig()
-    }
-
+interface GmailSender {
     suspend fun sendOfferEmail(
         context: Context,
         recipientEmail: String,
         recipientName: String,
         subject: String,
         htmlBody: String,
-        pdfFile: File?
-    ): GmailSendResult = withContext(Dispatchers.IO) {
-        // 1. Validate recipient email
-        val cleanEmail = recipientEmail.trim()
-        if (cleanEmail.isBlank()) {
-            return@withContext GmailSendResult(success = false, error = "Recipient email is blank.")
-        }
-        if (!Patterns.EMAIL_ADDRESS.matcher(cleanEmail).matches()) {
-            return@withContext GmailSendResult(success = false, error = "Invalid recipient email address format: $cleanEmail")
-        }
+        pdfFile: File?,
+        idempotencyKey: String? = null
+    ): GmailSendResult
+}
 
-        // 2. Validate subject and body
-        if (subject.isBlank()) {
-            return@withContext GmailSendResult(success = false, error = "Email subject cannot be empty.")
+enum class GmailFailureKind {
+    VALIDATION,
+    AUTHENTICATION,
+    RETRYABLE_REJECTED,
+    PERMANENT_REJECTED,
+    DELIVERY_UNKNOWN
+}
+
+data class GmailSendResult(
+    val success: Boolean,
+    val messageId: String? = null,
+    val error: String? = null,
+    val failureKind: GmailFailureKind? = null,
+    val httpStatusCode: Int? = null,
+    val retryAfterMillis: Long? = null
+)
+
+class GmailService(
+    private val configRepository: ConfigRepository,
+    private val httpClient: OkHttpClient = defaultHttpClient(),
+    private val gmailSendUrl: String = GMAIL_SEND_URL,
+    private val oauthTokenUrl: String = OAUTH_TOKEN_URL,
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val oauthClientIdProvider: () -> String? = { configRepository.getOAuthClientId() }
+) : GmailSender {
+    /**
+     * A single-flight lock shared by proactive refreshes, 401 recovery, and the Settings action.
+     * After acquiring it, a caller re-reads storage and uses a token another caller just refreshed.
+     */
+    private val tokenRefreshMutex = Mutex()
+    private var failedRefreshFingerprint: String? = null
+    private var failedRefreshAt: Long = 0L
+
+    suspend fun getConfiguration(): GmailConfigurationEntity = configRepository.getGmailConfig()
+
+    override suspend fun sendOfferEmail(
+        context: Context,
+        recipientEmail: String,
+        recipientName: String,
+        subject: String,
+        htmlBody: String,
+        pdfFile: File?,
+        idempotencyKey: String?
+    ): GmailSendResult = withContext(Dispatchers.IO) {
+        val cleanEmail = recipientEmail.trim()
+        if (!GmailMimeBuilder.isSafeEmail(cleanEmail)) {
+            return@withContext validationFailure("Invalid recipient email address.")
+        }
+        if (subject.isBlank() || GmailMimeBuilder.containsHeaderControls(subject)) {
+            return@withContext validationFailure("Email subject is empty or contains invalid header characters.")
+        }
+        if (GmailMimeBuilder.containsHeaderControls(recipientName)) {
+            return@withContext validationFailure("Recipient name contains invalid header characters.")
         }
         if (htmlBody.isBlank()) {
-            return@withContext GmailSendResult(success = false, error = "Email content body cannot be empty.")
+            return@withContext validationFailure("Email content body cannot be empty.")
+        }
+        if (pdfFile == null || !GmailMimeBuilder.isApprovedOfferPdf(context, pdfFile)) {
+            return@withContext validationFailure("Required offer PDF is missing, invalid, or outside the private offers directory.")
+        }
+        if (pdfFile.length() > GmailMimeBuilder.MAX_ATTACHMENT_BYTES) {
+            return@withContext validationFailure("Offer PDF exceeds the supported 20 MB attachment limit.")
         }
 
-        // 3. Validate PDF attachment
-        if (pdfFile == null || !pdfFile.exists() || pdfFile.length() == 0L) {
-            return@withContext GmailSendResult(
-                success = false,
-                error = "Required offer PDF attachment is missing or empty on local disk."
-            )
-        }
-
-        // 4. Verify account authorization via single source of truth (ConfigRepository)
-        var config = getConfiguration()
+        val config = getConfiguration()
         if (!config.isConnected || config.accessToken.isNullOrBlank()) {
-            configRepository.updateGmailAuthStatus(
-                GmailAuthStatus.AUTH_REQUIRED,
-                "Gmail OAuth is not configured. Email was not sent."
-            )
+            val error = "Gmail OAuth is not configured. Email was not sent."
+            configRepository.updateGmailAuthStatus(GmailAuthStatus.AUTH_REQUIRED, error)
             return@withContext GmailSendResult(
                 success = false,
-                error = "Gmail OAuth is not configured. Email was not sent."
+                error = error,
+                failureKind = GmailFailureKind.AUTHENTICATION
             )
         }
 
-        // Check token expiration before sending
-        if (config.expiresAt > 0L && System.currentTimeMillis() > config.expiresAt) {
-            configRepository.updateGmailAuthStatus(GmailAuthStatus.AUTH_EXPIRED, "OAuth access token expired")
-            val refreshed = refreshAccessToken(config)
-            if (refreshed != null && !refreshed.accessToken.isNullOrBlank()) {
-                config = refreshed
-            } else {
+        val sendKey = idempotencyKey?.takeIf { it.isNotBlank() }
+            ?: fallbackIdempotencyKey(cleanEmail, subject, pdfFile)
+        val pdfBytes = try {
+            pdfFile.readBytes()
+        } catch (_: IOException) {
+            return@withContext validationFailure("Offer PDF could not be read from local storage.")
+        }
+        if (pdfBytes.isEmpty() || pdfBytes.size.toLong() > GmailMimeBuilder.MAX_ATTACHMENT_BYTES) {
+            return@withContext validationFailure("Offer PDF is empty or exceeds the supported attachment limit.")
+        }
+
+        var activeConfig = getUsableConfiguration(config)
+            ?: return@withContext GmailSendResult(
+                success = false,
+                error = "Gmail authorization expired. Please re-authorize in Settings.",
+                failureKind = GmailFailureKind.AUTHENTICATION
+            )
+
+        val mimeMessage = try {
+            GmailMimeBuilder.build(
+                config = activeConfig,
+                recipientEmail = cleanEmail,
+                recipientName = recipientName,
+                subject = subject,
+                htmlBody = htmlBody,
+                pdfBytes = pdfBytes,
+                idempotencyKey = sendKey,
+                nowMillis = clock()
+            )
+        } catch (e: IllegalArgumentException) {
+            return@withContext validationFailure(e.message ?: "Email headers are invalid.")
+        }
+
+        configRepository.updateGmailAuthStatus(GmailAuthStatus.SENDING, null)
+        var result = transmitViaGmailApi(activeConfig, mimeMessage, sendKey)
+
+        // A 401 is a definite rejection, so one refresh-and-resend is safe. Do not retry network
+        // errors, 5xx responses, or successful responses missing a message id: those are ambiguous.
+        if (result.httpStatusCode == 401) {
+            configRepository.updateGmailAuthStatus(GmailAuthStatus.AUTH_EXPIRED, "Gmail rejected the access token.")
+            val refreshed = refreshAccessToken(activeConfig)
+            if (refreshed == null || refreshed.accessToken.isNullOrBlank()) {
+                val error = "Gmail authorization expired. Please re-authorize in Settings."
+                configRepository.updateGmailAuthStatus(GmailAuthStatus.AUTH_REQUIRED, error)
                 return@withContext GmailSendResult(
                     success = false,
-                    error = "Gmail authorization expired. Please re-authorize in Settings."
+                    error = error,
+                    failureKind = GmailFailureKind.AUTHENTICATION,
+                    httpStatusCode = 401
                 )
             }
-        }
-
-        // Update status to SENDING
-        configRepository.updateGmailAuthStatus(GmailAuthStatus.SENDING, null)
-
-        val result = transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
-        if (!result.success && result.error?.contains("401") == true && !config.refreshToken.isNullOrBlank()) {
-            // Attempt one token refresh on 401 Unauthorized
-            configRepository.updateGmailAuthStatus(GmailAuthStatus.AUTH_EXPIRED, "HTTP 401 Unauthorized received from Gmail API")
-            val refreshed = refreshAccessToken(config)
-            if (refreshed != null && !refreshed.accessToken.isNullOrBlank()) {
-                config = refreshed
-                configRepository.updateGmailAuthStatus(GmailAuthStatus.SENDING, null)
-                val retryResult = transmitViaGmailApi(config, cleanEmail, recipientName, subject, htmlBody, pdfFile)
-                if (retryResult.success) {
-                    configRepository.updateGmailAuthStatus(GmailAuthStatus.SENT, null)
-                } else {
-                    configRepository.updateGmailAuthStatus(GmailAuthStatus.FAILED, retryResult.error)
-                }
-                return@withContext retryResult
+            activeConfig = refreshed
+            configRepository.updateGmailAuthStatus(GmailAuthStatus.SENDING, null)
+            result = transmitViaGmailApi(activeConfig, mimeMessage, sendKey)
+            if (result.httpStatusCode == 401) {
+                configRepository.updateGmailAuthStatus(
+                    GmailAuthStatus.AUTH_REQUIRED,
+                    "Gmail rejected the refreshed access token. Re-authorize the account."
+                )
+                return@withContext result.copy(
+                    error = "Gmail rejected the refreshed access token. Re-authorize the account.",
+                    failureKind = GmailFailureKind.AUTHENTICATION
+                )
             }
         }
 
         if (result.success) {
             configRepository.updateGmailAuthStatus(GmailAuthStatus.SENT, null)
         } else {
-            configRepository.updateGmailAuthStatus(GmailAuthStatus.FAILED, result.error)
+            val status = if (result.failureKind == GmailFailureKind.AUTHENTICATION) {
+                GmailAuthStatus.AUTH_REQUIRED
+            } else {
+                GmailAuthStatus.FAILED
+            }
+            configRepository.updateGmailAuthStatus(status, result.error)
         }
-
-        return@withContext result
+        result
     }
 
-    private fun transmitViaGmailApi(
-        config: GmailConfigurationEntity,
-        recipientEmail: String,
-        recipientName: String,
-        subject: String,
-        htmlBody: String,
-        pdfFile: File
-    ): GmailSendResult {
-        try {
-            val fullBody = buildString {
-                append(htmlBody)
-                if (config.signature.isNotBlank()) {
-                    append("<br><br>--<br>")
-                    append(config.signature.replace("\n", "<br>"))
+    /** Refreshes once for all concurrent callers and safely reuses the new stored token. */
+    suspend fun refreshAccessToken(config: GmailConfigurationEntity): GmailConfigurationEntity? =
+        withContext(Dispatchers.IO) {
+            tokenRefreshMutex.withLock {
+                val latest = getConfiguration()
+                val tokenWasRefreshedByAnotherCaller =
+                    latest.accessToken != config.accessToken &&
+                        !latest.accessToken.isNullOrBlank() &&
+                        latest.isConnected &&
+                        latest.expiresAt > clock()
+                if (tokenWasRefreshedByAnotherCaller) return@withLock latest
+                if (latest.refreshToken.isNullOrBlank()) return@withLock null
+
+                val fingerprint = refreshFingerprint(latest)
+                val now = clock()
+                if (
+                    failedRefreshFingerprint == fingerprint &&
+                    now - failedRefreshAt in 0L..FAILED_REFRESH_SINGLE_FLIGHT_WINDOW_MILLIS
+                ) return@withLock null
+
+                // Storage is authoritative; do not use a stale UI/caller snapshot after disconnect.
+                val refreshed = refreshAccessTokenLocked(latest)
+                if (refreshed == null) {
+                    failedRefreshFingerprint = fingerprint
+                    failedRefreshAt = clock()
+                } else {
+                    failedRefreshFingerprint = null
+                    failedRefreshAt = 0L
                 }
+                refreshed
             }
-
-            // Construct RFC 822 MIME message
-            val boundary = "==Multipart_Boundary_${System.currentTimeMillis()}=="
-            val baos = ByteArrayOutputStream()
-
-            val fromHeader = if (config.senderName.isNotBlank() && config.accountEmail.isNotBlank()) {
-                "${config.senderName} <${config.accountEmail}>"
-            } else if (config.accountEmail.isNotBlank()) {
-                config.accountEmail
-            } else {
-                "me"
-            }
-
-            val toHeader = if (recipientName.isNotBlank()) "$recipientName <$recipientEmail>" else recipientEmail
-
-            val headerBuilder = StringBuilder()
-            headerBuilder.append("From: $fromHeader\r\n")
-            headerBuilder.append("To: $toHeader\r\n")
-            headerBuilder.append("Subject: $subject\r\n")
-            headerBuilder.append("MIME-Version: 1.0\r\n")
-            headerBuilder.append("Content-Type: multipart/mixed; boundary=\"$boundary\"\r\n\r\n")
-
-            // Part 1: HTML body
-            headerBuilder.append("--$boundary\r\n")
-            headerBuilder.append("Content-Type: text/html; charset=UTF-8\r\n")
-            headerBuilder.append("Content-Transfer-Encoding: 7bit\r\n\r\n")
-            headerBuilder.append(fullBody).append("\r\n\r\n")
-
-            // Part 2: PDF attachment
-            headerBuilder.append("--$boundary\r\n")
-            headerBuilder.append("Content-Type: application/pdf; name=\"${pdfFile.name}\"\r\n")
-            headerBuilder.append("Content-Disposition: attachment; filename=\"${pdfFile.name}\"\r\n")
-            headerBuilder.append("Content-Transfer-Encoding: base64\r\n\r\n")
-
-            baos.write(headerBuilder.toString().toByteArray(StandardCharsets.UTF_8))
-
-            // Write Base64 PDF
-            val fileBytes = pdfFile.readBytes()
-            val encodedPdf = Base64.encodeToString(fileBytes, Base64.CRLF)
-            baos.write(encodedPdf.toByteArray(StandardCharsets.UTF_8))
-            baos.write("\r\n--$boundary--\r\n".toByteArray(StandardCharsets.UTF_8))
-
-            val rawMimeBytes = baos.toByteArray()
-            val rawBase64Url = Base64.encodeToString(
-                rawMimeBytes,
-                Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
-            )
-
-            val jsonPayload = JSONObject().apply {
-                put("raw", rawBase64Url)
-            }
-
-            val requestBody = jsonPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-            val request = Request.Builder()
-                .url("https://gmail.googleapis.com/gmail/v1/users/me/messages/send")
-                .addHeader("Authorization", "Bearer ${config.accessToken}")
-                .addHeader("Accept", "application/json")
-                .post(requestBody)
-                .build()
-
-            val response = httpClient.newCall(request).execute()
-            val responseBody = response.body?.string() ?: ""
-
-            if (response.isSuccessful) {
-                val json = JSONObject(if (responseBody.isNotBlank()) responseBody else "{}")
-                val messageId = json.optString("id", "").trim()
-                // Strict check: If Gmail response does not contain a real message ID, treat as failure
-                if (messageId.isBlank()) {
-                    return GmailSendResult(
-                        success = false,
-                        error = "Gmail API response succeeded but did not return a valid message id."
-                    )
-                }
-                return GmailSendResult(success = true, messageId = messageId)
-            } else {
-                val sanitized = sanitizeSensitiveData(
-                    "Gmail API HTTP ${response.code}: ${response.message}. $responseBody",
-                    config
-                )
-                return GmailSendResult(
-                    success = false,
-                    error = sanitized
-                )
-            }
-        } catch (e: Exception) {
-            val sanitized = sanitizeSensitiveData(
-                e.message ?: "Failed to transmit email via Gmail API",
-                config
-            )
-            return GmailSendResult(
-                success = false,
-                error = sanitized
-            )
         }
+
+    private suspend fun getUsableConfiguration(initial: GmailConfigurationEntity): GmailConfigurationEntity? {
+        if (!isExpiringSoon(initial)) return initial
+        val refreshed = refreshAccessToken(initial)
+        if (refreshed == null || refreshed.accessToken.isNullOrBlank()) return null
+        return refreshed
     }
 
-    suspend fun refreshAccessToken(config: GmailConfigurationEntity): GmailConfigurationEntity? {
+    private fun isExpiringSoon(config: GmailConfigurationEntity): Boolean =
+        config.expiresAt > 0L && config.expiresAt <= clock() + TOKEN_REFRESH_SKEW_MILLIS
+
+    private suspend fun refreshAccessTokenLocked(config: GmailConfigurationEntity): GmailConfigurationEntity? {
         val refreshToken = config.refreshToken
         if (refreshToken.isNullOrBlank()) {
             configRepository.updateGmailAuthStatus(
@@ -254,7 +248,7 @@ class GmailService(
             return null
         }
 
-        val clientId = configRepository.getOAuthClientId()
+        val clientId = oauthClientIdProvider()
         if (clientId.isNullOrBlank()) {
             configRepository.updateGmailAuthStatus(
                 GmailAuthStatus.FAILED,
@@ -269,59 +263,188 @@ class GmailService(
                 .add("refresh_token", refreshToken)
                 .add("client_id", clientId)
                 .build()
-
             val request = Request.Builder()
-                .url("https://oauth2.googleapis.com/token")
+                .url(oauthTokenUrl)
                 .post(body)
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            if (response.isSuccessful) {
-                val json = JSONObject(response.body?.string() ?: "{}")
-                val newAccessToken = json.optString("access_token", "").trim()
-                if (newAccessToken.isNotBlank()) {
-                    val expiresInSec = json.optLong("expires_in", 3600L)
-                    val newExpiresAt = System.currentTimeMillis() + (expiresInSec * 1000L)
-                    val newRefreshToken = json.optString("refresh_token", "").takeIf { it.isNotBlank() } ?: refreshToken
-
-                    // Save encrypted through ConfigRepository
-                    configRepository.updateGmailTokens(
-                        newAccessToken = newAccessToken,
-                        newRefreshToken = newRefreshToken,
-                        expiresAt = newExpiresAt,
-                        authStatus = GmailAuthStatus.AUTH_REQUIRED,
-                        lastError = null
+            httpClient.newCall(request).execute().use { response ->
+                val responseText = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    // Do not persist Google's raw response body: OAuth responses can echo credentials.
+                    configRepository.updateGmailAuthStatus(
+                        GmailAuthStatus.FAILED,
+                        "Google OAuth token refresh failed (HTTP ${response.code})."
                     )
-                    return configRepository.getGmailConfig()
+                    null
+                } else {
+                    val json = try {
+                        JSONObject(responseText)
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+                    val newAccessToken = json.optString("access_token", "").trim()
+                    if (newAccessToken.isBlank()) {
+                        configRepository.updateGmailAuthStatus(
+                            GmailAuthStatus.FAILED,
+                            "Google OAuth token refresh response did not contain an access token."
+                        )
+                        null
+                    } else {
+                        val expiresInSeconds = json.optLong("expires_in", 3600L).coerceAtLeast(1L)
+                        val newExpiresAt = clock() + expiresInSeconds.coerceAtMost(MAX_TOKEN_LIFETIME_SECONDS) * 1000L
+                        val rotatedRefreshToken = json.optString("refresh_token", "")
+                            .takeIf { it.isNotBlank() }
+                        val persisted = configRepository.updateGmailTokensIfUnchanged(
+                            expectedAccessToken = config.accessToken,
+                            expectedRefreshToken = refreshToken,
+                            newAccessToken = newAccessToken,
+                            newRefreshToken = rotatedRefreshToken,
+                            expiresAt = newExpiresAt,
+                            authStatus = GmailAuthStatus.AUTH_REQUIRED,
+                            lastError = null
+                        )
+                        val latest = getConfiguration()
+                        if (persisted) {
+                            latest
+                        } else if (
+                            latest.isConnected &&
+                            !latest.accessToken.isNullOrBlank() &&
+                            latest.accessToken != config.accessToken &&
+                            latest.expiresAt > clock()
+                        ) {
+                            // Another repository/service won the compare-and-set refresh race.
+                            latest
+                        } else {
+                            null
+                        }
+                    }
                 }
-            } else {
-                val errorBody = sanitizeSensitiveData(response.body?.string() ?: "", config)
-                configRepository.updateGmailAuthStatus(
-                    GmailAuthStatus.FAILED,
-                    "Google OAuth refresh failed: HTTP ${response.code}. $errorBody"
-                )
             }
-            null
-        } catch (e: Exception) {
-            val errorMsg = sanitizeSensitiveData(e.message ?: "OAuth refresh failed", config)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
             configRepository.updateGmailAuthStatus(
                 GmailAuthStatus.FAILED,
-                errorMsg
+                "Google OAuth token refresh could not reach the token service."
             )
             null
         }
     }
 
-    private fun sanitizeSensitiveData(message: String, config: GmailConfigurationEntity?): String {
-        var sanitized = message
-        config?.accessToken?.let { token ->
-            if (token.isNotBlank()) sanitized = sanitized.replace(token, "[REDACTED_ACCESS_TOKEN]")
+    private fun transmitViaGmailApi(
+        config: GmailConfigurationEntity,
+        mimeMessage: ByteArray,
+        idempotencyKey: String
+    ): GmailSendResult {
+        val jsonPayload = JSONObject().put(
+            "raw",
+            Base64.encodeToString(
+                mimeMessage,
+                Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+            )
+        )
+        val requestBody = jsonPayload.toString()
+            .toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = Request.Builder()
+            .url(gmailSendUrl)
+            .header("Authorization", "Bearer ${config.accessToken}")
+            .header("Accept", "application/json")
+            // Gmail currently ignores this as an idempotency contract. It is a stable correlation
+            // key only; the persisted local ledger is what prevents automatic duplicate sends.
+            .header("Idempotency-Key", sha256Hex(idempotencyKey))
+            .post(requestBody)
+            .build()
+
+        return try {
+            httpClient.newCall(request).execute().use { response ->
+                val responseText = response.body?.string().orEmpty()
+                if (response.isSuccessful) {
+                    val messageId = try {
+                        JSONObject(responseText).optString("id", "").trim()
+                    } catch (_: Exception) {
+                        ""
+                    }
+                    if (!isValidMessageId(messageId)) {
+                        GmailSendResult(
+                            success = false,
+                            error = "Gmail accepted the request but did not confirm a message id; delivery outcome is unknown.",
+                            failureKind = GmailFailureKind.DELIVERY_UNKNOWN,
+                            httpStatusCode = response.code
+                        )
+                    } else {
+                        GmailSendResult(success = true, messageId = messageId, httpStatusCode = response.code)
+                    }
+                } else {
+                    val failureKind = when {
+                        response.code == 401 -> GmailFailureKind.AUTHENTICATION
+                        response.code == 429 -> GmailFailureKind.RETRYABLE_REJECTED
+                        response.code in 400..499 && response.code != 408 -> GmailFailureKind.PERMANENT_REJECTED
+                        else -> GmailFailureKind.DELIVERY_UNKNOWN
+                    }
+                    GmailSendResult(
+                        success = false,
+                        error = when (failureKind) {
+                            GmailFailureKind.AUTHENTICATION -> "Gmail rejected the access token (HTTP 401)."
+                            GmailFailureKind.RETRYABLE_REJECTED -> "Gmail rate-limited the send (HTTP 429)."
+                            GmailFailureKind.PERMANENT_REJECTED -> "Gmail rejected the message (HTTP ${response.code})."
+                            else -> "Gmail send outcome is unknown (HTTP ${response.code}); automatic retry is disabled to prevent duplicates."
+                        },
+                        failureKind = failureKind,
+                        httpStatusCode = response.code,
+                        retryAfterMillis = parseRetryAfter(response.header("Retry-After"), clock())
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // A timeout/I/O failure can happen after Gmail accepted the message. Never blindly retry.
+            GmailSendResult(
+                success = false,
+                error = "Network failure while sending; delivery outcome is unknown and automatic retry is disabled to prevent duplicates.",
+                failureKind = GmailFailureKind.DELIVERY_UNKNOWN
+            )
         }
-        config?.refreshToken?.let { token ->
-            if (token.isNotBlank()) sanitized = sanitized.replace(token, "[REDACTED_REFRESH_TOKEN]")
-        }
-        return sanitized
     }
+
+    private fun validationFailure(message: String) = GmailSendResult(
+        success = false,
+        error = message,
+        failureKind = GmailFailureKind.VALIDATION
+    )
+
+    private fun fallbackIdempotencyKey(recipient: String, subject: String, pdfFile: File): String =
+        "gmail-direct-${sha256Hex("${pdfFile.absolutePath}|$recipient|$subject")}"
+    private fun refreshFingerprint(config: GmailConfigurationEntity): String =
+        sha256Hex("${config.accessToken.orEmpty()}|${config.refreshToken.orEmpty()}|${config.expiresAt}")
+
+    private fun isValidMessageId(value: String): Boolean =
+        value.isNotBlank() &&
+            !value.equals("null", ignoreCase = true) &&
+            value.length <= 512 &&
+            value.matches(Regex("[A-Za-z0-9._@+-]+"))
+
+    private fun parseRetryAfter(value: String?, now: Long): Long? {
+        if (value.isNullOrBlank()) return null
+        value.trim().toLongOrNull()?.let { seconds ->
+            return seconds.coerceAtLeast(0L).coerceAtMost(MAX_RETRY_AFTER_MILLIS / 1000L) * 1000L
+        }
+        return try {
+            val format = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("GMT")
+            }
+            (format.parse(value)?.time?.minus(now))
+                ?.coerceAtLeast(0L)
+                ?.coerceAtMost(MAX_RETRY_AFTER_MILLIS)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(StandardCharsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }
 
     fun createGmailIntent(
         context: Context,
@@ -330,14 +453,14 @@ class GmailService(
         bodyText: String,
         pdfFile: File?
     ): Intent {
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = if (pdfFile != null && pdfFile.exists()) "application/pdf" else "message/rfc822"
+        return Intent(Intent.ACTION_SEND).apply {
+            type = if (pdfFile != null && pdfFile.isFile) "application/pdf" else "message/rfc822"
             putExtra(Intent.EXTRA_EMAIL, arrayOf(recipientEmail))
             putExtra(Intent.EXTRA_SUBJECT, subject)
             putExtra(Intent.EXTRA_TEXT, bodyText)
             setPackage("com.google.android.gm")
 
-            if (pdfFile != null && pdfFile.exists()) {
+            if (pdfFile != null && pdfFile.isFile) {
                 val uri: Uri = FileProvider.getUriForFile(
                     context,
                     "${context.packageName}.fileprovider",
@@ -347,6 +470,20 @@ class GmailService(
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         }
-        return intent
+    }
+
+    companion object {
+        private const val GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+        private const val OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+        private const val TOKEN_REFRESH_SKEW_MILLIS = 60_000L
+        private const val FAILED_REFRESH_SINGLE_FLIGHT_WINDOW_MILLIS = 5_000L
+        private const val MAX_TOKEN_LIFETIME_SECONDS = 86_400L
+        private const val MAX_RETRY_AFTER_MILLIS = 6 * 60 * 60 * 1000L
+
+        private fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(25, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build()
     }
 }

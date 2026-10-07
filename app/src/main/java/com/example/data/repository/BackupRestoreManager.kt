@@ -23,7 +23,7 @@ class BackupRestoreManager(
 
             val root = JSONObject().apply {
                 put("app", "Real Estate AI APK")
-                put("version", 1)
+                put("version", 2)
                 put("exportedAt", System.currentTimeMillis())
 
                 // 1. Properties
@@ -125,6 +125,39 @@ class BackupRestoreManager(
                 }
                 put("offers", offerArray)
 
+                // 3a. Durable email send state and append-only delivery audit trail.
+                val emailSends = JSONArray()
+                for (send in offerDao.getAllEmailSendsList()) {
+                    emailSends.put(JSONObject().apply {
+                        put("idempotencyKey", send.idempotencyKey)
+                        put("offerId", send.offerId)
+                        put("status", send.status)
+                        put("attemptCount", send.attemptCount)
+                        put("createdAt", send.createdAt)
+                        put("updatedAt", send.updatedAt)
+                        put("startedAt", send.startedAt ?: 0L)
+                        put("sentAt", send.sentAt ?: 0L)
+                        put("messageId", send.messageId ?: "")
+                        put("nextAttemptAt", send.nextAttemptAt ?: 0L)
+                        put("lastError", send.lastError ?: "")
+                        put("lastFailureKind", send.lastFailureKind ?: "")
+                    })
+                }
+                put("offer_email_sends", emailSends)
+
+                val auditEvents = JSONArray()
+                for (event in offerDao.getAllAuditEventsList()) {
+                    auditEvents.put(JSONObject().apply {
+                        put("offerId", event.offerId)
+                        put("idempotencyKey", event.idempotencyKey ?: "")
+                        put("eventType", event.eventType)
+                        put("timestamp", event.timestamp)
+                        put("status", event.status ?: "")
+                        put("details", event.details ?: "")
+                    })
+                }
+                put("offer_audit_trail", auditEvents)
+
                 // 4. Offer Templates
                 val template = configDao.getOfferTemplate()
                 if (template != null) {
@@ -177,8 +210,8 @@ class BackupRestoreManager(
                 return@withContext Pair(false, "Invalid backup file: Missing app identity header")
             }
             val version = root.optInt("version", 1)
-            if (version > 1) {
-                return@withContext Pair(false, "Unsupported backup version: v$version. App supports up to v1.")
+            if (version > 2) {
+                return@withContext Pair(false, "Unsupported backup version: v$version. App supports up to v2.")
             }
 
             database.withTransaction {
@@ -189,6 +222,7 @@ class BackupRestoreManager(
                 val configDao = database.configDao()
 
                 val validPropertyIds = mutableSetOf<String>()
+                val validOfferIds = mutableSetOf<String>()
 
                 // Restore Properties
                 if (root.has("properties")) {
@@ -296,6 +330,7 @@ class BackupRestoreManager(
                         val price = obj.optDouble("offerPrice", 0.0)
                         if (oId.isBlank() || pId.isBlank() || price <= 0.0 || !validPropertyIds.contains(pId)) continue
 
+                        validOfferIds.add(oId)
                         offersList.add(
                             OfferEntity(
                                 id = oId,
@@ -322,6 +357,63 @@ class BackupRestoreManager(
                     if (offersList.isNotEmpty()) {
                         offerDao.insertOffers(offersList)
                     }
+                }
+
+                // Restore send state only for offers that passed referential-integrity checks.
+                if (root.has("offer_email_sends")) {
+                    val sendArray = root.getJSONArray("offer_email_sends")
+                    val sends = mutableListOf<OfferEmailSendEntity>()
+                    for (i in 0 until sendArray.length()) {
+                        val obj = sendArray.getJSONObject(i)
+                        val offerId = obj.optString("offerId")
+                        if (offerId !in validOfferIds) continue
+                        val rawStatus = obj.optString("status", OfferEmailSendStatus.UNKNOWN)
+                        val status = rawStatus.takeIf {
+                            it in setOf(
+                                OfferEmailSendStatus.PENDING,
+                                OfferEmailSendStatus.IN_FLIGHT,
+                                OfferEmailSendStatus.RETRYABLE,
+                                OfferEmailSendStatus.SENT,
+                                OfferEmailSendStatus.BLOCKED,
+                                OfferEmailSendStatus.FAILED,
+                                OfferEmailSendStatus.UNKNOWN
+                            )
+                        } ?: OfferEmailSendStatus.UNKNOWN
+                        sends += OfferEmailSendEntity(
+                            idempotencyKey = "offer-send-v1:$offerId",
+                            offerId = offerId,
+                            status = status,
+                            attemptCount = obj.optInt("attemptCount", 0).coerceAtLeast(0),
+                            createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
+                            updatedAt = obj.optLong("updatedAt", System.currentTimeMillis()),
+                            startedAt = obj.optLong("startedAt").takeIf { it > 0L },
+                            sentAt = obj.optLong("sentAt").takeIf { it > 0L },
+                            messageId = obj.optString("messageId").takeIf { it.isNotBlank() },
+                            nextAttemptAt = obj.optLong("nextAttemptAt").takeIf { it > 0L },
+                            lastError = obj.optString("lastError").takeIf { it.isNotBlank() },
+                            lastFailureKind = obj.optString("lastFailureKind").takeIf { it.isNotBlank() }
+                        )
+                    }
+                    if (sends.isNotEmpty()) offerDao.insertEmailSends(sends)
+                }
+
+                if (root.has("offer_audit_trail")) {
+                    val eventArray = root.getJSONArray("offer_audit_trail")
+                    val events = mutableListOf<OfferAuditEventEntity>()
+                    for (i in 0 until eventArray.length()) {
+                        val obj = eventArray.getJSONObject(i)
+                        val offerId = obj.optString("offerId")
+                        if (offerId.isBlank()) continue
+                        events += OfferAuditEventEntity(
+                            offerId = offerId,
+                            idempotencyKey = "offer-send-v1:$offerId",
+                            eventType = obj.optString("eventType", "RESTORED_AUDIT_EVENT").take(80),
+                            timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
+                            status = obj.optString("status").takeIf { it.isNotBlank() },
+                            details = obj.optString("details").takeIf { it.isNotBlank() }?.take(500)
+                        )
+                    }
+                    if (events.isNotEmpty()) offerDao.insertAuditEvents(events)
                 }
 
                 // Restore Template

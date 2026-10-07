@@ -54,13 +54,56 @@ class ConfigRepository(
     }
 
     suspend fun updateGmailAuthStatus(status: String, lastError: String? = null) = withContext(Dispatchers.IO) {
-        val current = getGmailConfig()
-        saveGmailConfig(
-            current.copy(
-                authStatus = status,
-                lastError = lastError
+        // Update only status columns so a concurrent token refresh cannot be overwritten by a stale read.
+        if (configDao.updateGmailAuthStatus(status, lastError) == 0) {
+            val current = getGmailConfig()
+            saveGmailConfig(current.copy(authStatus = status, lastError = lastError))
+        }
+    }
+
+    suspend fun updateGmailAccountSettings(
+        accountEmail: String,
+        senderName: String,
+        signature: String,
+        defaultSubjectTemplate: String
+    ) = withContext(Dispatchers.IO) {
+        if (configDao.updateGmailAccountSettings(
+                accountEmail = accountEmail,
+                senderName = senderName,
+                signature = signature,
+                defaultSubjectTemplate = defaultSubjectTemplate
+            ) == 0
+        ) {
+            saveGmailConfig(
+                GmailConfigurationEntity(
+                    accountEmail = accountEmail,
+                    senderName = senderName,
+                    signature = signature,
+                    defaultSubjectTemplate = defaultSubjectTemplate,
+                    authStatus = if (accountEmail.isBlank()) {
+                        com.example.data.local.entity.GmailAuthStatus.NOT_CONFIGURED
+                    } else {
+                        com.example.data.local.entity.GmailAuthStatus.AUTH_REQUIRED
+                    }
+                )
             )
-        )
+        }
+    }
+
+    suspend fun disconnectGmail() = withContext(Dispatchers.IO) {
+        if (configDao.disconnectGmail(com.example.data.local.entity.GmailAuthStatus.NOT_CONFIGURED) == 0) {
+            val current = getGmailConfig()
+            saveGmailConfig(
+                current.copy(
+                    isConnected = false,
+                    authStatus = com.example.data.local.entity.GmailAuthStatus.NOT_CONFIGURED,
+                    accessToken = null,
+                    refreshToken = null,
+                    expiresAt = 0L,
+                    lastError = null
+                )
+            )
+        }
     }
 
     suspend fun updateGmailTokens(
@@ -70,21 +113,67 @@ class ConfigRepository(
         authStatus: String,
         lastError: String? = null
     ) = withContext(Dispatchers.IO) {
-        val current = getGmailConfig()
         val isAuth = !newAccessToken.isNullOrBlank() &&
             authStatus != com.example.data.local.entity.GmailAuthStatus.FAILED &&
             authStatus != com.example.data.local.entity.GmailAuthStatus.AUTH_EXPIRED &&
             authStatus != com.example.data.local.entity.GmailAuthStatus.NOT_CONFIGURED
+        val encryptedAccess = newAccessToken?.let { CryptoManager.encrypt(it) }
+        val encryptedRefresh = newRefreshToken?.let { CryptoManager.encrypt(it) }
 
-        val updated = current.copy(
-            accessToken = newAccessToken,
-            refreshToken = newRefreshToken ?: current.refreshToken,
+        // COALESCE in the DAO preserves the old refresh token when Google omits a rotated token.
+        if (configDao.updateGmailTokens(
+                accessToken = encryptedAccess,
+                refreshToken = encryptedRefresh,
+                expiresAt = expiresAt,
+                authStatus = authStatus,
+                isConnected = isAuth,
+                lastError = lastError
+            ) == 0
+        ) {
+            val current = getGmailConfig()
+            saveGmailConfig(
+                current.copy(
+                    accessToken = newAccessToken,
+                    refreshToken = newRefreshToken ?: current.refreshToken,
+                    expiresAt = expiresAt,
+                    authStatus = authStatus,
+                    isConnected = isAuth,
+                    lastError = lastError
+                )
+            )
+        }
+    }
+
+    /** CAS token persistence prevents a stale refresh from resurrecting a disconnected/re-authorized account. */
+    suspend fun updateGmailTokensIfUnchanged(
+        expectedAccessToken: String?,
+        expectedRefreshToken: String,
+        newAccessToken: String,
+        newRefreshToken: String?,
+        expiresAt: Long,
+        authStatus: String,
+        lastError: String? = null
+    ): Boolean = withContext(Dispatchers.IO) {
+        val stored = configDao.getGmailConfig() ?: return@withContext false
+        val storedAccessToken = stored.accessToken?.let { CryptoManager.decrypt(it) }
+        val storedRefreshToken = stored.refreshToken?.let { CryptoManager.decrypt(it) }
+        if (storedAccessToken != expectedAccessToken || storedRefreshToken != expectedRefreshToken) {
+            return@withContext false
+        }
+        val expectedStoredRefreshToken = stored.refreshToken ?: return@withContext false
+        val isAuth = authStatus != com.example.data.local.entity.GmailAuthStatus.FAILED &&
+            authStatus != com.example.data.local.entity.GmailAuthStatus.AUTH_EXPIRED &&
+            authStatus != com.example.data.local.entity.GmailAuthStatus.NOT_CONFIGURED
+        configDao.updateGmailTokensIfUnchanged(
+            expectedStoredAccessToken = stored.accessToken,
+            expectedStoredRefreshToken = expectedStoredRefreshToken,
+            accessToken = CryptoManager.encrypt(newAccessToken),
+            refreshToken = newRefreshToken?.let { CryptoManager.encrypt(it) },
             expiresAt = expiresAt,
             authStatus = authStatus,
             isConnected = isAuth,
             lastError = lastError
-        )
-        saveGmailConfig(updated)
+        ) > 0
     }
 
     fun getOAuthClientId(): String? {

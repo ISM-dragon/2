@@ -44,6 +44,84 @@ class GmailOAuthSecurityTest {
             storedGmailConfig = config
         }
 
+        override suspend fun updateGmailAuthStatus(status: String, lastError: String?): Int {
+            val current = storedGmailConfig ?: return 0
+            storedGmailConfig = current.copy(authStatus = status, lastError = lastError)
+            return 1
+        }
+
+        override suspend fun updateGmailAccountSettings(
+            accountEmail: String,
+            senderName: String,
+            signature: String,
+            defaultSubjectTemplate: String
+        ): Int {
+            val current = storedGmailConfig ?: return 0
+            storedGmailConfig = current.copy(
+                accountEmail = accountEmail,
+                senderName = senderName,
+                signature = signature,
+                defaultSubjectTemplate = defaultSubjectTemplate
+            )
+            return 1
+        }
+
+        override suspend fun disconnectGmail(authStatus: String): Int {
+            val current = storedGmailConfig ?: return 0
+            storedGmailConfig = current.copy(
+                isConnected = false,
+                authStatus = authStatus,
+                accessToken = null,
+                refreshToken = null,
+                expiresAt = 0L,
+                lastError = null
+            )
+            return 1
+        }
+
+        override suspend fun updateGmailTokens(
+            accessToken: String?,
+            refreshToken: String?,
+            expiresAt: Long,
+            authStatus: String,
+            isConnected: Boolean,
+            lastError: String?
+        ): Int {
+            val current = storedGmailConfig ?: return 0
+            storedGmailConfig = current.copy(
+                accessToken = accessToken,
+                refreshToken = refreshToken ?: current.refreshToken,
+                expiresAt = expiresAt,
+                authStatus = authStatus,
+                isConnected = isConnected,
+                lastError = lastError
+            )
+            return 1
+        }
+
+        override suspend fun updateGmailTokensIfUnchanged(
+            expectedStoredAccessToken: String?,
+            expectedStoredRefreshToken: String,
+            accessToken: String,
+            refreshToken: String?,
+            expiresAt: Long,
+            authStatus: String,
+            isConnected: Boolean,
+            lastError: String?
+        ): Int {
+            val current = storedGmailConfig ?: return 0
+            if (current.accessToken != expectedStoredAccessToken || current.refreshToken != expectedStoredRefreshToken) return 0
+            storedGmailConfig = current.copy(
+                accessToken = accessToken,
+                refreshToken = refreshToken ?: current.refreshToken,
+                expiresAt = expiresAt,
+                authStatus = authStatus,
+                isConnected = isConnected,
+                lastError = lastError
+            )
+            return 1
+        }
+
         override fun getOfferTemplateFlow(): Flow<OfferTemplateEntity?> = flowOf(OfferTemplateEntity())
         override suspend fun getOfferTemplate(): OfferTemplateEntity? = OfferTemplateEntity()
         override suspend fun saveOfferTemplate(template: OfferTemplateEntity) {}
@@ -103,6 +181,50 @@ class GmailOAuthSecurityTest {
         assertNotEquals(newRawToken, updatedInDao?.accessToken)
         val readBack = repo.getGmailConfig()
         assertEquals(newRawToken, readBack.accessToken)
+    }
+
+    @Test
+    fun accountSettingsUpdatesAndDisconnectDoNotRaceOrOverwriteFreshTokens() = runBlocking {
+        val fakeDao = InMemoryConfigDao()
+        val repo = ConfigRepository(fakeDao)
+        repo.saveGmailConfig(
+            GmailConfigurationEntity(
+                accountEmail = "old@example.com",
+                isConnected = true,
+                accessToken = "old-access",
+                refreshToken = "old-refresh",
+                expiresAt = System.currentTimeMillis() + 3_600_000L
+            )
+        )
+
+        // Simulate a refresh completing while the Settings screen still has a stale config snapshot.
+        val staleSettings = repo.getGmailConfig()
+        repo.updateGmailTokens(
+            newAccessToken = "fresh-access",
+            newRefreshToken = "fresh-refresh",
+            expiresAt = System.currentTimeMillis() + 7_200_000L,
+            authStatus = GmailAuthStatus.AUTH_REQUIRED
+        )
+        repo.updateGmailAccountSettings(
+            accountEmail = "new@example.com",
+            senderName = "New Sender",
+            signature = "Regards",
+            defaultSubjectTemplate = "Offer: {property_address}"
+        )
+
+        val updated = repo.getGmailConfig()
+        assertEquals("fresh-access", updated.accessToken)
+        assertEquals("fresh-refresh", updated.refreshToken)
+        assertEquals("new@example.com", updated.accountEmail)
+
+        // Disconnect is an atomic token clear, so an in-flight refresh CAS cannot restore credentials.
+        repo.disconnectGmail()
+        val disconnected = repo.getGmailConfig()
+        assertFalse(disconnected.isConnected)
+        assertNull(disconnected.accessToken)
+        assertNull(disconnected.refreshToken)
+        assertEquals(GmailAuthStatus.NOT_CONFIGURED, disconnected.authStatus)
+        assertNotNull(staleSettings.accessToken)
     }
 
     @Test

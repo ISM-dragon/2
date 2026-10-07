@@ -22,6 +22,9 @@ interface AutomationDao {
     @Query("SELECT * FROM automation_runs ORDER BY startTime DESC LIMIT 1")
     suspend fun getLatestRun(): AutomationRunEntity?
 
+    @Query("SELECT * FROM automation_runs WHERE status = 'RUNNING'")
+    suspend fun getIncompleteRuns(): List<AutomationRunEntity>
+
     @Insert
     suspend fun insertRun(run: AutomationRunEntity): Long
 

@@ -41,6 +41,7 @@ class AutomationEngine(
 ) {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var automationJob: Job? = null
+    private var recoveryJob: Job? = null
     private val isRunningFlag = AtomicBoolean(false)
 
     private val _status = MutableStateFlow(AutomationStatus.IDLE)
@@ -52,8 +53,8 @@ class AutomationEngine(
     private var consecutiveFailures = 0
 
     init {
-        // Automatically check and recover any interrupted jobs from previous process death
-        scope.launch {
+        // Recovery must finish before a new automation cycle is allowed to dispatch email.
+        recoveryJob = scope.launch {
             recoverInterruptedJobs()
         }
     }
@@ -64,6 +65,7 @@ class AutomationEngine(
         if (isRunningFlag.compareAndSet(false, true)) {
             automationJob?.cancel()
             automationJob = scope.launch {
+                recoveryJob?.join()
                 updatePersistentState(
                     isEnabled = true,
                     op = "Starting Automation Engine",
@@ -134,55 +136,99 @@ class AutomationEngine(
 
     private suspend fun recoverInterruptedJobs() {
         try {
+            offerRepository.recoverInterruptedSends()
+            val recoveredAt = System.currentTimeMillis()
+            automationDao.getIncompleteRuns().forEach { interruptedRun ->
+                automationDao.updateRun(
+                    interruptedRun.copy(
+                        endTime = recoveredAt,
+                        status = "STOPPED",
+                        summary = "Run was interrupted by process termination and recovered safely."
+                    )
+                )
+            }
             val activeJobs = automationDao.getActiveJobs()
-            if (activeJobs.isNotEmpty()) {
-                log("WARN", "WORKER_RECOVERY", "Found ${activeJobs.size} active jobs interrupted by prior process termination. Reconciling states.")
-                for (job in activeJobs) {
-                    when (job.currentState) {
-                        JobState.SENDING.name -> {
-                            val offer = job.offerId?.let { offerRepository.getOfferById(it) }
-                            if (offer?.status == "SENT") {
-                                automationDao.insertOrUpdateJob(
-                                    job.copy(
-                                        currentState = JobState.SENT.name,
-                                        lastSuccessfulState = "SENT",
-                                        updatedAt = System.currentTimeMillis()
-                                    )
-                                )
-                            } else {
-                                automationDao.insertOrUpdateJob(
-                                    job.copy(
-                                        currentState = JobState.OFFER_READY.name,
-                                        lastSuccessfulState = "OFFER_READY",
-                                        updatedAt = System.currentTimeMillis()
-                                    )
-                                )
-                            }
-                        }
-                        JobState.OFFER_GENERATION.name -> {
-                            val existingOffer = offerRepository.getOffersByStatus("READY")
-                            automationDao.insertOrUpdateJob(
+            if (activeJobs.isEmpty()) return
+
+            log(
+                "WARN",
+                "WORKER_RECOVERY",
+                "Found ${activeJobs.size} active jobs interrupted by prior process termination. Reconciling states."
+            )
+            for (job in activeJobs) {
+                val now = System.currentTimeMillis()
+                val reconciled = when (job.currentState) {
+                    JobState.SENDING.name -> {
+                        val offer = job.offerId?.let { offerRepository.getOfferById(it) }
+                        val send = job.offerId?.let { offerRepository.getEmailSendForOffer(it) }
+                        when {
+                            offer?.status == "SENT" || offer?.status == "OPENED" || offer?.status == "SIGNED" || send?.status == "SENT" ->
                                 job.copy(
-                                    currentState = JobState.QUALIFIED.name,
-                                    lastSuccessfulState = "QUALIFIED",
-                                    updatedAt = System.currentTimeMillis()
+                                    currentState = JobState.SENT.name,
+                                    lastSuccessfulState = JobState.SENT.name,
+                                    emailMessageId = send?.messageId ?: job.emailMessageId,
+                                    lastError = null,
+                                    updatedAt = now
                                 )
+                            send != null && send.status in listOf("UNKNOWN", "IN_FLIGHT", "FAILED") ->
+                                job.copy(
+                                    currentState = JobState.FAILED_TERMINAL.name,
+                                    failedStep = "SEND_OFFER",
+                                    lastError = send.lastError
+                                        ?: "Send outcome cannot be proven; automatic retry is disabled to prevent duplicates.",
+                                    updatedAt = now
+                                )
+                            else ->
+                                job.copy(
+                                    currentState = JobState.OFFER_READY.name,
+                                    lastSuccessfulState = JobState.OFFER_READY.name,
+                                    offerId = offer?.id ?: job.offerId,
+                                    recipientEmail = offer?.recipientEmail ?: job.recipientEmail,
+                                    updatedAt = now
+                                )
+                        }
+                    }
+                    JobState.VALIDATING_SEND.name -> job.copy(
+                        currentState = JobState.OFFER_READY.name,
+                        lastSuccessfulState = JobState.OFFER_READY.name,
+                        updatedAt = now
+                    )
+                    JobState.OFFER_GENERATION.name -> {
+                        val existingOffer = offerRepository.getOfferForProperty(job.propertyId)
+                        if (existingOffer != null) {
+                            job.copy(
+                                currentState = JobState.OFFER_READY.name,
+                                lastSuccessfulState = JobState.OFFER_READY.name,
+                                offerId = existingOffer.id,
+                                recipientEmail = existingOffer.recipientEmail,
+                                updatedAt = now
                             )
-                        }
-                        JobState.ANALYZING.name -> {
-                            automationDao.insertOrUpdateJob(
-                                job.copy(
-                                    currentState = JobState.DISCOVERED.name,
-                                    lastSuccessfulState = "DISCOVERED",
-                                    updatedAt = System.currentTimeMillis()
-                                )
+                        } else {
+                            job.copy(
+                                currentState = JobState.QUALIFIED.name,
+                                lastSuccessfulState = JobState.QUALIFIED.name,
+                                updatedAt = now
                             )
                         }
                     }
+                    JobState.ANALYZING.name -> job.copy(
+                        currentState = JobState.DISCOVERED.name,
+                        lastSuccessfulState = JobState.DISCOVERED.name,
+                        updatedAt = now
+                    )
+                    JobState.QUALIFYING.name -> job.copy(
+                        currentState = JobState.ANALYZED.name,
+                        lastSuccessfulState = JobState.ANALYZED.name,
+                        updatedAt = now
+                    )
+                    else -> null
                 }
+                if (reconciled != null) automationDao.insertOrUpdateJob(reconciled)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            log("ERROR", "WORKER_RECOVERY", "Failed to reconcile interrupted jobs: ${e.message}")
+            log("ERROR", "WORKER_RECOVERY", "Failed to reconcile interrupted jobs (${e.javaClass.simpleName}).")
         }
     }
 
@@ -191,9 +237,26 @@ class AutomationEngine(
         val rules = automationDao.getRules() ?: AutomationRuleEntity()
 
         while (isRunningFlag.get()) {
+            if (!networkMonitor.checkIsOnline()) {
+                _status.value = AutomationStatus.IDLE
+                _currentTaskDescription.value = "Paused (Offline - Waiting for connectivity)"
+                try {
+                    updatePersistentState(
+                        isEnabled = true,
+                        op = "Paused: Waiting for network",
+                        stage = "OFFLINE_PAUSED"
+                    )
+                } catch (_: Exception) {
+                    // Keep waiting for connectivity; the state flow still reports the paused state.
+                }
+                delay(5000)
+                continue
+            }
+
+            val runStartedAt = System.currentTimeMillis()
             val runId = automationDao.insertRun(
                 AutomationRunEntity(
-                    startTime = System.currentTimeMillis(),
+                    startTime = runStartedAt,
                     status = "RUNNING",
                     summary = "Cycle in progress..."
                 )
@@ -206,19 +269,6 @@ class AutomationEngine(
             var offersSent = 0
 
             try {
-                // Check offline state
-                if (!networkMonitor.checkIsOnline()) {
-                    _status.value = AutomationStatus.IDLE
-                    _currentTaskDescription.value = "Paused (Offline - Waiting for connectivity)"
-                    updatePersistentState(
-                        isEnabled = true,
-                        op = "Paused: Waiting for network",
-                        stage = "OFFLINE_PAUSED"
-                    )
-                    delay(5000)
-                    continue
-                }
-
                 // 1. DISCOVERY
                 _status.value = AutomationStatus.SCANNING
                 _currentTaskDescription.value = "Scanning property feeds (MLS & Distressed)..."
@@ -255,6 +305,18 @@ class AutomationEngine(
                     propertyDao.insertMarketData(bundle.marketData)
                     propertyDao.insertRentEstimate(bundle.rentEstimate)
                     propertyDao.insertTaxRecord(bundle.taxRecord)
+
+                    if (existingJob?.currentState?.let {
+                            it in setOf(
+                                JobState.SENT.name,
+                                JobState.DISQUALIFIED.name,
+                                JobState.FAILED_TERMINAL.name,
+                                JobState.CANCELLED.name
+                            )
+                        } == true
+                    ) {
+                        continue
+                    }
 
                     // Check run analysis limit
                     if (propAnalyzed >= rules.maxAnalysesPerRun) {
@@ -365,71 +427,77 @@ class AutomationEngine(
                                 successAction = "Generated Offer ${offer.id}"
                             )
 
-                            // 5. AUTO SEND WITH FINAL PRE-SEND VALIDATION
+                            // 5. AUTO SEND. OfferRepository owns the final validation, durable claim,
+                            // send status and audit event so blocked attempts are tracked as well.
                             if (rules.autoSendOffers && offersSent < rules.maxEmailsPerRun && networkMonitor.checkIsOnline()) {
                                 _status.value = AutomationStatus.SENDING_OFFERS
                                 _currentTaskDescription.value = "Validating & transmitting offer ${offer.id} via Gmail..."
-                                
                                 currentJob = currentJob.copy(
                                     currentState = JobState.VALIDATING_SEND.name,
                                     updatedAt = System.currentTimeMillis()
                                 )
                                 automationDao.insertOrUpdateJob(currentJob)
 
-                                val preValidation = offerRepository.validateOfferPreSend(context, offer.id)
-                                if (!preValidation.isValid) {
-                                    val blockReason = preValidation.blockageReason ?: "Pre-send validation failed."
-                                    log("WARN", "VALIDATION_BLOCKED", "Offer ${offer.id} delivery blocked: $blockReason")
+                                currentJob = currentJob.copy(
+                                    currentState = JobState.SENDING.name,
+                                    updatedAt = System.currentTimeMillis()
+                                )
+                                automationDao.insertOrUpdateJob(currentJob)
+
+                                val sendOutcome = offerRepository.sendOfferDetailed(
+                                    context = context,
+                                    offerId = offer.id,
+                                    maxAttempts = rules.maxRetries.coerceAtLeast(1)
+                                )
+                                if (sendOutcome.success) {
+                                    offersSent++
+                                    log(
+                                        "SUCCESS",
+                                        "GMAIL_SENT",
+                                        "Sent offer ${offer.id}; Gmail message ID ${sendOutcome.messageId ?: "unavailable"}."
+                                    )
                                     currentJob = currentJob.copy(
-                                        currentState = JobState.BLOCKED.name,
-                                        blockageReason = blockReason,
-                                        lastError = blockReason,
+                                        currentState = JobState.SENT.name,
+                                        lastSuccessfulState = JobState.SENT.name,
+                                        emailMessageId = sendOutcome.messageId,
+                                        lastError = null,
                                         updatedAt = System.currentTimeMillis()
                                     )
                                     automationDao.insertOrUpdateJob(currentJob)
+
+                                    updatePersistentState(
+                                        isEnabled = true,
+                                        op = "Offer Sent via Gmail",
+                                        stage = "OFFER_SENT",
+                                        addr = bundle.property.address,
+                                        successAction = "Sent offer ${offer.id}"
+                                    )
                                 } else {
+                                    val errorMsg = sendOutcome.error ?: "Offer email was not sent."
+                                    val attempts = currentJob.attempts + if (sendOutcome.attempted) 1 else 0
+                                    val nextState = when {
+                                        sendOutcome.status == com.example.data.local.entity.OfferEmailSendStatus.RETRYABLE &&
+                                            attempts < rules.maxRetries.coerceAtLeast(1) -> JobState.FAILED_RETRYABLE
+                                        sendOutcome.status == com.example.data.local.entity.OfferEmailSendStatus.BLOCKED -> JobState.BLOCKED
+                                        sendOutcome.status == com.example.data.local.entity.OfferEmailSendStatus.IN_FLIGHT -> JobState.SENDING
+                                        else -> JobState.FAILED_TERMINAL
+                                    }
+                                    val safeError = when (sendOutcome.status) {
+                                        com.example.data.local.entity.OfferEmailSendStatus.UNKNOWN ->
+                                            "Delivery outcome is unknown; automatic retry is disabled to prevent duplicate email."
+                                        com.example.data.local.entity.OfferEmailSendStatus.IN_FLIGHT ->
+                                            "Another request is already sending this offer; delivery remains under observation."
+                                        else -> errorMsg
+                                    }
+                                    log("WARN", "SEND_${sendOutcome.status}", "Offer ${offer.id}: $safeError")
                                     currentJob = currentJob.copy(
-                                        currentState = JobState.SENDING.name,
+                                        currentState = nextState.name,
+                                        failedStep = "SEND_OFFER",
+                                        attempts = attempts,
+                                        lastError = safeError,
                                         updatedAt = System.currentTimeMillis()
                                     )
                                     automationDao.insertOrUpdateJob(currentJob)
-
-                                    val sent = offerRepository.sendOffer(context, offer.id)
-                                    if (sent) {
-                                        offersSent++
-                                        val updatedOffer = offerRepository.getOfferById(offer.id)
-                                        log("SUCCESS", "GMAIL_SENT", "Sent offer ${offer.id} with PDF to ${offer.recipientEmail}")
-
-                                        currentJob = currentJob.copy(
-                                            currentState = JobState.SENT.name,
-                                            lastSuccessfulState = JobState.SENT.name,
-                                            emailMessageId = "GMAIL-${offer.id}",
-                                            updatedAt = System.currentTimeMillis()
-                                        )
-                                        automationDao.insertOrUpdateJob(currentJob)
-
-                                        updatePersistentState(
-                                            isEnabled = true,
-                                            op = "Offer Sent via Gmail",
-                                            stage = "OFFER_SENT",
-                                            addr = bundle.property.address,
-                                            successAction = "Sent offer ${offer.id} to ${offer.recipientEmail}"
-                                        )
-                                    } else {
-                                        val errorMsg = "Gmail delivery failed or rejected."
-                                        log("WARN", "FAILURE", "Failed to auto-send offer ${offer.id}: $errorMsg")
-                                        val attempts = currentJob.attempts + 1
-                                        val nextState = if (attempts < rules.maxRetries) JobState.FAILED_RETRYABLE else JobState.FAILED_TERMINAL
-
-                                        currentJob = currentJob.copy(
-                                            currentState = nextState.name,
-                                            failedStep = "SEND_OFFER",
-                                            attempts = attempts,
-                                            lastError = errorMsg,
-                                            updatedAt = System.currentTimeMillis()
-                                        )
-                                        automationDao.insertOrUpdateJob(currentJob)
-                                    }
                                 }
                             }
                         }
@@ -449,11 +517,12 @@ class AutomationEngine(
                 }
 
                 // Cycle Complete
+                val runEndedAt = System.currentTimeMillis()
                 automationDao.updateRun(
                     AutomationRunEntity(
                         id = runId,
-                        startTime = System.currentTimeMillis(),
-                        endTime = System.currentTimeMillis(),
+                        startTime = runStartedAt,
+                        endTime = runEndedAt,
                         propertiesFound = propFound,
                         propertiesAnalyzed = propAnalyzed,
                         dealsQualified = dealsQualified,
@@ -483,15 +552,56 @@ class AutomationEngine(
                 }
 
             } catch (e: CancellationException) {
+                val stoppedAt = System.currentTimeMillis()
+                withContext(NonCancellable) {
+                    try {
+                        automationDao.updateRun(
+                            AutomationRunEntity(
+                                id = runId,
+                                startTime = runStartedAt,
+                                endTime = stoppedAt,
+                                propertiesFound = propFound,
+                                propertiesAnalyzed = propAnalyzed,
+                                dealsQualified = dealsQualified,
+                                offersCreated = offersCreated,
+                                offersSent = offersSent,
+                                status = "STOPPED",
+                                summary = "Cycle stopped or cancelled before completion."
+                            )
+                        )
+                    } catch (_: Exception) {
+                        // The durable job/send ledger remains the source of truth during recovery.
+                    }
+                }
                 log("INFO", "STOP", "Automation cycle cancelled.")
                 break
             } catch (e: Exception) {
                 consecutiveFailures++
-                val err = e.message ?: "Cycle error"
-                log("ERROR", "FAILURE", "Cycle error: $err")
+                // Avoid persisting exception messages that may contain request details or credentials.
+                val err = "Cycle failed (${e.javaClass.simpleName})."
+                val failedAt = System.currentTimeMillis()
+                try {
+                    automationDao.updateRun(
+                        AutomationRunEntity(
+                            id = runId,
+                            startTime = runStartedAt,
+                            endTime = failedAt,
+                            propertiesFound = propFound,
+                            propertiesAnalyzed = propAnalyzed,
+                            dealsQualified = dealsQualified,
+                            offersCreated = offersCreated,
+                            offersSent = offersSent,
+                            status = "ERROR",
+                            summary = err
+                        )
+                    )
+                } catch (_: Exception) {
+                    // Preserve cycle failure handling even if the run summary cannot be persisted.
+                }
+                log("ERROR", "FAILURE", err)
                 updatePersistentState(
                     isEnabled = isRunningFlag.get(),
-                    op = "Error: $err",
+                    op = err,
                     stage = "ERROR",
                     error = err
                 )
