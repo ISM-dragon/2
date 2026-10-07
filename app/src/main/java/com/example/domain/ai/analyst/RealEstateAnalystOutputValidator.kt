@@ -103,11 +103,15 @@ class RealEstateAnalystOutputValidator {
         rawText: String,
         allowedEvidence: Map<String, AnalystEvidence>
     ): AnalystOutputValidation {
-        val parsed = try {
-            parseStrictObject(unwrapOuterCodeFence(rawText))
-        } catch (_: Exception) {
-            return AnalystOutputValidation(errors = listOf("\$ is not a single valid JSON object."))
+        // Bound parsing work before touching hostile or runaway model output.
+        if (rawText.length > MAX_RESPONSE_CHARS) {
+            return AnalystOutputValidation(
+                errors = listOf("\$: response exceeds the maximum allowed length of $MAX_RESPONSE_CHARS characters.")
+            )
         }
+
+        val parsed = parseResponseObject(rawText)
+            ?: return AnalystOutputValidation(errors = listOf("\$ is not a single valid JSON object."))
 
         val schemaErrors = mutableListOf<String>()
         validateAgainstSchema(parsed, schema, "$", schema, schemaErrors)
@@ -127,6 +131,70 @@ class RealEstateAnalystOutputValidator {
         } else {
             AnalystOutputValidation(errors = semanticErrors.take(MAX_ERRORS))
         }
+    }
+
+    /**
+     * Strict parse pipeline. The whole response must parse as a single strict JSON object, possibly
+     * wrapped in one outer code fence. As a controlled malformed-output recovery, a JSON object
+     * embedded in surrounding prose is salvaged, but only when it is the unique balanced object in
+     * the response; extra objects or braces make the model's intent ambiguous and fail closed.
+     * Salvaged candidates pass the identical strict parse, schema, and semantic gates.
+     */
+    private fun parseResponseObject(rawText: String): JSONObject? {
+        val text = unwrapOuterCodeFence(rawText)
+        parseStrictObjectOrNull(text)?.let { return it }
+        // A valid top-level non-object JSON value (especially an array) must not be unwrapped by
+        // the prose-recovery path. Only human-readable surrounding prose may use that recovery.
+        val first = text.trimStart().firstOrNull()
+        if (first == '[' || first == '"' || text.trim() in setOf("true", "false", "null")) return null
+        return salvageEmbeddedObject(text)
+    }
+
+    private fun salvageEmbeddedObject(text: String): JSONObject? {
+        // Only inspect the first brace candidate. If an outer/malformed object fails to parse, do
+        // not continue into it and accidentally accept a nested object with ambiguous provenance.
+        val start = text.indexOf('{')
+        if (start < 0) return null
+        val end = findBalancedObjectEnd(text, start) ?: return null
+        val prefix = text.substring(0, start).trimEnd()
+        val suffix = text.substring(end + 1).trimStart()
+        // Do not unwrap a JSON array containing one object as if it were prose-wrapped JSON.
+        if (prefix.endsWith("[") || suffix.startsWith("]")) return null
+        val candidate = parseStrictObjectOrNull(text.substring(start, end + 1)) ?: return null
+        // Accept only when no further object follows: two candidates mean we would be guessing
+        // which one the model intended, so let the bounded retry loop correct the response.
+        return if (text.indexOf('{', end + 1) < 0) candidate else null
+    }
+
+    /** Returns the index of the '}' closing the object opened at [start], ignoring string contents. */
+    private fun findBalancedObjectEnd(text: String, start: Int): Int? {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index in start until text.length) {
+            val ch = text[index]
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            when {
+                inString && ch == '\\' -> escaped = true
+                inString && ch == '"' -> inString = false
+                !inString && ch == '"' -> inString = true
+                !inString && ch == '{' -> depth += 1
+                !inString && ch == '}' -> {
+                    depth -= 1
+                    if (depth == 0) return index
+                }
+            }
+        }
+        return null
+    }
+
+    private fun parseStrictObjectOrNull(text: String): JSONObject? = try {
+        parseStrictObject(text)
+    } catch (_: Exception) {
+        null
     }
 
     private fun parseStrictObject(text: String): JSONObject {
@@ -291,8 +359,14 @@ class RealEstateAnalystOutputValidator {
 
         fun validateClaim(claim: AnalystClaim, path: String) {
             if (claim.statement.isBlank()) errors += "$path.statement must not be blank."
-            if (claim.statement.any(Char::isDigit)) {
-                errors += "$path.statement must not contain numeric figures; financial figures stay in the deterministic engine."
+            if (claim.statement.containsNumericClaims()) {
+                errors += "$path.statement must not contain numeric figures or number words; financial figures stay in the deterministic engine."
+            }
+            if (claim.statement.containsNarrativeUnsafeCharacter()) {
+                errors += "$path.statement must be plain prose without code fences, control characters, or invisible formatting characters."
+            }
+            if (AnalystTextSanitizer.containsPromptInjectionPattern(claim.statement)) {
+                errors += "$path.statement must not repeat instruction-like or credential-exfiltration text from untrusted input."
             }
 
             val unknownRefs = claim.evidenceRefs.filterNot(allowedEvidence::containsKey)
@@ -314,6 +388,7 @@ class RealEstateAnalystOutputValidator {
                 AnalystClaimType.ESTIMATE -> {
                     if (claim.evidenceRefs.isEmpty()) errors += "$path ESTIMATE claims require source evidence."
                     if (claim.confidence <= 0.0) errors += "$path non-UNKNOWN claims require positive confidence."
+                    if (claim.confidence >= 1.0) errors += "$path ESTIMATE claims must keep confidence below one; only a FACT restatement of a supplied record may reach full confidence."
                     if (citedEvidence.none { it.source in ESTIMATE_SOURCES }) {
                         errors += "$path ESTIMATE claims must cite a supplied market or rent estimate; the AI may not create new estimates."
                     }
@@ -321,6 +396,7 @@ class RealEstateAnalystOutputValidator {
                 AnalystClaimType.INFERENCE -> {
                     if (claim.evidenceRefs.isEmpty()) errors += "$path INFERENCE claims require supporting evidence."
                     if (claim.confidence <= 0.0) errors += "$path non-UNKNOWN claims require positive confidence."
+                    if (claim.confidence >= 1.0) errors += "$path INFERENCE claims must keep confidence below one; unsupported certainty must be reported as UNKNOWN instead."
                 }
             }
         }
@@ -355,13 +431,45 @@ class RealEstateAnalystOutputValidator {
             if (question.question.isBlank()) {
                 errors += "\$.dueDiligenceQuestions[$index].question must not be blank."
             }
-            if (question.question.any(Char::isDigit)) {
-                errors += "\$.dueDiligenceQuestions[$index].question must not contain numeric figures."
+            if (question.question.containsNumericClaims()) {
+                errors += "\$.dueDiligenceQuestions[$index].question must not contain numeric figures or number words."
+            }
+            if (question.question.containsNarrativeUnsafeCharacter()) {
+                errors += "\$.dueDiligenceQuestions[$index].question must be plain prose without code fences, control characters, or invisible formatting characters."
+            }
+            if (AnalystTextSanitizer.containsPromptInjectionPattern(question.question)) {
+                errors += "\$.dueDiligenceQuestions[$index].question must not repeat instruction-like or credential-exfiltration text from untrusted input."
             }
             validateClaim(question.basis, "\$.dueDiligenceQuestions[$index].basis")
         }
 
         return errors
+    }
+
+    /**
+     * Detects numeric glyphs from any script, not just ASCII digits: superscripts and fractions
+     * (OTHER_NUMBER), Roman numerals (LETTER_NUMBER), and fullwidth or Arabic-Indic digits
+     * (DECIMAL_DIGIT_NUMBER). It also rejects spelled-out cardinal and ordinal numbers so an
+     * unsupported figure cannot be rephrased as words.
+     */
+    private fun String.containsNumericClaims(): Boolean {
+        if (any { it.category in NUMERIC_CHAR_CATEGORIES }) return true
+        val tokens = NUMBER_WORD_DELIMITERS.split(lowercase())
+        return tokens.any(NUMBER_WORDS::contains)
+    }
+
+    /**
+     * Narrative text must stay plain prose. Ordinary whitespace (\n, \t, \r) is tolerated, but
+     * control characters, invisible formatting characters (zero-width, bidi overrides), exotic
+     * separators, private-use glyphs, lone surrogates, and code-fence backticks are rejected:
+     * they are the vehicles for echoing injected instructions or hidden structure into the UI.
+     */
+    private fun String.containsNarrativeUnsafeCharacter(): Boolean = any { ch ->
+        when (ch) {
+            '\n', '\t', '\r' -> false
+            '`' -> true
+            else -> ch.category in NARRATIVE_UNSAFE_CHAR_CATEGORIES
+        }
     }
 
     private fun parseOutput(root: JSONObject): RealEstateAnalystOutput {
@@ -443,9 +551,43 @@ class RealEstateAnalystOutputValidator {
 
     private companion object {
         const val MAX_ERRORS = 30
+
+        /** Hard cap on response size accepted for parsing; generous for a legitimate packet. */
+        const val MAX_RESPONSE_CHARS = 100_000
+
         val ESTIMATE_SOURCES = setOf(
             AnalystEvidenceSource.MARKET_ESTIMATE,
             AnalystEvidenceSource.RENT_ESTIMATE
+        )
+
+        /** Every Unicode numeric category, so non-ASCII numerals cannot smuggle figures in. */
+        val NUMERIC_CHAR_CATEGORIES = setOf(
+            CharCategory.DECIMAL_DIGIT_NUMBER,
+            CharCategory.LETTER_NUMBER,
+            CharCategory.OTHER_NUMBER
+        )
+
+        val NUMBER_WORD_DELIMITERS = Regex("[^\\p{L}]+")
+        val NUMBER_WORDS = setOf(
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+            "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+            "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+            "eighty", "ninety", "hundred", "thousand", "million", "billion", "trillion", "first",
+            "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+            "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth",
+            "eighteenth", "nineteenth", "twentieth", "thirtieth", "fortieth", "fiftieth", "sixtieth",
+            "seventieth", "eightieth", "ninetieth", "half", "halves", "quarter", "quarters", "dozen",
+            "couple"
+        )
+
+        /** Character categories banned from narrative output text (whitespace handled separately). */
+        val NARRATIVE_UNSAFE_CHAR_CATEGORIES = setOf(
+            CharCategory.CONTROL,
+            CharCategory.FORMAT,
+            CharCategory.LINE_SEPARATOR,
+            CharCategory.PARAGRAPH_SEPARATOR,
+            CharCategory.SURROGATE,
+            CharCategory.PRIVATE_USE
         )
     }
 }
