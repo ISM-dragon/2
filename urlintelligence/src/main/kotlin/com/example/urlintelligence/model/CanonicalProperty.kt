@@ -49,8 +49,9 @@ data class CanonicalAddress(
             line1?.let { value -> add(value) }
             unit?.let { value -> add("Unit $value") }
             city?.let { value -> add(value) }
-            stateOrProvince?.let { value -> add(value) }
-            postalCode?.let { value -> add(value) }
+            // US convention: the state and ZIP form one token ("Austin, TX 78704"), not two.
+            val region = listOfNotNull(stateOrProvince, postalCode).joinToString(" ")
+            if (region.isNotBlank()) add(region)
         }.joinToString(", ")
 
     /** Stable identity key used to detect the same physical property across sources. */

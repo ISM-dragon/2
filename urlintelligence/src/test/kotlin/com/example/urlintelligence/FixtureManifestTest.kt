@@ -50,7 +50,7 @@ class FixtureManifestTest {
             "https://www.zillow.com/homedetails/512-Oak-Hollow-Ct-Round-Rock-TX-78681/44771122_zpid/",
             Expected.SUCCESS, driftLevel = DriftLevel.NONE, note = "mobile markup variant"),
         Case("zillow_partial.html", Parser.ZILLOW, Fixtures.ZILLOW_URL, Expected.PARTIAL,
-            driftLevel = DriftLevel.NONE, note = "core fields missing"),
+            driftLevel = DriftLevel.MINOR, note = "core fields missing, optional markers thinned"),
         Case("zillow_drifted.html", Parser.ZILLOW, Fixtures.ZILLOW_URL, Expected.PARTIAL,
             driftLevel = DriftLevel.MAJOR, note = "markup rework: JSON-LD and state blob gone"),
         Case("redfin_listing.html", Parser.REDFIN, Fixtures.REDFIN_URL, Expected.SUCCESS,

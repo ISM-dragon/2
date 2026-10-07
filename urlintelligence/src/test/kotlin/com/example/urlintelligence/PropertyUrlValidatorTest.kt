@@ -4,6 +4,7 @@ import com.example.urlintelligence.url.NormalizedUrl
 import com.example.urlintelligence.url.PropertyUrlValidator
 import com.example.urlintelligence.url.UrlValidationError
 import com.example.urlintelligence.url.UrlValidationResult
+import com.example.urlintelligence.idempotency.IdempotencyKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -57,8 +58,27 @@ class PropertyUrlValidatorTest {
         val first = valid("https://www.Zillow.com/homedetails/12345678_zpid/?utm_source=x")
         val second = valid("zillow.com/homedetails/12345678_zpid")
         val third = valid("  https://www.zillow.com/homedetails/12345678_zpid#photos  ")
-        assertEquals(first.canonical, second.canonical)
-        assertEquals(second.canonical, third.canonical)
+
+        // The canonical URL keeps the host spelling the provider serves (that is what we fetch
+        // and what robots.txt governs)...
+        assertEquals("https://www.zillow.com/homedetails/12345678_zpid", first.canonical)
+        assertEquals("https://zillow.com/homedetails/12345678_zpid", second.canonical)
+        assertEquals(first.canonical, third.canonical)
+
+        // ...while the identity keys are deliberately insensitive to it: the same listing shared
+        // with tracking noise, a fragment or a bare host is one import.
+        assertEquals(
+            IdempotencyKey.forUrl(first.canonical),
+            IdempotencyKey.forUrl(second.canonical)
+        )
+        assertEquals(
+            IdempotencyKey.forUrl(second.canonical),
+            IdempotencyKey.forUrl(third.canonical)
+        )
+        assertEquals(
+            IdempotencyKey.canonicalPropertyId("zillow", null, first.canonical),
+            IdempotencyKey.canonicalPropertyId("zillow", null, second.canonical)
+        )
     }
 
     @Test

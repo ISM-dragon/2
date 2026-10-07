@@ -62,10 +62,18 @@ data class SchemaDriftReport(
     val isDrift: Boolean
         get() = level != DriftLevel.NONE
 
-    /** Log-safe one-liner, safe to attach to warnings and telemetry. */
-    fun summary(): String =
-        "schema drift[$level] $parserId@$parserVersion: $detail " +
-            "(matched=${matchedProbes.size} missing=${missingProbes.size} fields=$extractedFields)"
+    /**
+     * Log-safe one-liner, safe to attach to warnings and telemetry.
+     *
+     * It names the parser's own signature markers (which are metadata, not page content) so an
+     * operator can see *what* moved without the document ever reaching a log.
+     */
+    fun summary(): String {
+        val missing = if (missingProbes.isEmpty()) "none" else missingProbes.joinToString(",")
+        return "schema drift[$level] $parserId@$parserVersion: $detail " +
+            "(matched=${matchedProbes.size} missing=${missingProbes.size} " +
+            "missing-probes=$missing fields=$extractedFields)"
+    }
 
     companion object {
         fun none(spec: ParserSpec, extractedFields: Int, matched: List<String>): SchemaDriftReport =

@@ -215,7 +215,7 @@ class ComplianceRobotsTest {
         val transport = FakeTransport(
             bodies = listOf(Fixtures.load("robots_deny_all.txt")),
             bodiesByUrl = mapOf(
-                "https://www.example-portal.test/robots.txt" to Fixtures.load("robots_deny_all.txt")
+                "https://www.zillow.com/robots.txt" to Fixtures.load("robots_deny_all.txt")
             )
         )
         val robots = RobotsPolicy(transport, userAgent, TestClock())

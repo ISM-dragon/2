@@ -86,8 +86,14 @@ with `ResolveOptions(allowPartial = false)`.
 
 It also **canonicalizes**: lowercased scheme/host, default ports removed, duplicate slashes
 collapsed, fragments dropped, tracking parameters (`utm_*`, `fbclid`, `gclid`, …) removed,
-remaining query sorted. The canonical string is the idempotency input, so `?utm_source=x`,
-`#photos` and casing variants of one listing collapse to one import.
+remaining query sorted. Two things follow:
+
+* the canonical URL stays **faithful to the host the provider serves** (`www.zillow.com` is what
+  the pipeline fetches, and what that origin's robots.txt governs — a share link that spells the
+  host differently must not silently redirect our traffic),
+* the **identity keys** (`IdempotencyKey.forUrl` and the `canonicalPropertyId` URL fallback) are
+  deliberately insensitive to a leading `www.`, so `?utm_source=x`, `#photos`, casing variants
+  and `www.`/bare spellings of one listing collapse to one import.
 
 ## 3. Source detection & registry
 
@@ -176,10 +182,11 @@ Every parser declares a versioned contract. Two things follow:
 |-----------|----------------------------------------------------------------|------------------------------------------------------|
 | `NONE`    | all probes matched, enough fields extracted                     | fields are parser-verified                           |
 | `MINOR`   | optional probes missing                                         | warning; data still parser-verified                  |
-| `MAJOR`   | required probe missing, too few probes, or too few fields       | warning, fields downgraded to `UNVERIFIED`; with `DriftPolicy.FAIL` the parse fails with `SourceFailure.SchemaDrift` |
+| `MAJOR`   | required probe missing, too few probes, or too few fields       | warning, fields downgraded to `UNVERIFIED`, and the parse is reported as **partial** (usable, not a clean success); with `DriftPolicy.FAIL` the parse fails with `SourceFailure.SchemaDrift` |
 
-`DriftPolicy` is per adapter (`OFF` / `WARN` / `FAIL`); `SchemaDriftReport.summary()` is
-log-safe (probe names and counts, never page content).
+`DriftPolicy` is per adapter (`OFF` / `WARN` / `FAIL`). `SchemaDriftReport.summary()` is
+log-safe: it names the parser's own signature probes (`missing-probes=zpid,json-ld`) but never
+quotes the document.
 
 ## 6. Verification levels: parser-verified vs live-fetch-verified
 
@@ -288,9 +295,11 @@ served with HTTP 200 onto these types. `toLogString()` is redaction-safe (no bod
   `Clock`, `Sleeper` and the jitter source are injected → tests are instant and deterministic.
 * `RetryExecutor` records an `AttemptRecord` per attempt and exposes `onRetry` so the job
   machine can move to `RETRY_SCHEDULED`.
-* **URL-level idempotency**: `IdempotencyKey.forUrl(canonicalUrl)` (SHA-256) + `IdempotencyStore`.
-  The second request for the same listing returns the cached result (`REPLAYED_URL`); a
-  concurrent import gets `Conflict`; **failures are released** so the same URL can be retried.
+* **URL-level idempotency**: `IdempotencyKey.forUrl(canonicalUrl)` (SHA-256 of the dedup form) +
+  `IdempotencyStore`. The second request for the same listing returns the cached result
+  (`REPLAYED_URL`); a concurrent import gets `Conflict`; **failures are released** so the same URL
+  can be retried. Entries expire on a TTL measured from the moment the store wrote them, so a
+  reservation can never be purged before the request that made it has finished.
 * **Property-level idempotency**: `ImportLedger` keyed by `canonicalPropertyId`
   (`zillow:12345678`). Zillow's `/homedetails/…_zpid/`, a share link with tracking noise, a
   mobile subdomain and a canonicalised variant are the same house, so the second import is

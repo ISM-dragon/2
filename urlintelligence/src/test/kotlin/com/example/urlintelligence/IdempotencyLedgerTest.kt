@@ -35,8 +35,13 @@ import org.junit.Test
 class IdempotencyLedgerTest {
 
     private val zillowListing = Fixtures.ZILLOW_URL
+    /**
+     * The same listing reached through a different path (a "photos" deep link): the canonical
+     * URL differs, the zpid does not — which is exactly the case property-level idempotency
+     * exists for. Using only a trailing-slash variant would be answered by the URL cache.
+     */
     private val zillowVariant =
-        "https://www.zillow.com/homedetails/2418-S-Congress-Ave-Austin-TX-78704/12345678_zpid"
+        "https://www.zillow.com/homedetails/2418-S-Congress-Ave-Austin-TX-78704/12345678_zpid/photos"
 
     private class Harness(
         val transport: FakeTransport,

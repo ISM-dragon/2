@@ -172,7 +172,15 @@ open class RobotsPolicy(
             return RobotsLoad.Unavailable(t.javaClass.simpleName)
         }
         return when (response) {
-            is SourceFetchResponse.Failure -> RobotsLoad.Unavailable(response.failure.code)
+            // A transport reports non-2xx as a typed failure, so "no robots.txt published"
+            // (404/410, per RFC 9309 an allow) has to be recognised from the failure itself.
+            is SourceFetchResponse.Failure -> when (val failure = response.failure) {
+                is com.example.urlintelligence.failure.SourceFailure.NotFound -> RobotsLoad.Missing
+                is com.example.urlintelligence.failure.SourceFailure.HttpStatus ->
+                    if (failure.statusCode == 404 || failure.statusCode == 410) RobotsLoad.Missing
+                    else RobotsLoad.Unavailable(failure.code)
+                else -> RobotsLoad.Unavailable(failure.code)
+            }
             is SourceFetchResponse.Success -> when (response.statusCode) {
                 200 -> RobotsLoad.Ok(RobotsRules.parse(response.body))
                 404, 410 -> RobotsLoad.Missing
@@ -239,11 +247,16 @@ class RobotsRules private constructor(private val groups: List<Group>) {
         return groups.firstOrNull { group -> group.tokens.contains("*") }
     }
 
+    /**
+     * RFC 9309 matching: a rule path is a *prefix* match unless it contains an asterisk (any
+     * run of characters) or ends with a dollar sign (end of path). A directory rule such as
+     * `Disallow: /search/` therefore blocks `/search/homes`, while an anchored rule only
+     * matches the exact path it names.
+     */
     private fun matches(rule: Rule, path: String): Boolean {
         val anchored = rule.path.endsWith("$")
         val body = if (anchored) rule.path.dropLast(1) else rule.path
         val target = path.substringBefore('?')
-        if (body.endsWith("/") && !target.endsWith("/") && target != body.dropLast(1)) return false
         val regex = Regex("^" + wildcardToRegex(body))
         val match = regex.find(target) ?: return false
         return !anchored || match.range.last == target.length - 1

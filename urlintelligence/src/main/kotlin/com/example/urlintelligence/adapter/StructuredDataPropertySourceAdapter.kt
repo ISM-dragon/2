@@ -167,16 +167,24 @@ abstract class StructuredDataPropertySourceAdapter(
         }
 
         val missingCore = PropertyField.REQUIRED_FIELDS - draft.present()
+        val majorDrift = draft.drift?.level == DriftLevel.MAJOR
         return when {
-            missingCore.isEmpty() -> PropertyParseResult.Success(draft)
             draft.present().isEmpty() -> PropertyParseResult.Failure(
                 SourceFailure.ParseError("document contained no property fields", extractor)
             )
-            else -> PropertyParseResult.Partial(
+            missingCore.isNotEmpty() -> PropertyParseResult.Partial(
                 draft = draft,
                 warnings = warnings + "missing core fields: " +
                     missingCore.joinToString { it.stableName }
             )
+            // A page whose shape no longer matches the parser is reported as partial: the
+            // values are still usable, but the import must not be presented as a clean,
+            // parser-verified success, and the drift warning has to reach the caller.
+            majorDrift -> PropertyParseResult.Partial(
+                draft = draft,
+                warnings = warnings + "parser signature no longer matched; import is unverified"
+            )
+            else -> PropertyParseResult.Success(draft = draft, warnings = warnings)
         }
     }
 

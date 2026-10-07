@@ -7,6 +7,7 @@ import com.example.urlintelligence.adapter.ZillowAdapter
 import com.example.urlintelligence.failure.SourceFailure
 import com.example.urlintelligence.idempotency.InMemoryIdempotencyStore
 import com.example.urlintelligence.job.InMemoryPropertyImportJobStore
+import com.example.urlintelligence.model.CanonicalProperty
 import com.example.urlintelligence.model.PropertyField
 import com.example.urlintelligence.normalization.NormalizationOutcome
 import com.example.urlintelligence.normalization.PropertyNormalizer
@@ -55,10 +56,21 @@ class VerificationLevelsTest {
         return adapter.parse(response, SourceFetchRequest(url, "corr-verification"))
     }
 
-    private fun property(fixture: String, origin: FetchOrigin) =
-        (PropertyNormalizer(TestClock()).normalize(
-            (parseWith(fixture, origin) as PropertyParseResult.Success).draft
-        ) as NormalizationOutcome.Success).property
+    /**
+     * Parses a fixture and normalizes it. A drifted document is reported as
+     * [PropertyParseResult.Partial] (usable, but not parser-verified), so both variants are
+     * accepted here — the assertions in each test are what pin the verification level down.
+     */
+    private fun property(fixture: String, origin: FetchOrigin): CanonicalProperty {
+        val (draft, warnings) = when (val parsed = parseWith(fixture, origin)) {
+            is PropertyParseResult.Success -> parsed.draft to parsed.warnings
+            is PropertyParseResult.Partial -> parsed.draft to parsed.warnings
+            is PropertyParseResult.Failure -> error("fixture $fixture did not parse: ${parsed.failure}")
+        }
+        return (
+            PropertyNormalizer(TestClock()).normalize(draft, warnings) as NormalizationOutcome.Success
+            ).property
+    }
 
     // ---- the core distinction ---------------------------------------------------------------
 

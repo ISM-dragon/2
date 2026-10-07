@@ -312,7 +312,7 @@ class FetchGuardTest {
         )
         val registry = com.example.urlintelligence.source.SourceRegistry(
             descriptors = listOf(descriptor),
-            adapters = listOf(FakeAdapter(descriptor))
+            adapters = listOf(FakeAdapter(descriptor, transport))
         )
         val resolver = com.example.urlintelligence.resolver.PropertyUrlResolver(
             registry = registry,

@@ -114,7 +114,10 @@ class SourceRegistryTest {
 
         registry.registerAdapter(FakeAdapter(future))
         assertFalse(registry.isAnnouncedOnly("loopnet"))
-        assertEquals(2, registry.size())
+        // size() counts sources (descriptors); the adapter is tracked alongside the descriptor.
+        assertEquals(1, registry.size())
+        assertEquals(1, registry.adapters().size)
+        assertTrue(registry.registeredSources().single().isResolvable)
     }
 
     @Test

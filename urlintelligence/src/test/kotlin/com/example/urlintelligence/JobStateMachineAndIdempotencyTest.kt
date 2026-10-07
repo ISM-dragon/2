@@ -62,7 +62,8 @@ class PropertyImportJobStateMachineTest {
         assertEquals(ImportJobState.SUCCEEDED, job.state)
         assertTrue(job.state.isTerminal)
         assertTrue(job.state.isSuccessful)
-        assertEquals(8, job.transitions.size)
+        // One transition per accepted event; creation itself is not a transition.
+        assertEquals(7, job.transitions.size)
         assertEquals("zillow", job.sourceId)
         assertEquals(ImportJobState.CREATED, job.transitions.first().from)
         assertEquals(ImportJobState.SUCCEEDED, job.transitions.last().to)
