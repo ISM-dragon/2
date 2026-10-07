@@ -13,7 +13,8 @@ import com.example.data.local.migration.DatabaseMigrations
  *
  * Version history:
  *  - 1 -> 2: repair migration for pre-release installs (see [DatabaseMigrations]).
- *  - 2 -> 3: canonical US property model, source/provenance/import-job tracking, comps,
+ *  - 2 -> 3: durable automation execution model (job leases, idempotency ledger, run counters).
+ *  - 3 -> 4: canonical US property model, source/provenance/import-job tracking, comps,
  *    enrichments and asset-level financials.
  *
  * There is deliberately **no** `fallbackToDestructiveMigration`: every schema change must ship a
