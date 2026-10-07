@@ -8,6 +8,7 @@ import com.example.data.local.AppDatabase
 import com.example.data.repository.*
 import com.example.domain.ai.GeminiManager
 import com.example.domain.automation.AutomationEngine
+import com.example.domain.automation.WorkManagerAutomationScheduler
 import com.example.domain.gmail.GmailService
 import com.example.util.NetworkMonitor
 import kotlinx.coroutines.CoroutineScope
@@ -54,6 +55,9 @@ class RealEstateAiApp : Application() {
         private set
 
     lateinit var automationEngine: AutomationEngine
+        private set
+
+    lateinit var automationScheduler: WorkManagerAutomationScheduler
         private set
 
     lateinit var automationRepository: AutomationRepository
@@ -120,6 +124,10 @@ class RealEstateAiApp : Application() {
             geminiManager = geminiManager
         )
 
+        // Durable execution vehicle: WorkManager owns automation cycles, so long-running jobs
+        // survive process death (the engine only keeps a process-local fallback for tooling).
+        automationScheduler = WorkManagerAutomationScheduler(this)
+
         automationEngine = AutomationEngine(
             context = this,
             automationDao = database.automationDao(),
@@ -128,8 +136,8 @@ class RealEstateAiApp : Application() {
             propertyImporter = propertyImportRepository,
             financialRepository = financialRepository,
             offerRepository = offerRepository,
-            geminiManager = geminiManager,
-            networkMonitor = networkMonitor
+            networkMonitor = networkMonitor,
+            scheduler = automationScheduler
         )
 
         automationRepository = AutomationRepository(
@@ -143,6 +151,15 @@ class RealEstateAiApp : Application() {
             automationRepository.seedDefaultsIfEmpty()
             propertyRepository.seedInitialDataIfEmpty()
             propertyRepository.reconcileIdentities()
+
+            // Reconcile durable state (interrupted runs/jobs) and re-arm the durable worker when
+            // automation was enabled before the process died. This is bounded DB work; the actual
+            // pipeline work is re-enqueued through WorkManager.
+            try {
+                automationEngine.onProcessStart()
+            } catch (e: Exception) {
+                // Startup reconciliation must never crash the app.
+            }
 
             // Pre-calculate finances for initial seed properties so Dashboard is rich immediately
             val allProps = propertyRepository.allProperties.first()

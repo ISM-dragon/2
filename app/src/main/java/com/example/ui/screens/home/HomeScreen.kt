@@ -150,6 +150,27 @@ fun HomeScreen(
                         )
 
                         Spacer(modifier = Modifier.height(10.dp))
+                        if (state.persistentState.killSwitchEngaged) {
+                            Text(
+                                text = "KILL SWITCH ENGAGED - ${state.persistentState.killSwitchReason ?: "automation halted"}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = { viewModel.clearKillSwitch() },
+                                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldGain),
+                                    modifier = Modifier.testTag("clear_kill_switch_button")
+                                ) {
+                                    Icon(Icons.Filled.LockOpen, contentDescription = null, tint = Slate950, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("CLEAR KILL SWITCH", color = Slate950, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
                         // Emergency Kill Switch
                         OutlinedButton(
                             onClick = { viewModel.globalKillSwitch() },

@@ -5,21 +5,24 @@ This tool is the executable part of the data layer test suite that does not need
 
   1. parses every ``@Entity`` declaration of the Room data layer (name, table, columns, nullability,
      primary keys, indices, foreign keys);
-  2. parses the historical (git HEAD = schema v2) entities the same way;
+  2. parses the historical entities the same way, pinned by revision: ``V2_REVISION`` is the
+     release the v1 -> v2 normalizer targeted and ``V3_REVISIONS`` the release that introduced the
+     durable automation schema;
   3. generates the exact DDL Room would generate for a schema version;
-  4. validates the hand written migration SQL of ``DatabaseMigrations`` against the entities:
+  4. validates the hand written migration SQL of ``DatabaseMigrations`` against the entities, one
+     stage per version jump, each ending byte-for-byte equivalent (via PRAGMA inspection, the same
+     way Room's TableInfo.read does it) to that version's entity declarations, indices and FKs:
        * schema v1 -> v2 normalizer must reproduce the historical v2 shape;
-       * schema v2 -> v3 migration must end in a schema that is byte-for-byte equivalent
-         (via PRAGMA inspection, the same way Room's TableInfo.read does it) to the current
-         entity declarations, including indices and foreign keys;
-  5. applies the migration to a real SQLite database pre-filled with representative v2 data and
-     checks data preservation, ``PRAGMA foreign_key_check`` integrity and the dedup behaviours
-     (unique indices, cascade deletes);
+       * schema v2 -> v3 must reproduce the automation schema exactly (additive columns only);
+       * schema v3 -> v4 must reproduce the current canonical property model;
+  5. applies the chain to a real SQLite database pre-filled with representative v2 data and checks
+     data preservation, ``PRAGMA foreign_key_check`` integrity and the dedup behaviours
+     (unique indices, cascade deletes, legacy idempotency-key backfill);
   6. prepares every ``@Query`` SQL of every DAO against the migrated database so that typos in
      table/column names are caught the same way the Room compiler would catch them.
 
 Run:  python3 tools/room_schema_guard.py            # full check
-      python3 tools/room_schema_guard.py --print-ddl v3
+      python3 tools/room_schema_guard.py --print-ddl v4
 """
 
 from __future__ import annotations
@@ -36,6 +39,13 @@ ROOT = Path(__file__).resolve().parents[1]
 ENTITY_DIR = "app/src/main/java/com/example/data/local/entity"
 DAO_DIR = "app/src/main/java/com/example/data/local/dao"
 MIGRATION_DIR = "app/src/main/java/com/example/data/local/migration"
+
+# The schema the migration chain starts from is pinned to a revision instead of HEAD: HEAD moves on
+# every commit, and "the entities as they are now" is exactly what the migrations produce.
+#   v2 = last schema that shipped without the property/automation work (base commit of this branch)
+#   v3 = schema that added the durable automation execution model
+V2_REVISION = "05195aa"
+V3_REVISIONS = ("da2a30b", "origin/main", "main")
 
 # ────────────────────────────────────────────────────────────────────────────────────────────────
 # Kotlin source scanning helpers
@@ -55,6 +65,18 @@ def git_show(path: str, rev: str = "HEAD") -> str:
         check=True,
     )
     return out.stdout
+
+
+def entity_sources_at(rev: str) -> dict[str, str] | None:
+    """Entity sources at ``rev``, or None when the revision is not available locally."""
+    files: dict[str, str] = {}
+    names = [p.name for p in sorted((ROOT / ENTITY_DIR).glob("*.kt"))]
+    for name in names:
+        try:
+            files[name] = git_show(f"{ENTITY_DIR}/{name}", rev)
+        except subprocess.CalledProcessError:
+            continue
+    return files or None
 
 
 def match_bracket(text: str, open_idx: int, opener: str = "(", closer: str = ")") -> int:
@@ -793,25 +815,35 @@ def seed_v2_data(conn: sqlite3.Connection) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--print-ddl", choices=["v2", "v3"])
+    parser.add_argument("--print-ddl", choices=["v2", "v3", "v4"])
     parser.add_argument("--print-shapes", choices=["v2"], help="emit LegacyTableShape literals")
     args = parser.parse_args()
 
     current_entities = {
         p.name: p.read_text(encoding="utf-8") for p in sorted((ROOT / ENTITY_DIR).glob("*.kt"))
     }
-    head_entities = {}
-    for name in current_entities:
-        try:
-            head_entities[name] = git_show(f"{ENTITY_DIR}/{name}")
-        except subprocess.CalledProcessError:
-            continue
 
-    v3 = parse_entities(current_entities)
-    v2 = parse_entities(head_entities)
+    v2_sources = entity_sources_at(V2_REVISION)
+    if v2_sources is None:
+        print(f"guard cannot resolve the v2 baseline revision {V2_REVISION}; run in a full clone")
+        return 2
+
+    v3_sources = None
+    v3_rev = ""
+    for candidate in V3_REVISIONS:
+        sources = entity_sources_at(candidate)
+        if sources and "AutomationExecutionEntity" in "".join(sources.values()):
+            v3_sources, v3_rev = sources, candidate
+            break
+    if v3_sources is None:
+        print("guard could not resolve the v3 automation schema revision; skipping only that stage")
+
+    v4 = parse_entities(current_entities)
+    v3 = parse_entities(v3_sources) if v3_sources else {}
+    v2 = parse_entities(v2_sources)
 
     if args.print_ddl:
-        target = v2 if args.print_ddl == "v2" else v3
+        target = {"v2": v2, "v3": v3, "v4": v4}[args.print_ddl]
         for table in sorted(target.values(), key=lambda t: t.name):
             for stmt in room_ddl(table):
                 print(f'            """{stmt}""",')
@@ -839,6 +871,7 @@ def main() -> int:
     v2_create = list(v2_catalog.values())
     v1_to_v2 = migration_statements(migration_source, "1To2", strict=False)
     v2_to_v3 = migration_statements(migration_source, "2To3")
+    v3_to_v4 = migration_statements(migration_source, "3To4")
 
     # 1. the historical catalog must reproduce the schema v2 entities exactly
     conn = sqlite3.connect(":memory:")
@@ -846,19 +879,21 @@ def main() -> int:
     for stmt in v2_create:
         conn.executescript(stmt)
     for table in v2.values():
-        failures += [f"v1->v2 catalog: {p}" for p in compare_table(table, conn)]
+        failures += [f"v2 catalog: {p}" for p in compare_table(table, conn)]
     catalog_tables = {n for n, sql in v2_catalog.items() if sql.upper().startswith("CREATE TABLE")}
     missing_from_catalog = {t.name for t in v2.values()} - catalog_tables
     if missing_from_catalog:
-        failures.append(f"v1->v2 catalog misses tables: {sorted(missing_from_catalog)}")
+        failures.append(f"v2 catalog misses tables: {sorted(missing_from_catalog)}")
 
-    # 2. v2 -> v3 on a database seeded with legacy data
+    # 2. migration chain on a database seeded with legacy v2 data
     seed_v2_data(conn)
     before = {
         t: conn.execute(f"SELECT COUNT(*) FROM `{t}`").fetchone()[0]
         for t in v2_catalog
         if t in actual_tables(conn)
     }
+
+    # 2a. v2 -> v3: the durable automation execution model (additive only)
     for stmt in v2_to_v3:
         try:
             conn.executescript(stmt)
@@ -867,7 +902,7 @@ def main() -> int:
             break
     conn.commit()
 
-    if not failures:
+    if not failures and v3:
         for table in sorted(v3.values(), key=lambda t: t.name):
             failures += [f"v2->v3 result: {p}" for p in compare_table(table, conn)]
         unexpected = actual_tables(conn) - {t.name for t in v3.values()} - {"room_master_table"}
@@ -877,6 +912,58 @@ def main() -> int:
         violations = conn.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             failures.append(f"v2->v3 result: foreign key violations {violations}")
+
+        # legacy jobs must end up with distinct, non-empty idempotency keys before the unique index
+        jobs = conn.execute("SELECT COUNT(*), COUNT(DISTINCT `idempotencyKey`) FROM `automation_jobs`").fetchone()
+        blanks = conn.execute("SELECT COUNT(*) FROM `automation_jobs` WHERE `idempotencyKey` = ''").fetchone()[0]
+        if jobs[0] != jobs[1] or blanks:
+            failures.append(
+                f"v2->v3 backfill: idempotencyKey not unique/non-empty for legacy jobs ({jobs}, blanks={blanks})"
+            )
+        run_heartbeat = conn.execute(
+            "SELECT COUNT(*) FROM `automation_runs` WHERE `heartbeatAt` <> `startTime`"
+        ).fetchone()[0]
+        if run_heartbeat:
+            failures.append("v2->v3 backfill: automation_runs.heartbeatAt was not backfilled from startTime")
+
+        # the unique index must actually reject a duplicate idempotency key
+        try:
+            conn.execute(
+                "INSERT INTO `automation_jobs` (`jobId`, `runId`, `propertyId`, `propertyAddress`, "
+                "`currentState`, `lastSuccessfulState`, `idempotencyKey`, `attempts`, `maxRetries`, "
+                "`nextAttemptAt`, `leaseExpiresAt`, `recoveryCount`, `createdAt`, `updatedAt`) "
+                "VALUES ('guard-a', 1, 'p', 'a', 'DISCOVERED', 'DISCOVERED', 'dup-key', 0, 3, 0, 0, 0, 0, 0)"
+            )
+            conn.execute(
+                "INSERT INTO `automation_jobs` (`jobId`, `runId`, `propertyId`, `propertyAddress`, "
+                "`currentState`, `lastSuccessfulState`, `idempotencyKey`, `attempts`, `maxRetries`, "
+                "`nextAttemptAt`, `leaseExpiresAt`, `recoveryCount`, `createdAt`, `updatedAt`) "
+                "VALUES ('guard-b', 1, 'p', 'a', 'DISCOVERED', 'DISCOVERED', 'dup-key', 0, 3, 0, 0, 0, 0, 0)"
+            )
+            failures.append("v2->v3 integrity: duplicate idempotencyKey was accepted")
+        except sqlite3.IntegrityError:
+            pass
+        conn.rollback()
+
+    # 2b. v3 -> v4: the canonical property model, provenance and comps fold
+    for stmt in v3_to_v4:
+        try:
+            conn.executescript(stmt)
+        except sqlite3.Error as exc:
+            failures.append(f"v3->v4 statement failed: {exc}\n    SQL: {stmt}")
+            break
+    conn.commit()
+
+    if not failures:
+        for table in sorted(v4.values(), key=lambda t: t.name):
+            failures += [f"v3->v4 result: {p}" for p in compare_table(table, conn)]
+        unexpected = actual_tables(conn) - {t.name for t in v4.values()} - {"room_master_table"}
+        if unexpected:
+            failures.append(f"v3->v4 result: unexpected tables left behind: {sorted(unexpected)}")
+
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            failures.append(f"v3->v4 result: foreign key violations {violations}")
 
         preserved = {
             "properties": 3, "property_images": 3, "market_data": 3, "rent_estimates": 3,
@@ -1019,13 +1106,15 @@ def main() -> int:
 
     print("room data layer guard: OK")
     print(
-        f"  entities v3: {len(v3)} tables, {sum(len(t.indices) for t in v3.values())} indices, "
-        f"{sum(len(t.foreign_keys) for t in v3.values())} foreign keys"
+        f"  entities v4 (current): {len(v4)} tables, {sum(len(t.indices) for t in v4.values())} indices, "
+        f"{sum(len(t.foreign_keys) for t in v4.values())} foreign keys"
     )
-    print(f"  entities v2 (git HEAD): {len(v2)} tables")
+    print(f"  entities v3 ({v3_rev or 'unresolved'}): {len(v3)} tables")
+    print(f"  entities v2 ({V2_REVISION}): {len(v2)} tables")
     print(f"  legacy v2 catalog objects: {len(v2_create)}")
     print(f"  v1->v2 dynamic statements: {len(v1_to_v2)}")
     print(f"  v2->v3 migration statements: {len(v2_to_v3)}")
+    print(f"  v3->v4 migration statements: {len(v3_to_v4)}")
     print(f"  dao queries prepared: {sum(len(v) for v in dao_queries().values())}")
     return 0
 

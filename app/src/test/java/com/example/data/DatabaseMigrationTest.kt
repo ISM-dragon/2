@@ -21,12 +21,14 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * End to end migration test for 2 -> 3.
+ * End to end migration test for the full 2 -> 3 -> 4 chain.
  *
- * A real v2 database file is built from the [LegacyV2Schema] catalog, seeded with legacy rows, and
- * then opened through Room with [DatabaseMigrations.ALL]. Opening performs Room's own schema
- * validation, so this test fails whenever the migration misses a column, index, foreign key or
- * leaves an unexpected table behind - the same failures users would hit on upgrade.
+ * A real v2 database file is built from the [LegacyV2Schema] catalog, seeded with legacy rows -
+ * including automation jobs written by the pre-durability engine - and then opened through Room with
+ * [DatabaseMigrations.ALL]. Opening performs Room's own schema validation, so this test fails
+ * whenever a migration misses a column, index, foreign key or leaves an unexpected table behind -
+ * the same failures users would hit on upgrade instead of the destructive fallback that used to be
+ * registered on the builder.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -35,7 +37,7 @@ class DatabaseMigrationTest {
     private val dbName = "migration-under-test.db"
 
     @Test
-    fun `migrating a v2 database preserves data and adopts the v3 schema`() {
+    fun `migrating a v2 database preserves data and adopts the v4 schema`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         context.deleteDatabase(dbName)
         createV2Database(context)
@@ -50,7 +52,7 @@ class DatabaseMigrationTest {
             assertNotNull("the legacy property was lost by the migration", property)
             property!!
 
-            // v3 identity columns exist and are backfilled; canonicalKey stays NULL on purpose so
+            // v4 identity columns exist and are backfilled; canonicalKey stays NULL on purpose so
             // the dedup reconcile pass (not the migration) decides identity.
             assertTrue("normalizedAddress was not backfilled", property.normalizedAddress.isNotBlank())
             assertNull("migration must leave canonicalKey to the reconcile pass", property.canonicalKey)
@@ -76,7 +78,7 @@ class DatabaseMigrationTest {
                     .none { it.propertyId == "ghost-property" }
             )
 
-            // v3 tables and default sources are created/seeded by the migration
+            // v4 tables and default sources are created/seeded by the migration
             val sourceIds = runBlocking { database.propertySourceDao().getEnabledSources() }.map { it.id }
             PropertySourceDefaults.ALL.forEach { id ->
                 assertTrue("source $id missing after migration", id in sourceIds)
@@ -84,7 +86,20 @@ class DatabaseMigrationTest {
             assertTrue(runBlocking { database.propertySourceDao().getProvenanceForProperty("legacy-1") }.isNotEmpty())
             assertNotNull(runBlocking { database.propertyFinancialDao().getFinancials("legacy-1") })
 
-            assertEquals(3, database.openHelper.readableDatabase.version)
+            // v3 (automation durability) upgraded the legacy job in place: same row, no wipe,
+            // and a unique idempotency key so the durable worker can never run it twice.
+            val job = runBlocking { database.automationDao().getJobById("legacy-job") }
+            assertNotNull("legacy automation job was lost by the v2 -> v3 upgrade", job)
+            assertTrue("legacy job has no idempotency key", job!!.idempotencyKey.isNotBlank())
+            assertEquals("legacy-job", job.propertyId)
+
+            val rules = runBlocking { database.automationDao().getRules() }
+            assertNotNull(rules)
+            assertEquals(30, rules!!.retryBackoffBaseSeconds)
+            assertTrue("automation rules lease policy missing", rules.jobLeaseTtlMinutes > 0)
+            assertTrue("automation_executions table missing", tableExists(database, "automation_executions"))
+
+            assertEquals(4, database.openHelper.readableDatabase.version)
         } finally {
             database.close()
             context.deleteDatabase(dbName)
@@ -206,8 +221,29 @@ class DatabaseMigrationTest {
             // The exact same comp twice: the v3 fold must collapse them.
             insertRow(legacy, "comparable_properties", mapOf("targetPropertyId" to "legacy-1", "compAddress" to "2402 S Congress Ave", "compPrice" to 470_000.0, "compBeds" to 4, "compBaths" to 3.0, "compSqFt" to 2180, "distanceMiles" to 0.3, "saleDate" to "2025-03-14", "adjustmentAmount" to 0.0))
             insertRow(legacy, "comparable_properties", mapOf("targetPropertyId" to "legacy-1", "compAddress" to "2402 S Congress Ave", "compPrice" to 471_000.0, "compBeds" to 4, "compBaths" to 3.0, "compSqFt" to 2180, "distanceMiles" to 0.3, "saleDate" to "2025-03-14", "adjustmentAmount" to 0.0))
-            // An orphan child that v2 happily stored: must not survive the v3 foreign keys.
+            // An orphan child that v2 happily stored: must not survive the v4 foreign keys.
             insertRow(legacy, "tax_records", mapOf("propertyId" to "ghost-property", "annualTaxAmount" to 1.0))
+
+            // Automation state written before the durable execution model existed.
+            insertRow(
+                legacy, "automation_jobs",
+                mapOf(
+                    "jobId" to "legacy-job",
+                    "runId" to 1,
+                    "propertyId" to "legacy-1",
+                    "propertyAddress" to "2418 South Congress Avenue",
+                    "currentState" to "DISCOVERED",
+                    "lastSuccessfulState" to "DISCOVERED",
+                    "attempts" to 0,
+                    "maxRetries" to 3,
+                    "createdAt" to 1000L,
+                    "updatedAt" to 1000L
+                )
+            )
+            insertRow(legacy, "automation_runs", mapOf("id" to 1, "startTime" to 1000L, "endTime" to 2000L, "status" to "COMPLETED", "summary" to "legacy run"))
+            insertRow(legacy, "automation_logs", mapOf("id" to 1, "runId" to 1, "timestamp" to 1000L, "level" to "INFO", "tag" to "START", "message" to "legacy"))
+            insertRow(legacy, "automation_state", mapOf("id" to 1, "lastActivityTime" to 1000L))
+            insertRow(legacy, "automation_rules", mapOf("id" to "default"))
 
             legacy.version = 2
         } finally {

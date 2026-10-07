@@ -3,6 +3,7 @@ package com.example.data.repository
 import androidx.room.withTransaction
 import com.example.data.adapter.NormalizedPropertyBundle
 import com.example.data.adapter.PropertySeedData
+import com.example.data.adapter.PropertySourceDeduplicationDecision
 import com.example.data.adapter.PropertySourceManager
 import com.example.data.local.AppDatabase
 import com.example.data.local.dao.PropertyDao
@@ -143,7 +144,13 @@ class PropertyRepository(
     suspend fun insertBundle(bundle: NormalizedPropertyBundle): ImportResult =
         importer.importBundle(bundle)
 
-    /** One import job per configured source, so sync status and counters stay attributable. */
+    /**
+     * One import job per configured source, so sync status and counters stay attributable.
+     *
+     * Listings are handed to the importer rather than filtered here: an already-known address is
+     * deduplicated inside [PropertyImportRepository], which keeps the fresher payload, merges the
+     * conflicting fields and records a provenance row instead of dropping the update silently.
+     */
     suspend fun syncFromSources(): List<ImportSummary> = withContext(Dispatchers.IO) {
         importer.seedDefaultSources()
         val sourceIds = sourceManager.availableSourceIds.ifEmpty { listOf(PropertySourceDefaults.INTERNAL_ID) }

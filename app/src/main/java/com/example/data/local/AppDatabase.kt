@@ -47,11 +47,12 @@ import com.example.data.local.migration.DatabaseMigrations
         AutomationLogEntity::class,
         AutomationStateEntity::class,
         AutomationJobEntity::class,
+        AutomationExecutionEntity::class,
         ApiConfigurationEntity::class,
         GmailConfigurationEntity::class,
         OfferTemplateEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {

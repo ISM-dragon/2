@@ -279,8 +279,15 @@ private fun fallbackLiteral(column: ColumnInfo): String {
  * forward, orphans are filtered (they cannot satisfy the new foreign keys) and no DEFAULT clause
  * is introduced so the resulting schema validates against the entities.
  */
-private class Migration2To3 : Migration(2, 3) {
+private class Migration3To4 : Migration(3, 4) {
     override fun migrate(db: SupportSQLiteDatabase) {
+        // Index additions that ship with the canonical property model, kept in this step so the
+        // v2 -> v3 block stays byte-for-byte equal to the automation schema already released.
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_jobs_currentState_attempts` ON `automation_jobs` (`currentState`, `attempts`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_jobs_updatedAt` ON `automation_jobs` (`updatedAt`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_logs_runId` ON `automation_logs` (`runId`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_logs_timestamp` ON `automation_logs` (`timestamp`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_logs_level_timestamp` ON `automation_logs` (`level`, `timestamp`)""")
         db.execSQL("""CREATE TABLE IF NOT EXISTS `property_sources` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `sourceKind` TEXT NOT NULL, `adapterKey` TEXT NOT NULL, `description` TEXT NOT NULL, `isEnabled` INTEGER NOT NULL, `priority` INTEGER NOT NULL, `requiresAttribution` INTEGER NOT NULL, `attributionText` TEXT NOT NULL, `licenseNotes` TEXT NOT NULL, `maxRequestsPerMinute` INTEGER NOT NULL, `refreshIntervalMinutes` INTEGER NOT NULL, `lastSyncAt` INTEGER NOT NULL, `lastSyncStatus` TEXT NOT NULL, `lastSyncError` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))""")
         db.execSQL("""CREATE UNIQUE INDEX IF NOT EXISTS `index_property_sources_adapterKey` ON `property_sources` (`adapterKey`)""")
         db.execSQL("""CREATE INDEX IF NOT EXISTS `index_property_sources_sourceKind` ON `property_sources` (`sourceKind`)""")
@@ -442,13 +449,8 @@ WHERE EXISTS (SELECT 1 FROM `offers` AS `o` WHERE `o`.`id` = `l`.`offerId`)""")
         db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_jobs_propertyId` ON `automation_jobs` (`propertyId`)""")
         db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_jobs_currentState` ON `automation_jobs` (`currentState`)""")
         db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_jobs_runId` ON `automation_jobs` (`runId`)""")
-        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_jobs_currentState_attempts` ON `automation_jobs` (`currentState`, `attempts`)""")
-        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_jobs_updatedAt` ON `automation_jobs` (`updatedAt`)""")
         db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_runs_startTime` ON `automation_runs` (`startTime`)""")
         db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_runs_status_startTime` ON `automation_runs` (`status`, `startTime`)""")
-        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_logs_runId` ON `automation_logs` (`runId`)""")
-        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_logs_timestamp` ON `automation_logs` (`timestamp`)""")
-        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_logs_level_timestamp` ON `automation_logs` (`level`, `timestamp`)""")
         db.execSQL("""INSERT OR IGNORE INTO `property_sources` (`id`, `name`, `sourceKind`, `adapterKey`, `description`,
     `isEnabled`, `priority`, `requiresAttribution`, `attributionText`, `licenseNotes`,
     `maxRequestsPerMinute`, `refreshIntervalMinutes`, `lastSyncAt`, `lastSyncStatus`, `lastSyncError`,
@@ -513,7 +515,83 @@ LEFT JOIN `rent_estimates` AS `r` ON `r`.`propertyId` = `p`.`id`""")
     }
 }
 
+/**
+ * v2 -> v3: the durable automation execution model (jobs, executions, logs, rules, runs, state).
+ *
+ * Everything here is additive: new columns land with the Kotlin-side defaults from
+ * [AutomationRuleEntity] / [AutomationRunEntity] / [AutomationStateEntity], and legacy job rows are
+ * given a unique idempotency key before the unique index is created. Nothing is dropped or rebuilt,
+ * so upgrade paths never lose user data.
+ */
+private class Migration2To3 : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // ── automation_executions ───────────────────────────────────────────────────────────────
+        db.execSQL("""CREATE TABLE IF NOT EXISTS `automation_executions` (`idempotencyKey` TEXT NOT NULL, `jobId` TEXT, `runId` INTEGER NOT NULL, `effect` TEXT NOT NULL, `status` TEXT NOT NULL, `attempt` INTEGER NOT NULL, `resultRef` TEXT, `error` TEXT, `startedAt` INTEGER NOT NULL, `finishedAt` INTEGER, PRIMARY KEY(`idempotencyKey`))""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_executions_jobId` ON `automation_executions` (`jobId`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_executions_runId` ON `automation_executions` (`runId`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_executions_status` ON `automation_executions` (`status`)""")
+
+        // ── automation_jobs: retry, lease and idempotency bookkeeping ───────────────────────────
+        db.execSQL("""ALTER TABLE `automation_jobs` ADD COLUMN `idempotencyKey` TEXT NOT NULL DEFAULT ''""")
+        db.execSQL("""ALTER TABLE `automation_jobs` ADD COLUMN `failureKind` TEXT""")
+        db.execSQL("""ALTER TABLE `automation_jobs` ADD COLUMN `nextAttemptAt` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_jobs` ADD COLUMN `leaseOwner` TEXT""")
+        db.execSQL("""ALTER TABLE `automation_jobs` ADD COLUMN `leaseExpiresAt` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_jobs` ADD COLUMN `recoveryCount` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_jobs` ADD COLUMN `lastRecoveredAt` INTEGER""")
+        db.execSQL("""ALTER TABLE `automation_jobs` ADD COLUMN `startedAt` INTEGER""")
+        db.execSQL("""ALTER TABLE `automation_jobs` ADD COLUMN `completedAt` INTEGER""")
+        // Legacy rows share the '' default, so they get a per-row key before the unique index lands.
+        db.execSQL("""UPDATE `automation_jobs` SET `idempotencyKey` = 'legacy:' || `jobId` WHERE `idempotencyKey` = ''""")
+        db.execSQL("""CREATE UNIQUE INDEX IF NOT EXISTS `index_automation_jobs_idempotencyKey` ON `automation_jobs` (`idempotencyKey`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_jobs_leaseExpiresAt` ON `automation_jobs` (`leaseExpiresAt`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_automation_jobs_nextAttemptAt` ON `automation_jobs` (`nextAttemptAt`)""")
+
+        // ── automation_logs: correlation and state-transition context ───────────────────────────
+        db.execSQL("""ALTER TABLE `automation_logs` ADD COLUMN `jobId` TEXT""")
+        db.execSQL("""ALTER TABLE `automation_logs` ADD COLUMN `correlationId` TEXT""")
+        db.execSQL("""ALTER TABLE `automation_logs` ADD COLUMN `stateBefore` TEXT""")
+        db.execSQL("""ALTER TABLE `automation_logs` ADD COLUMN `stateAfter` TEXT""")
+        db.execSQL("""ALTER TABLE `automation_logs` ADD COLUMN `attempt` INTEGER""")
+        db.execSQL("""ALTER TABLE `automation_logs` ADD COLUMN `durationMs` INTEGER""")
+
+        // ── automation_rules: backoff, recovery and lease policy ────────────────────────────────
+        db.execSQL("""ALTER TABLE `automation_rules` ADD COLUMN `retryBackoffBaseSeconds` INTEGER NOT NULL DEFAULT 30""")
+        db.execSQL("""ALTER TABLE `automation_rules` ADD COLUMN `retryBackoffMaxMinutes` INTEGER NOT NULL DEFAULT 30""")
+        db.execSQL("""ALTER TABLE `automation_rules` ADD COLUMN `staleRunTimeoutMinutes` INTEGER NOT NULL DEFAULT 15""")
+        db.execSQL("""ALTER TABLE `automation_rules` ADD COLUMN `maxRecoveryAttempts` INTEGER NOT NULL DEFAULT 20""")
+        db.execSQL("""ALTER TABLE `automation_rules` ADD COLUMN `autoResumeInterruptedJobs` INTEGER NOT NULL DEFAULT 1""")
+        db.execSQL("""ALTER TABLE `automation_rules` ADD COLUMN `maxJobsPerCycle` INTEGER NOT NULL DEFAULT 25""")
+        db.execSQL("""ALTER TABLE `automation_rules` ADD COLUMN `jobLeaseTtlMinutes` INTEGER NOT NULL DEFAULT 5""")
+        db.execSQL("""ALTER TABLE `automation_rules` ADD COLUMN `cycleLeaseTtlMinutes` INTEGER NOT NULL DEFAULT 3""")
+
+        // ── automation_runs: per-run counters and durable worker metadata ───────────────────────
+        db.execSQL("""ALTER TABLE `automation_runs` ADD COLUMN `jobsProcessed` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_runs` ADD COLUMN `jobsRecovered` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_runs` ADD COLUMN `jobsFailed` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_runs` ADD COLUMN `jobsBlocked` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_runs` ADD COLUMN `trigger` TEXT NOT NULL DEFAULT 'MANUAL'""")
+        db.execSQL("""ALTER TABLE `automation_runs` ADD COLUMN `correlationId` TEXT NOT NULL DEFAULT ''""")
+        db.execSQL("""ALTER TABLE `automation_runs` ADD COLUMN `workerRunAttempt` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_runs` ADD COLUMN `failureReason` TEXT""")
+        db.execSQL("""ALTER TABLE `automation_runs` ADD COLUMN `heartbeatAt` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""UPDATE `automation_runs` SET `heartbeatAt` = `startTime`""")
+
+        // ── automation_state: kill switch, run lease and recovery bookkeeping ───────────────────
+        db.execSQL("""ALTER TABLE `automation_state` ADD COLUMN `killSwitchEngaged` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_state` ADD COLUMN `killSwitchReason` TEXT""")
+        db.execSQL("""ALTER TABLE `automation_state` ADD COLUMN `killSwitchEngagedAt` INTEGER""")
+        db.execSQL("""ALTER TABLE `automation_state` ADD COLUMN `engineStartedAt` INTEGER""")
+        db.execSQL("""ALTER TABLE `automation_state` ADD COLUMN `activeRunId` INTEGER""")
+        db.execSQL("""ALTER TABLE `automation_state` ADD COLUMN `cycleLeaseOwner` TEXT""")
+        db.execSQL("""ALTER TABLE `automation_state` ADD COLUMN `cycleLeaseExpiresAt` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_state` ADD COLUMN `lastRecoveryAt` INTEGER""")
+        db.execSQL("""ALTER TABLE `automation_state` ADD COLUMN `recoveredJobsTotal` INTEGER NOT NULL DEFAULT 0""")
+        db.execSQL("""ALTER TABLE `automation_state` ADD COLUMN `lastWorkerEnqueuedAt` INTEGER""")
+    }
+}
+
 /** All migrations, registered by [com.example.data.local.AppDatabase]. */
 internal object DatabaseMigrations {
-    val ALL: Array<Migration> = arrayOf(Migration1To2(), Migration2To3())
+    val ALL: Array<Migration> = arrayOf(Migration1To2(), Migration2To3(), Migration3To4())
 }
