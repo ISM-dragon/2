@@ -1,9 +1,11 @@
 # Deal Scoring Engine
 
 Deterministic, explainable deal scoring for RealEstateAI. The authoritative scorer is the
-pure-Kotlin engine in `app/src/main/java/com/example/domain/scoring/`; the property-import
-pipeline calls it through `domain/intelligence/scoring/DealScoringEngine.kt`. There are no
-Android UI changes or AI dependencies in score calculation.
+pure-Kotlin engine in `app/src/main/java/com/example/domain/scoring/`. The clean
+orchestration contract is `domain/intelligence/scoring/DealAnalysisOrchestrator.kt`; the
+property-import pipeline's legacy entry point
+(`domain/intelligence/scoring/DealScoringEngine.kt`) is now a thin facade that delegates to
+the orchestrator. There are no Android UI changes or AI dependencies in score calculation.
 
 ## Scores produced
 
@@ -24,9 +26,10 @@ The default quality composite weights are Cash Flow 0.35, Equity 0.25, Market 0.
 
 ## Guarantees and audit contract
 
-1. **Deterministic** — `evaluate(input, weights, config, asOfYear)` is a pure function. No clock,
-   randomness, I/O, or environment reads. Formatting is locale-fixed. Repeated identical calls
-   return equal `DealScoreResult`s.
+1. **Deterministic** — `evaluate(input, weights, config, asOfYear)` and
+   `DealAnalysisOrchestrator.score(...)` are pure functions. No clock, randomness, I/O, or
+   environment reads. Formatting is locale-fixed. Repeated identical calls return equal
+   `DealScoreResult`s.
 2. **Configurable and normalized** — composite and within-subscore weights accept finite,
    non-negative values and are stably normalized (including very large finite weights). Unknown
    IDs and all-zero configured groups are rejected. Numeric band tables, category lookups,
@@ -49,6 +52,44 @@ The default quality composite weights are Cash Flow 0.35, Equity 0.25, Market 0.
    score values only as context and cannot submit score overrides. The standalone
    `attachAiObservations(result, notes)` API only adds sanitized display text; score fields and
    explanations are unchanged.
+
+## Deal analysis orchestration contract
+
+`DealAnalysisOrchestrator` (in `domain/intelligence/scoring`) is the single clean entry
+point that turns pipeline facts into a `DealScoreResult`:
+
+```kotlin
+DealAnalysisOrchestrator.score(
+    property,      // CanonicalProperty            -- canonical listing facts
+    underwriting,  // StrategyFinancialMetrics?    -- deterministic scenario outputs
+    market,        // MarketFacts                  -- market/records/verified-channel facts
+    comps,         // CompCoverage                 -- verified comp + rent-range coverage
+    provenance,    // DataProvenanceManifest       -- per-field source tier & confidence
+    weights,       // ScoringWeights               -- caller-validated deterministic config
+    config,        // ScoringConfig                -- caller-validated deterministic config
+    asOfYear       // Int                          -- deterministic reference year
+): DealScoreResult
+```
+
+Mapping and filtering policy (all in the orchestrator, **no scoring math**):
+
+- **Provenance-aware** — any fact whose best manifest entry has tier
+  `ProvenanceSourceTier.AI_INFERENCE` is dropped before the engine sees it. Absence of a
+  manifest entry does not poison a value; only an explicit AI-inference entry does.
+- **Scenario isolation** — underwriting outputs (cash flow, NOI, cap rate, cash-on-cash,
+  DSCR, debt service) are promoted into the score only when the canonical inputs the
+  scenario was built on (explicit trusted list price **and** explicit trusted rent) exist.
+  A finance-model fallback rent, a custom scenario rent, or an AI-inferred rent can never
+  smuggle points into the deal score.
+- **No fake facts** — portal names (`Zillow`, `Redfin`, ...) are never a seller channel;
+  only an explicit, provenance-trusted `MarketFacts.sourceType` drives the distress
+  dimension. Legacy fixed assumptions (5% vacancy, default repairs, projected ARV) are not
+  promoted to property facts; `renovationCost` / `afterRepairValue` must be explicitly
+  provided (and trusted) to be scored.
+- **Authoritative engine** — the orchestrator builds the `DealInput` and delegates
+  exclusively to `DealScoringEngine.evaluate`; the result carries that engine's
+  `scoringModelVersion`. `toBreakdown(result)` projects the immutable result onto the
+  legacy `DealScoreBreakdown` shape used by AI analysis models (rounding only).
 
 ## Missing data and confidence
 
@@ -96,21 +137,31 @@ monotone scores in 0..100. The result records the exact anchors applied for ever
 
 ## Production adapter boundary
 
-The legacy intelligence package name remains as a compatibility adapter for import and AI
-analysis models. It delegates scoring to the standalone engine and carries the complete
-`DealScoreResult` in `DealScoreBreakdown.detailedResult`. It maps canonical facts and finance
-outputs only when their underlying explicit inputs are available. In particular, a portal
-(`Zillow`, `Redfin`, etc.) is not a seller channel; the legacy model's fallback rent, fixed vacancy,
-repair/closing-cost defaults, and projected ARV are not promoted as property facts; and synthetic
-or unverified enrichment is not promoted to comps, market value, flood, or tax-delinquency facts.
+The legacy intelligence package name (`domain/intelligence/scoring/DealScoringEngine.kt`)
+remains as a compatibility facade for the import pipeline and AI analysis models. It performs
+**no arithmetic**: it delegates to `DealAnalysisOrchestrator.score(...)` and projects the
+result through `toBreakdown(...)`, carrying the complete `DealScoreResult` in
+`DealScoreBreakdown.detailedResult`. Because the facade and the orchestration contract share
+one mapping, they can never drift apart.
 
-Qualification remains a separate gate from Deal Score. `QualificationScoringPolicy` versions the
-neutral base, point deltas, age/DSCR risk heuristic, and permitted offer-discount bounds. Each of
-the ten required checks includes its observed value, configured threshold, pass/fail result, and
-exact score delta in `QualificationEvaluation.checkResults`; the raw score, clamped score,
-reference year, policy version, effective discount, and validation warnings are also returned.
-Invalid/non-finite required inputs fail closed. Offer generation is blocked if qualification
-cannot produce a finite, positive deterministic offer price.
+The mapping policy is unchanged: canonical facts and finance outputs are mapped only when
+their underlying explicit inputs are available. In particular, a portal (`Zillow`, `Redfin`,
+etc.) is not a seller channel; the legacy model's fallback rent, fixed vacancy,
+repair/closing-cost defaults, and projected ARV are not promoted as property facts; and
+synthetic or unverified enrichment is not promoted to comps, market value, flood, or
+tax-delinquency facts.
+
+Qualification independence. The deterministic deal-analysis orchestration has **no dependency
+on the obsolete qualification scoring** (`domain/qualification`); an architecture guard test
+enforces that neither `domain/scoring` nor `domain/intelligence/scoring` (nor the
+`DealScoreBreakdown` projection) references it. Qualification remains a separate gate from
+Deal Score: `QualificationScoringPolicy` versions the neutral base, point deltas, age/DSCR risk
+heuristic, and permitted offer-discount bounds. Each of the ten required checks includes its
+observed value, configured threshold, pass/fail result, and exact score delta in
+`QualificationEvaluation.checkResults`; the raw score, clamped score, reference year, policy
+version, effective discount, and validation warnings are also returned. Invalid/non-finite
+required inputs fail closed. Offer generation is blocked if qualification cannot produce a
+finite, positive deterministic offer price.
 
 ## Tests
 
@@ -118,5 +169,15 @@ cannot produce a finite, positive deterministic offer price.
 locale-independent determinism, configurable and overflow-safe weight normalization, rule-trace
 integrity, boundary interpolation, missing-data attenuation, conflicting/out-of-range inputs,
 confidence calibration, all-cash handling, AI isolation, and FinancialEngine integration.
+`app/src/test/java/com/example/DealAnalysisOrchestratorTest.kt` covers the orchestration
+contract: repeated and locale-independent determinism, provenance-record-order invariance,
+mapping equality with a direct standalone-engine evaluation, missing-data attenuation (scores
+approach neutral and confidence falls), provenance filtering (AI-inference tiers dropped,
+trusted tiers scored, portals never treated as seller channels, rent/comp coverage hints),
+AI isolation (no numeric override surface in the public API, AI observations stay display-only),
+and facade/contract/engine delegation equivalence.
+`app/src/test/java/com/example/DealScoringArchitectureGuardTest.kt` enforces the purity
+constraints: no Android/network/data-layer/AI imports in the scoring packages, no dependency on
+the obsolete qualification scoring, and a facade that delegates rather than re-implements.
 `app/src/test/java/com/example/PropertyUrlIntelligenceTest.kt` exercises the production adapter.
 Qualification-boundary and locale-stability tests live in `app/src/test/java/com/example/QualificationEngineTest.kt`.
