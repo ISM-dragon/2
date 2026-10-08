@@ -6,10 +6,11 @@ import org.json.JSONObject
 /**
  * Durable projection of one validated analyst analysis.
  *
- * Property names mirror `PropertyAiAnalysisEntity` (`property_ai_analysis`) one-for-one, in the same
- * declaration order, so later repository work can persist these values directly and cannot
- * accidentally reinterpret a claim's epistemic status. Room, DAOs, and repositories stay out of this
- * package: the analyst contract produces values, persistence decides where they live.
+ * Property names mirror `PropertyAiAnalysisEntity` (`property_ai_analysis`) one-for-one - a parity
+ * that is asserted by reflection in the contract test - so later repository work can persist these
+ * values directly and cannot accidentally reinterpret or drop a claim. Room, DAOs, and repositories
+ * stay out of this package: the analyst contract produces values, persistence decides where they
+ * live.
  *
  * Column mapping and its deliberate gaps:
  *
