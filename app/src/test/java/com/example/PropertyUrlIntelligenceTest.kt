@@ -10,6 +10,7 @@ import com.example.domain.intelligence.scoring.DealScoringEngine
 import com.example.domain.intelligence.source.PropertyUrlResolver
 import com.example.domain.intelligence.source.SourceRegistry
 import com.example.domain.intelligence.source.adapters.*
+import com.example.domain.scoring.ScoringWeights
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
@@ -230,7 +231,8 @@ class PropertyUrlIntelligenceTest {
         val manifest = DataProvenanceManifest(
             propertyId = canonical.propertyId,
             records = listOf(
-                FieldProvenance("listPrice", "$450,000", "Zillow", ProvenanceSourceTier.DIRECT_LISTING)
+                FieldProvenance("listPrice", "$450,000", "Zillow", ProvenanceSourceTier.DIRECT_LISTING),
+                FieldProvenance("estimatedRent", "$3,600", "Zillow Rent Zestimate", ProvenanceSourceTier.SECONDARY_ESTIMATE, confidence = 0.88)
             )
         )
 
@@ -243,6 +245,84 @@ class PropertyUrlIntelligenceTest {
         assertTrue("Risk score must be in range 0..100", score.riskScore in 0..100)
         assertTrue("Data confidence score must be in range 0..100", score.dataConfidenceScore in 0..100)
         assertTrue("Positive factors must be present", score.positiveFactors.isNotEmpty())
+        val detailed = score.detailedResult!!
+        assertEquals("deal-scoring-v2", detailed.scoringModelVersion)
+        assertFalse(
+            "Legacy default repairs are an assumption, not a verified renovation input",
+            detailed.subscores.first { it.id == ScoringWeights.RISK_SAFETY }
+                .components.first { it.componentId == "renovationPctOfPrice" }.covered
+        )
+        assertFalse(
+            "Zillow is a listing portal, not a seller-motivation channel",
+            detailed.subscores.first { it.id == ScoringWeights.DISTRESS }
+                .components.first { it.componentId == "sourceType" }.covered
+        )
+    }
+
+    @Test
+    fun legacyFinanceRentFallbackIsNotPromotedIntoScoringInputs() {
+        val property = CanonicalProperty(
+            propertyId = "PROP-SCORE-MISSING-RENT",
+            sourceUrl = "https://www.zillow.com/123",
+            source = "Zillow",
+            address = "1420 S Congress Ave, Austin, TX 78704",
+            city = "Austin",
+            state = "TX",
+            zipCode = "78704",
+            listPrice = 450_000.0,
+            estimatedRent = null
+        )
+        val financials = DeterministicFinancialEngine.calculate(property)
+        val score = DealScoringEngine.calculateScore(
+            property,
+            financials,
+            DataProvenanceManifest(property.propertyId)
+        )
+        val detailed = score.detailedResult!!
+        val cashFlow = detailed.subscores.first { it.id == ScoringWeights.CASH_FLOW }
+        val risk = detailed.subscores.first { it.id == ScoringWeights.RISK_SAFETY }
+
+        assertFalse(cashFlow.components.first { it.componentId == "monthlyCashFlow" }.covered)
+        assertFalse(cashFlow.components.first { it.componentId == "capRatePct" }.covered)
+        assertFalse(risk.components.first { it.componentId == "dscr" }.covered)
+        assertFalse(risk.components.first { it.componentId == "vacancyRatePct" }.covered)
+        assertFalse(risk.components.first { it.componentId == "renovationPctOfPrice" }.covered)
+        assertTrue(detailed.missingInputs.contains("monthlyCashFlow"))
+        assertTrue(detailed.missingInputs.contains("capRatePct"))
+        assertTrue(detailed.missingInputs.contains("dscr"))
+    }
+
+
+    @Test
+    fun aiInferredRentIsNotUsedByTheDeterministicScore() {
+        val property = CanonicalProperty(
+            propertyId = "PROP-SCORE-AI-RENT",
+            sourceUrl = "https://www.zillow.com/123",
+            source = "Zillow",
+            address = "1420 S Congress Ave, Austin, TX 78704",
+            city = "Austin",
+            state = "TX",
+            zipCode = "78704",
+            listPrice = 450_000.0,
+            estimatedRent = 3_600.0
+        )
+        val financials = DeterministicFinancialEngine.calculate(property)
+        val provenance = DataProvenanceManifest(
+            propertyId = property.propertyId,
+            records = listOf(
+                FieldProvenance(
+                    "estimatedRent", "$3,600", "Gemini inference",
+                    ProvenanceSourceTier.AI_INFERENCE, confidence = 0.99
+                )
+            )
+        )
+        val detailed = DealScoringEngine.calculateScore(property, financials, provenance).detailedResult!!
+        val cashFlow = detailed.subscores.first { it.id == ScoringWeights.CASH_FLOW }
+        val confidence = detailed.subscores.first { it.id == ScoringWeights.DATA_CONFIDENCE }
+
+        assertFalse(cashFlow.components.first { it.componentId == "monthlyCashFlow" }.covered)
+        assertFalse(cashFlow.components.first { it.componentId == "capRatePct" }.covered)
+        assertFalse(confidence.components.any { it.componentId == "rentConfidenceScore" })
     }
 
     @Test

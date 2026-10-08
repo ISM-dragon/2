@@ -6,6 +6,8 @@ import com.example.domain.scoring.DealInput
 import com.example.domain.scoring.DealScoringEngine
 import com.example.domain.scoring.DealScoreResult
 import com.example.domain.scoring.ReasonPolarity
+import com.example.domain.scoring.ScoreBandPoint
+import com.example.domain.scoring.ScoringConfig
 import com.example.domain.scoring.ScoringWeights
 import com.example.domain.scoring.SubScoreBreakdown
 import org.junit.Assert.assertEquals
@@ -15,6 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.lang.reflect.Modifier
+import java.util.Locale
 
 class DealScoringEngineTest {
 
@@ -146,12 +149,19 @@ class DealScoringEngineTest {
 
     @Test
     fun scoringIsDeterministicForIdenticalInputs() {
-        val a = DealScoringEngine.evaluate(solidDeal())
-        val b = DealScoringEngine.evaluate(solidDeal())
-        assertEquals(a, b)
-        assertEquals(a.score, b.score, 0.0)
-        assertEquals(a.reasons, b.reasons)
-        assertEquals(a.warnings, b.warnings)
+        val originalLocale = Locale.getDefault()
+        try {
+            Locale.setDefault(Locale.FRANCE)
+            val expected = DealScoringEngine.evaluate(solidDeal())
+            repeat(25) { assertEquals("repeat $it must be identical", expected, DealScoringEngine.evaluate(solidDeal())) }
+            Locale.setDefault(Locale.US)
+            assertEquals("Output must not depend on the machine locale", expected, DealScoringEngine.evaluate(solidDeal()))
+            assertEquals(expected.score, DealScoringEngine.evaluate(solidDeal()).score, 0.0)
+            assertEquals(expected.reasons, DealScoringEngine.evaluate(solidDeal()).reasons)
+            assertEquals(expected.warnings, DealScoringEngine.evaluate(solidDeal()).warnings)
+        } finally {
+            Locale.setDefault(originalLocale)
+        }
     }
 
     @Test
@@ -357,8 +367,19 @@ class DealScoringEngineTest {
     }
 
     @Test
+    fun neutralFallbackIsConfigurableAndEchoedInTheResult() {
+        val result = DealScoringEngine.evaluate(DealInput(), config = ScoringConfig(neutralScore = 65.0))
+        assertEquals(65.0, result.score, 0.0)
+        assertEquals(65.0, result.neutralScore, 0.0)
+        for (subscore in result.subscores.filter { it.id != ScoringWeights.DATA_CONFIDENCE }) {
+            assertEquals(65.0, subscore.rawScore, 0.0)
+            assertEquals(65.0, subscore.score, 0.0)
+        }
+    }
+
+    @Test
     fun partialDataAttenuatesTowardNeutralRatherThanOptimistic() {
-        // Only capRatePct=10 (raw 100 pts, weight 0.30 of the CF subscore).
+        // Only capRatePct=10 (raw 88 pts, weight 0.30 of the CF subscore).
         val r = DealScoringEngine.evaluate(DealInput(capRatePct = 10.0))
         val cf = subscore(r, ScoringWeights.CASH_FLOW)
 
@@ -367,9 +388,10 @@ class DealScoringEngineTest {
         // attenuated = 50 + (88 - 50) x 0.30 = 61.4 -- not the optimistic 88.
         assertEquals(61.4, cf.score, 0.01)
 
-        // The composite only moves by the CF's configured weight x attenuation.
-        // 0.3x61.4 + (0.25+0.15+0.2+0.1)x50 = 53.42
-        assertEquals(53.42, r.score, 0.01)
+        // The default quality composite is 0.35 Cash Flow, 0.25 Equity, 0.20 Market,
+        // 0.20 Risk; Distress and Data Confidence do not alter deal quality by default.
+        // 0.35x61.4 + 0.65x50 = 53.99
+        assertEquals(53.99, r.score, 0.01)
 
         assertTrue(r.warnings.any { it.contains(ScoringWeights.CASH_FLOW) || it.contains("Cash Flow Score") })
         assertTrue(r.missingInputs.contains("dscr"))
@@ -683,7 +705,7 @@ class DealScoringEngineTest {
         assertEquals(100.0, a.score, 0.01)
         assertEquals("A", a.grade)
 
-        // B (70..84): the solid fixture lands ~79.8.
+        // B (70..84): the solid fixture lands about 82.6 under the default quality weights.
         assertEquals("B", DealScoringEngine.evaluate(solidDeal()).grade)
 
         // C (55..69): capRate 5 (46.5) + CoC 8 (58) + CF $500 (78) + DSCR 1.2 (59.33)
@@ -739,4 +761,192 @@ class DealScoringEngineTest {
         // FinancialEngine is internally consistent => no consistency warnings.
         assertFalse(r.warnings.any { it.contains("Inconsistent", ignoreCase = true) })
     }
+
+    @Test
+    fun arvSpreadRequiresExplicitRenovationCostAndNeverAssumesZero() {
+        val base = DealInput(purchasePrice = 200_000.0, afterRepairValue = 300_000.0)
+        val missing = DealScoringEngine.evaluate(base)
+        val missingComponent = component(missing, ScoringWeights.EQUITY, "arvSpreadPct")
+
+        assertFalse("Missing rehab cost must not be scored as \$0", missingComponent.covered)
+        assertEquals(null, missingComponent.value)
+        assertTrue(missingComponent.inputFields.contains("renovationCost"))
+        assertTrue(missingComponent.rationale.contains("not assumed"))
+        assertTrue(missing.missingInputs.contains("renovationCost"))
+
+        val explicitZero = DealScoringEngine.evaluate(base.copy(renovationCost = 0.0))
+        assertTrue(component(explicitZero, ScoringWeights.EQUITY, "arvSpreadPct").covered)
+    }
+
+    @Test
+    fun distressOpportunityDoesNotRaiseDealQualityScoreByDefault() {
+        val qualityFacts = DealInput(
+            capRatePct = 7.0,
+            cashOnCashPct = 7.0,
+            monthlyCashFlow = 350.0,
+            dscr = 1.3
+        )
+        val clean = DealScoringEngine.evaluate(qualityFacts)
+        val distressed = DealScoringEngine.evaluate(
+            qualityFacts.copy(
+                sourceType = "FORECLOSURE",
+                listingDaysOnMarket = 200,
+                cumulativePriceDropPct = 20.0,
+                taxDelinquent = true
+            )
+        )
+
+        assertEquals("Opportunity signals are not quality by default", clean.score, distressed.score, 0.0)
+        assertFalse(subscore(distressed, ScoringWeights.DISTRESS).participatesInComposite)
+        assertTrue(subscore(distressed, ScoringWeights.DISTRESS).score > 90.0)
+    }
+
+    @Test
+    fun configurableBandOverridesHaveExactStructuredRuleTrace() {
+        val config = ScoringConfig(
+            numericBandOverrides = mapOf(
+                "capRatePct" to listOf(ScoreBandPoint(0.0, 0.0), ScoreBandPoint(10.0, 100.0))
+            )
+        )
+        val result = DealScoringEngine.evaluate(DealInput(capRatePct = 5.0), config = config)
+        val cap = component(result, ScoringWeights.CASH_FLOW, "capRatePct")
+        val trace = cap.ruleTrace!!
+
+        assertEquals(50.0, cap.score!!, 0.001)
+        assertEquals("capRatePct.piecewiseLinear", trace.ruleId)
+        assertEquals(listOf("capRatePct"), cap.inputFields)
+        assertEquals(listOf("capRatePct"), trace.inputFields)
+        assertEquals(0.0, trace.lowerThreshold!!, 0.0)
+        assertEquals(0.0, trace.lowerScore!!, 0.0)
+        assertEquals(10.0, trace.upperThreshold!!, 0.0)
+        assertEquals(100.0, trace.upperScore!!, 0.0)
+        assertEquals(0.5, trace.interpolationFraction!!, 0.001)
+        assertEquals("deal-scoring-v2", result.scoringModelVersion)
+        assertEquals(2026, result.asOfYear)
+        assertEquals(result.dataConfidence, result.confidenceBreakdown!!.finalScore, 0.0)
+    }
+
+    @Test
+    fun weightNormalizationIsStableForLargestFiniteWeights() {
+        val hugeWeights = ScoringWeights(
+            cashFlow = Double.MAX_VALUE,
+            equity = Double.MAX_VALUE,
+            market = 0.0,
+            riskSafety = 0.0,
+            distressOpportunity = 0.0,
+            components = mapOf(
+                ScoringWeights.CASH_FLOW to mapOf(
+                    "capRatePct" to Double.MAX_VALUE,
+                    "cashOnCashPct" to Double.MAX_VALUE,
+                    "monthlyCashFlow" to 0.0,
+                    "dscr" to 0.0
+                )
+            )
+        )
+        val result = DealScoringEngine.evaluate(solidDeal(), weights = hugeWeights)
+
+        assertTrue(result.score.isFinite())
+        assertEquals(1.0, result.weights.normalizedComposite.values.sum(), 0.000001)
+        assertEquals(0.5, result.weights.normalizedComposite[ScoringWeights.CASH_FLOW]!!, 0.000001)
+        assertEquals(0.5, result.weights.normalizedComposite[ScoringWeights.EQUITY]!!, 0.000001)
+        assertEquals(0.5, component(result, ScoringWeights.CASH_FLOW, "capRatePct").weight, 0.000001)
+        assertEquals(0.5, component(result, ScoringWeights.CASH_FLOW, "cashOnCashPct").weight, 0.000001)
+    }
+
+    @Test
+    fun invalidAndConflictingInputsAreMissingAndReduceDataConfidence() {
+        val result = DealScoringEngine.evaluate(
+            solidDeal().copy(
+                areaDaysOnMarket = -5,
+                listingDaysOnMarket = -1,
+                interestRatePct = -2.0,
+                compsCount = -1,
+                rentConfidenceScore = 120.0,
+                rentEstimateLow = 3_000.0,
+                rentEstimateHigh = 2_000.0
+            )
+        )
+
+        assertFalse(component(result, ScoringWeights.MARKET, "areaDaysOnMarket").covered)
+        assertFalse(component(result, ScoringWeights.DISTRESS, "listingDaysOnMarket").covered)
+        assertFalse(component(result, ScoringWeights.RISK_SAFETY, "interestRatePct").covered)
+        assertTrue(result.warnings.any { it.contains("Invalid input areaDaysOnMarket") })
+        assertTrue(result.warnings.any { it.contains("Conflicting inputs rentEstimateLow") })
+        assertTrue(result.warnings.any { it.contains("rentConfidenceScore") })
+        assertTrue(result.dataConfidence < 100.0)
+        assertEquals(result.dataConfidence, result.confidenceBreakdown!!.finalScore, 0.0)
+        assertTrue(result.missingInputs.contains("areaDaysOnMarket"))
+        assertTrue(result.missingInputs.contains("listingDaysOnMarket"))
+    }
+
+    @Test
+    fun everyComponentCarriesAnInputAndRuleTrace() {
+        val result = DealScoringEngine.evaluate(solidDeal())
+        for (subscore in result.subscores) {
+            for (component in subscore.components) {
+                assertTrue("${subscore.id}/${component.componentId} has no input field trace", component.inputFields.isNotEmpty() || subscore.id == ScoringWeights.DATA_CONFIDENCE)
+                assertNotNull("${subscore.id}/${component.componentId} has no rule trace", component.ruleTrace)
+                assertTrue(component.ruleTrace!!.ruleId.isNotBlank())
+            }
+        }
+    }
+
+
+    @Test
+    fun confidenceCalibrationAndPenaltyRulesAreConfigurableAndTraced() {
+        val config = ScoringConfig(
+            rentConfidenceAdjustmentRangePoints = 40.0,
+            compsConfidenceNoCompsWithEstimatePoints = -15.0,
+            compsConfidenceLimitedPoints = 2.0,
+            compsConfidenceStrongPoints = 10.0,
+            compsConfidenceLimitedThreshold = 2,
+            compsConfidenceStrongThreshold = 5,
+            consistencyPenaltyPerIssue = 3.0
+        )
+        val result = DealScoringEngine.evaluate(
+            solidDeal().copy(rentConfidenceScore = 100.0, compsCount = 0, yearBuilt = 2030),
+            config = config
+        )
+        val confidence = result.confidenceBreakdown!!
+        val details = subscore(result, ScoringWeights.DATA_CONFIDENCE).components
+
+        assertEquals(20.0, confidence.rentConfidenceAdjustment, 0.001)
+        assertEquals(-15.0, confidence.comparableSalesAdjustment, 0.001)
+        assertEquals(3.0, confidence.consistencyPenalty, 0.001)
+        assertTrue(details.first { it.componentId == "rentConfidenceScore" }.ruleTrace!!.matchKey!!.contains("40"))
+        assertTrue(details.first { it.componentId == "compsCount" }.ruleTrace!!.matchKey!!.contains(">= 5"))
+        assertTrue(details.first { it.componentId == "consistencyPenalty" }.ruleTrace!!.matchKey!!.contains("3 points"))
+    }
+
+
+    @Test
+    fun specialCaseScoresAndReasonPolarityThresholdsAreConfigurable() {
+        val config = ScoringConfig(
+            allCashCashFlowScore = 88.0,
+            allCashRiskSafetyScore = 77.0,
+            taxDelinquentScore = 99.0,
+            noTaxDelinquentScore = 10.0,
+            positiveReasonThreshold = 80.0,
+            negativeReasonThreshold = 30.0
+        )
+        val result = DealScoringEngine.evaluate(
+            DealInput(dscr = 999.0, taxDelinquent = true),
+            config = config
+        )
+
+        val cashAllCash = component(result, ScoringWeights.CASH_FLOW, "dscr")
+        val riskAllCash = component(result, ScoringWeights.RISK_SAFETY, "dscr")
+        val delinquency = component(result, ScoringWeights.DISTRESS, "taxDelinquent")
+        assertEquals(88.0, cashAllCash.score!!, 0.0)
+        assertEquals(88.0, cashAllCash.ruleTrace!!.lowerScore!!, 0.0)
+        assertEquals(77.0, riskAllCash.score!!, 0.0)
+        assertEquals(99.0, delinquency.score!!, 0.0)
+        assertTrue(subscore(result, ScoringWeights.CASH_FLOW).reasons.any {
+            it.message.contains("All-cash") && it.polarity == ReasonPolarity.POSITIVE
+        })
+        assertTrue(subscore(result, ScoringWeights.RISK_SAFETY).reasons.any {
+            it.message.contains("All-cash") && it.polarity == ReasonPolarity.NEUTRAL
+        })
+    }
+
 }

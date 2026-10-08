@@ -868,6 +868,9 @@ class AutomationEngine(
             val analysis = cachedAnalysis ?: financialRepository.runAnalysis(job.propertyId)
             val evaluation = QualificationEngine.evaluate(property, analysis, rules)
             if (evaluation.isQualified) {
+                val suggestedOfferLabel = evaluation.suggestedOfferPrice
+                    ?.let { String.format(java.util.Locale.US, "%,.0f", it) }
+                    ?: "unavailable"
                 propertyDao.setDealStatus(job.propertyId, true, evaluation.score)
                 val transitioned = JobStateMachine.transition(qualifying, JobState.QUALIFIED, clock.now(), buildRetryPolicy(rules), random = random)
                 val persisted = persistTransition(qualifying, transitioned.job, runId, correlationId)
@@ -875,7 +878,8 @@ class AutomationEngine(
                 if (persisted != null) automationDao.registerSuccess("Deal qualified.", clock.now())
                 audit.success(
                     "QUALIFICATION_RESULT",
-                    "Deal criteria passed.",
+                    "[${job.jobId}] DEAL QUALIFIED: ${job.propertyAddress} (score ${evaluation.score}/100, " +
+                        "suggested $suggestedOfferLabel)"
                     runId = runId,
                     jobId = job.jobId,
                     correlationId = correlationId
@@ -991,13 +995,31 @@ class AutomationEngine(
             val evaluation = cachedAnalysis?.let { analysis ->
                 propertyDao.getPropertyById(job.propertyId)?.let { QualificationEngine.evaluate(it, analysis, rules) }
             } ?: deriveEvaluation(job.propertyId, rules)
+            val offerPrice = evaluation?.suggestedOfferPrice?.takeIf { it.isFinite() && it > 0.0 }
+            if (offerPrice == null) {
+                val reason = "Offer generation blocked: no finite positive suggested offer price is available"
+                val blocked = JobStateMachine.transition(
+                    generating,
+                    JobState.BLOCKED,
+                    clock.now(),
+                    buildRetryPolicy(rules),
+                    error = reason,
+                    blockageReason = reason,
+                    failureKind = FailureKind.BLOCKED,
+                    random = random
+                )
+                val persisted = persistTransition(generating, blocked.job, runId, correlationId)
+                audit.warn("OFFER_BLOCKED", "[${job.jobId}] $reason", runId, job.jobId, correlationId)
+                logTransition(generating, blocked.job, persisted, "missing deterministic offer price", runId, correlationId)
+                return StepResult(persisted ?: generating, advanced = persisted != null, outcome = JobOutcome.skipped(blocked = 1))
+            }
 
             val decision = ledger.begin(AutomationEffect.GENERATE_OFFER, job.propertyId, job.jobId, runId)
             val offer = if (decision.allowed || decision.alreadySucceeded) {
                 val generated = offerRepository.generateDraftOffer(
                     context = context,
                     propertyId = job.propertyId,
-                    customPrice = evaluation?.suggestedOfferPrice,
+                    customPrice = offerPrice,
                     suggestedRecipientEmail = job.recipientEmail
                 )
                 ledger.markSucceeded(AutomationEffect.GENERATE_OFFER, job.propertyId, job.jobId, runId, generated.id)
