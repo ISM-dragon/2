@@ -92,7 +92,7 @@ class DealRoomViewModel(application: Application) : AndroidViewModel(application
                     bathrooms = prop.bathrooms,
                     squareFeet = prop.squareFeet,
                     yearBuilt = prop.yearBuilt,
-                    estimatedRent = intel.financials?.monthlyRent ?: (prop.price * 0.0078)
+                    estimatedRent = intel.financials?.monthlyRentEstimate ?: (prop.price * 0.0078)
                 )
 
                 val dynFin = DeterministicFinancialEngine.calculate(
@@ -151,7 +151,7 @@ class DealRoomViewModel(application: Application) : AndroidViewModel(application
             bathrooms = prop.bathrooms,
             squareFeet = prop.squareFeet,
             yearBuilt = prop.yearBuilt,
-            estimatedRent = _uiState.value.financials?.monthlyRent ?: (prop.price * 0.0078)
+            estimatedRent = _uiState.value.financials?.monthlyRentEstimate ?: (prop.price * 0.0078)
         )
         val dyn = DeterministicFinancialEngine.calculate(
             canonical,

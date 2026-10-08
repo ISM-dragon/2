@@ -27,6 +27,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.ui.components.StatusBadge
 import com.example.ui.components.TrendAppreciationCanvas
+import com.example.ui.components.CashFlowTrendCanvas
 import com.example.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -366,6 +367,11 @@ fun PropertyDetailScreen(
                 // 5-Year Equity Projection Chart
                 item {
                     TrendAppreciationCanvas(purchasePrice = property.price)
+                }
+
+                // 5-Year Cumulative Cash Flow Trend Chart
+                item {
+                    CashFlowTrendCanvas(monthlyCashFlow = state.financialAnalysis?.monthlyCashFlow ?: 450.0)
                 }
 
                 // Description

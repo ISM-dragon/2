@@ -126,6 +126,9 @@ class PropertyRepository(
     fun getComps(propertyId: String): Flow<List<ComparablePropertyEntity>> =
         propertyDao.getCompsForProperty(propertyId)
 
+    suspend fun getCompsListForProperty(propertyId: String): List<PropertyCompEntity> =
+        propertyDao.getCompsListForProperty(propertyId)
+
     // ── Ingestion ───────────────────────────────────────────────────────────────────────────────
 
     /** Seeds sources, the demo dataset (through the dedup pipeline) and canonical identities. */

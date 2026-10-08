@@ -166,7 +166,7 @@ interface PropertyDao {
     suspend fun getCompsListForProperty(propertyId: String): List<PropertyCompEntity>
 
     @Query(
-        "SELECT * FROM property_comps WHERE targetPropertyId = :propertyId AND compAddress = :compAddress " +
+        "SELECT * FROM property_comps WHERE targetPropertyId = :targetPropertyId AND compAddress = :compAddress " +
             "AND saleDate = :saleDate LIMIT 1"
     )
     suspend fun findComp(targetPropertyId: String, compAddress: String, saleDate: String): PropertyCompEntity?

@@ -146,9 +146,11 @@ class RealEstateAiApp : Application() {
         gmailService = GmailService(configRepository)
 
         intelligenceRepository = IntelligenceRepository(
-            intelligenceDao = database.intelligenceDao(),
+            propertyUrlImporter = propertyUrlImporter,
             propertyDao = database.propertyDao(),
-            geminiManager = geminiManager
+            sourceDao = database.propertySourceDao(),
+            enrichmentDao = database.propertyEnrichmentDao(),
+            financialDao = database.propertyFinancialDao()
         )
 
         offerRepository = OfferRepository(

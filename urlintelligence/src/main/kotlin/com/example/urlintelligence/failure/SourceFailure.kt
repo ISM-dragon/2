@@ -139,6 +139,54 @@ sealed class SourceFailure {
         override val code: String = "CONFLICT"
     }
 
+    data class SchemaDrift(
+        val parserId: String,
+        val parserVersion: String,
+        val level: String,
+        override val detail: String,
+        val missingProbes: List<String> = emptyList()
+    ) : SourceFailure() {
+        override val category: FailureCategory = FailureCategory.PERMANENT
+        override val retryable: Boolean = false
+        override val code: String = "SCHEMA_DRIFT"
+    }
+
+    data class EmptyResponse(
+        override val detail: String,
+        val statusCode: Int = 200
+    ) : SourceFailure() {
+        override val category: FailureCategory = FailureCategory.PERMANENT
+        override val retryable: Boolean = false
+        override val code: String = "EMPTY_RESPONSE"
+    }
+
+    data class UnsupportedContentType(
+        val contentType: String,
+        override val detail: String
+    ) : SourceFailure() {
+        override val category: FailureCategory = FailureCategory.PERMANENT
+        override val retryable: Boolean = false
+        override val code: String = "UNSUPPORTED_CONTENT_TYPE"
+    }
+
+    data class TooManyRedirects(
+        val redirectCount: Int,
+        val maxRedirects: Int,
+        override val detail: String = "Redirect count $redirectCount exceeds maximum $maxRedirects"
+    ) : SourceFailure() {
+        override val category: FailureCategory = FailureCategory.PERMANENT
+        override val retryable: Boolean = false
+        override val code: String = "TOO_MANY_REDIRECTS"
+    }
+
+    data class RedirectNotAllowed(
+        override val detail: String
+    ) : SourceFailure() {
+        override val category: FailureCategory = FailureCategory.POLICY
+        override val retryable: Boolean = false
+        override val code: String = "REDIRECT_NOT_ALLOWED"
+    }
+
     data class Unknown(override val detail: String, val causeType: String? = null) : SourceFailure() {
         override val category: FailureCategory = FailureCategory.UNCLASSIFIED
         override val retryable: Boolean = false
@@ -155,7 +203,9 @@ enum class BlockReason {
     CAPTCHA,
     BOT_WALL,
     GEO_RESTRICTED,
-    LOGIN_REQUIRED
+    LOGIN_REQUIRED,
+    CONSENT_WALL,
+    NOINDEX_DIRECTIVE
 }
 
 /** Maps transport-level signals into the typed taxonomy. */
@@ -186,12 +236,29 @@ object SourceFailureClassifier {
         if (statusCode != 200) return null
         if (body.length > 2_000_000) return null
         val lowered = body.lowercase()
+        val loginSignals = listOf("sign in to continue", "please log in", "sign in required")
+        if (loginSignals.any { lowered.contains(it) }) {
+            return SourceFailure.AuthRequired("login wall detected")
+        }
+        val consentSignals = listOf("consent to the use of cookies", "privacy preference", "before you continue")
+        if (consentSignals.any { lowered.contains(it) }) {
+            return SourceFailure.Blocked(BlockReason.CONSENT_WALL, "consent wall detected")
+        }
         val signals = listOf(
             "are you a human", "verify you are human", "captcha", "recaptcha",
             "px-captcha", "access denied", "request blocked", "unusual traffic"
         )
         return if (signals.any { lowered.contains(it) }) {
             SourceFailure.Blocked(BlockReason.CAPTCHA, "anti-bot page served with HTTP 200")
+        } else null
+    }
+
+    fun detectMetaNoindex(headers: Map<String, String>): SourceFailure? {
+        val tag = headers.entries.firstOrNull { it.key.equals("x-robots-tag", ignoreCase = true) }?.value
+            ?: return null
+        val lower = tag.lowercase()
+        return if (lower.contains("noindex")) {
+            SourceFailure.Blocked(BlockReason.NOINDEX_DIRECTIVE, "source requested noindex via X-Robots-Tag")
         } else null
     }
 

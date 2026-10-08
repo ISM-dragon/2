@@ -18,30 +18,8 @@ data class IdempotencyKey(val value: String) {
         const val DEFAULT_NAMESPACE: String = "property-url"
 
         fun forUrl(canonicalUrl: String, namespace: String = DEFAULT_NAMESPACE): IdempotencyKey {
-            return IdempotencyKey("$namespace:" + sha256(dedupForm(canonicalUrl)))
-        }
-
-        /**
-         * Form used for identity hashing: lowercased, trimmed, and with a leading `www.`
-         * removed, so a share link that spells the host differently is one import. This is
-         * deliberately *not* used to rewrite the URL we fetch — the canonical URL keeps the
-         * host the provider serves.
-         */
-        internal fun dedupForm(url: String): String {
-            val trimmed = url.trim().lowercase()
-            val schemeEnd = trimmed.indexOf("://")
-            if (schemeEnd < 0) return trimmed.removePrefix("www.")
-            val hostStart = schemeEnd + 3
-            val hostEnd = trimmed.indexOfFirst(hostStart) { it == '/' || it == '?' || it == '#' }
-                .let { if (it < 0) trimmed.length else it }
-            val host = trimmed.substring(hostStart, hostEnd)
-            if (!host.startsWith("www.")) return trimmed
-            return trimmed.take(hostStart) + host.removePrefix("www.") + trimmed.substring(hostEnd)
-        }
-
-        private fun CharSequence.indexOfFirst(from: Int, predicate: (Char) -> Boolean): Int {
-            for (index in from until length) if (predicate(this[index])) return index
-            return -1
+            val normalized = canonicalUrl.trim().lowercase()
+            return IdempotencyKey("$namespace:" + sha256(normalized))
         }
 
         /**
@@ -58,7 +36,7 @@ data class IdempotencyKey(val value: String) {
         ): String {
             val id = sourcePropertyId?.trim().orEmpty()
             return if (id.isBlank()) {
-                "${sourceId.lowercase()}:url-hash:" + sha256(dedupForm(canonicalUrl)).take(16)
+                "${sourceId.lowercase()}:url-hash:" + sha256(canonicalUrl.trim().lowercase()).take(16)
             } else {
                 "${sourceId.lowercase()}:${id.lowercase()}"
             }
@@ -122,19 +100,11 @@ class InMemoryIdempotencyStore<T>(
 ) : IdempotencyStore<T> {
 
     private val lock = Any()
-
-    /**
-     * Entry plus the moment the *store* wrote it. Expiry is measured from that (not from the
-     * timestamps the caller supplies), so a record can never be purged in the same breath as it
-     * is written — which is exactly what would silently break reservation exclusivity.
-     */
-    private class Stored<T>(val record: IdempotencyRecord<T>, val storedAtEpochMillis: Long)
-
-    private val records: LinkedHashMap<String, Stored<T>> = LinkedHashMap()
+    private val records: LinkedHashMap<String, IdempotencyRecord<T>> = LinkedHashMap()
 
     override fun get(key: IdempotencyKey): IdempotencyRecord<T>? = synchronized(lock) {
         purgeExpired()
-        records[key.value]?.record
+        records[key.value]
     }
 
     override fun putIfAbsent(key: IdempotencyKey, record: IdempotencyRecord<T>): Boolean =
@@ -142,44 +112,39 @@ class InMemoryIdempotencyStore<T>(
             purgeExpired()
             if (records.containsKey(key.value)) false
             else {
-                records[key.value] = Stored(record, clock.now())
+                records[key.value] = record
                 true
             }
         }
 
     override fun complete(key: IdempotencyKey, value: T) = synchronized(lock) {
-        val existing = records[key.value]?.record
+        val existing = records[key.value]
         val now = clock.now()
-        records[key.value] = Stored(
-            IdempotencyRecord(
-                key = key,
-                state = IdempotencyState.COMPLETED,
-                createdAtEpochMillis = existing?.createdAtEpochMillis ?: now,
-                updatedAtEpochMillis = now,
-                value = value
-            ),
-            now
+        records[key.value] = IdempotencyRecord(
+            key = key,
+            state = IdempotencyState.COMPLETED,
+            createdAtEpochMillis = existing?.createdAtEpochMillis ?: now,
+            updatedAtEpochMillis = now,
+            value = value
         )
     }
 
     override fun fail(key: IdempotencyKey, failure: SourceFailure) = synchronized(lock) {
-        val existing = records[key.value]?.record
+        val existing = records[key.value]
         val now = clock.now()
-        records[key.value] = Stored(
-            IdempotencyRecord(
-                key = key,
-                state = IdempotencyState.FAILED,
-                createdAtEpochMillis = existing?.createdAtEpochMillis ?: now,
-                updatedAtEpochMillis = now,
-                failure = failure
-            ),
-            now
+        records[key.value] = IdempotencyRecord(
+            key = key,
+            state = IdempotencyState.FAILED,
+            createdAtEpochMillis = existing?.createdAtEpochMillis ?: now,
+            updatedAtEpochMillis = now,
+            failure = failure
         )
     }
 
-    override fun release(key: IdempotencyKey): Unit = synchronized(lock) {
-        records.remove(key.value)
-        Unit
+    override fun release(key: IdempotencyKey) {
+        synchronized(lock) {
+            records.remove(key.value)
+        }
     }
 
     override fun size(): Int = synchronized(lock) {
@@ -193,7 +158,7 @@ class InMemoryIdempotencyStore<T>(
         val iterator = records.entries.iterator()
         while (iterator.hasNext()) {
             val entry = iterator.next()
-            if (now - entry.value.storedAtEpochMillis > ttlMillis) iterator.remove()
+            if (now - entry.value.updatedAtEpochMillis > ttlMillis) iterator.remove()
         }
     }
 }

@@ -11,6 +11,7 @@ import com.example.data.local.entity.OfferEmailSendStatus
 import com.example.data.local.entity.OfferDocumentEntity
 import com.example.data.local.entity.OfferEntity
 import com.example.domain.ai.GeminiManager
+import com.example.domain.automation.OfferGateway
 import com.example.domain.gmail.EmailRetryPolicy
 import com.example.domain.gmail.GmailFailureKind
 import com.example.domain.gmail.GmailMimeBuilder
@@ -55,8 +56,30 @@ class OfferRepository(
     private val geminiManager: GeminiManager,
     private val gmailService: GmailSender,
     private val clock: () -> Long = System::currentTimeMillis
-) {
+) : OfferGateway {
     private val offerGenerationLocks = ConcurrentHashMap<String, Mutex>()
+
+    override suspend fun findOffer(offerId: String): OfferEntity? = getOfferById(offerId)
+
+    override suspend fun findOfferForProperty(propertyId: String): OfferEntity? = getOfferForProperty(propertyId)
+
+    override suspend fun validateForSend(context: Context, offerId: String): PreSendValidationResult =
+        validateOfferPreSend(context, offerId)
+
+    override suspend fun generateDraftOffer(
+        context: Context,
+        propertyId: String,
+        customPrice: Double?,
+        suggestedRecipientEmail: String?
+    ): OfferEntity = generateOffer(
+        context = context,
+        propertyId = propertyId,
+        customPrice = customPrice,
+        recipientEmail = suggestedRecipientEmail ?: "agent@realestateteam.com"
+    )
+
+    override suspend fun transmitOffer(context: Context, offerId: String): Boolean =
+        sendOffer(context, offerId)
 
     val allOffers: Flow<List<OfferEntity>> = offerDao.getAllOffers()
     val generatedCount: Flow<Int> = offerDao.getGeneratedOffersCountFlow()

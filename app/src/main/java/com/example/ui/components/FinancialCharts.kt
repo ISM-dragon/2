@@ -206,3 +206,86 @@ fun TrendAppreciationCanvas(
         }
     }
 }
+
+@Composable
+fun CashFlowTrendCanvas(
+    monthlyCashFlow: Double,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier) {
+        Text(
+            text = "5-Year Cumulative Cash Flow Projection",
+            style = MaterialTheme.typography.labelMedium,
+            color = Slate400,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(110.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Slate800.copy(alpha = 0.5f))
+                .padding(8.dp)
+        ) {
+            val w = size.width
+            val h = size.height
+
+            val annualFlow = monthlyCashFlow * 12.0
+            val points = (0..5).map { year ->
+                annualFlow * year.toDouble()
+            }
+            val minVal = 0.0
+            val maxVal = (points.last() * 1.15).coerceAtLeast(1000.0)
+
+            val path = Path()
+            val fillPath = Path()
+
+            points.forEachIndexed { i, v ->
+                val x = (i.toFloat() / (points.size - 1)) * w
+                val normalizedY = ((v - minVal) / (maxVal - minVal)).toFloat()
+                val y = h - (normalizedY * h)
+
+                if (i == 0) {
+                    path.moveTo(x, y)
+                    fillPath.moveTo(x, h)
+                    fillPath.lineTo(x, y)
+                } else {
+                    path.lineTo(x, y)
+                    fillPath.lineTo(x, y)
+                }
+
+                drawCircle(
+                    color = EmeraldGain,
+                    radius = 3.dp.toPx(),
+                    center = Offset(x, y)
+                )
+            }
+
+            fillPath.lineTo(w, h)
+            fillPath.close()
+
+            drawPath(
+                path = fillPath,
+                color = EmeraldGain.copy(alpha = 0.15f)
+            )
+
+            drawPath(
+                path = path,
+                color = EmeraldGain,
+                style = Stroke(width = 2.5f.dp.toPx())
+            )
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Year 0: $0", fontSize = 10.sp, color = Slate400)
+            val yr5Total = monthlyCashFlow * 12.0 * 5.0
+            Text("Year 5 Cumulative: $${String.format("%,.0f", yr5Total)}", fontSize = 10.sp, color = EmeraldGain, fontWeight = FontWeight.Bold)
+        }
+    }
+}

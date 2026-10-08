@@ -7,38 +7,20 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface IntelligenceDao {
 
-    // Import Jobs
+    @Query("SELECT * FROM property_source_links WHERE sourceUrl = :url LIMIT 1")
+    suspend fun findSourceByUrl(url: String): PropertySourceLinkEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateJob(job: PropertyImportJobEntity)
 
-    @Query("SELECT * FROM property_import_jobs WHERE jobId = :jobId LIMIT 1")
-    suspend fun getJobById(jobId: String): PropertyImportJobEntity?
-
-    @Query("SELECT * FROM property_import_jobs WHERE jobId = :jobId LIMIT 1")
-    fun getJobFlow(jobId: String): Flow<PropertyImportJobEntity?>
-
-    @Query("SELECT * FROM property_import_jobs WHERE url = :url ORDER BY createdAt DESC LIMIT 1")
-    suspend fun getLatestJobForUrl(url: String): PropertyImportJobEntity?
-
-    @Query("SELECT * FROM property_import_jobs ORDER BY createdAt DESC")
-    fun getAllJobsFlow(): Flow<List<PropertyImportJobEntity>>
-
-    // Property Sources
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertSourceLink(sourceLink: PropertySourceLinkEntity)
+    suspend fun insertOrUpdateSourceHealth(health: SourceHealthEntity)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertSourceLinks(sourceLinks: List<PropertySourceLinkEntity>)
+    @Query("SELECT * FROM source_health WHERE source = :source LIMIT 1")
+    suspend fun getSourceHealth(source: String): SourceHealthEntity?
 
-    @Query("SELECT * FROM property_sources WHERE propertyId = :propertyId")
+    @Query("SELECT * FROM property_source_links WHERE propertyId = :propertyId")
     fun getSourcesForProperty(propertyId: String): Flow<List<PropertySourceLinkEntity>>
-
-    @Query("SELECT * FROM property_sources WHERE sourceUrl = :url LIMIT 1")
-    suspend fun findSourceByUrl(url: String): PropertySourceLinkEntity?
-
-    // Provenance
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertProvenanceRecords(records: List<PropertyProvenanceEntity>)
 
     @Query("SELECT * FROM property_provenance WHERE propertyId = :propertyId")
     fun getProvenanceForProperty(propertyId: String): Flow<List<PropertyProvenanceEntity>>
@@ -46,26 +28,14 @@ interface IntelligenceDao {
     @Query("SELECT * FROM property_provenance WHERE propertyId = :propertyId")
     suspend fun getProvenanceList(propertyId: String): List<PropertyProvenanceEntity>
 
-    // Comps
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertComps(comps: List<PropertyCompEntity>)
-
     @Query("SELECT * FROM property_comps WHERE targetPropertyId = :propertyId")
-    fun getCompsForProperty(propertyId: String): Flow<List<PropertyCompEntity>>
+    fun getCompsForProperty(propertyId: String): Flow<List<ComparablePropertyEntity>>
 
-    // Enrichment
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertEnrichment(enrichment: PropertyEnrichmentEntity)
-
-    @Query("SELECT * FROM property_enrichment WHERE propertyId = :propertyId LIMIT 1")
+    @Query("SELECT * FROM property_enrichments WHERE propertyId = :propertyId LIMIT 1")
     fun getEnrichmentFlow(propertyId: String): Flow<PropertyEnrichmentEntity?>
 
-    @Query("SELECT * FROM property_enrichment WHERE propertyId = :propertyId LIMIT 1")
+    @Query("SELECT * FROM property_enrichments WHERE propertyId = :propertyId LIMIT 1")
     suspend fun getEnrichment(propertyId: String): PropertyEnrichmentEntity?
-
-    // Financials
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertFinancials(financial: PropertyFinancialEntity)
 
     @Query("SELECT * FROM property_financials WHERE propertyId = :propertyId LIMIT 1")
     fun getFinancialsFlow(propertyId: String): Flow<PropertyFinancialEntity?>
@@ -73,48 +43,49 @@ interface IntelligenceDao {
     @Query("SELECT * FROM property_financials WHERE propertyId = :propertyId LIMIT 1")
     suspend fun getFinancials(propertyId: String): PropertyFinancialEntity?
 
-    // AI Analysis
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertAiAnalysis(aiAnalysis: PropertyAiAnalysisEntity)
-
     @Query("SELECT * FROM property_ai_analysis WHERE propertyId = :propertyId LIMIT 1")
     fun getAiAnalysisFlow(propertyId: String): Flow<PropertyAiAnalysisEntity?>
 
     @Query("SELECT * FROM property_ai_analysis WHERE propertyId = :propertyId LIMIT 1")
     suspend fun getAiAnalysis(propertyId: String): PropertyAiAnalysisEntity?
 
-    // Source Health
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertOrUpdateSourceHealth(health: SourceHealthEntity)
-
-    @Query("SELECT * FROM source_health WHERE source = :source LIMIT 1")
-    suspend fun getSourceHealth(source: String): SourceHealthEntity?
-
     @Query("SELECT * FROM source_health")
     fun getAllSourceHealthFlow(): Flow<List<SourceHealthEntity>>
 
-    @Query("SELECT * FROM source_health")
-    suspend fun getAllSourceHealthList(): List<SourceHealthEntity>
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSourceLink(link: PropertySourceLinkEntity)
 
-    // Transaction for Complete Canonical Property Ingestion
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertProvenanceList(list: List<PropertyProvenanceEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertEnrichment(enrichment: PropertyEnrichmentEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertComps(comps: List<ComparablePropertyEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertFinancials(financials: PropertyFinancialEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAiAnalysis(ai: PropertyAiAnalysisEntity)
+
     @Transaction
     suspend fun persistCompletePropertyIngestion(
         property: PropertyEntity,
         images: List<PropertyImageEntity>,
-        sourceLink: PropertySourceLinkEntity,
+        sourceLink: PropertySourceLinkEntity?,
         provenanceRecords: List<PropertyProvenanceEntity>,
-        enrichment: PropertyEnrichmentEntity,
-        comps: List<PropertyCompEntity>,
-        financials: PropertyFinancialEntity,
+        enrichment: PropertyEnrichmentEntity?,
+        comps: List<ComparablePropertyEntity>,
+        financials: PropertyFinancialEntity?,
         aiAnalysis: PropertyAiAnalysisEntity?
     ) {
-        insertSourceLink(sourceLink)
-        insertProvenanceRecords(provenanceRecords)
-        insertEnrichment(enrichment)
-        insertComps(comps)
-        insertFinancials(financials)
-        if (aiAnalysis != null) {
-            insertAiAnalysis(aiAnalysis)
-        }
+        if (sourceLink != null) insertSourceLink(sourceLink)
+        if (provenanceRecords.isNotEmpty()) insertProvenanceList(provenanceRecords)
+        if (enrichment != null) insertEnrichment(enrichment)
+        if (comps.isNotEmpty()) insertComps(comps)
+        if (financials != null) insertFinancials(financials)
+        if (aiAnalysis != null) insertAiAnalysis(aiAnalysis)
     }
 }

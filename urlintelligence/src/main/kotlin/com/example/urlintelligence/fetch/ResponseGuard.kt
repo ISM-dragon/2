@@ -84,6 +84,9 @@ class ResponseGuard(
         val softBlock = SourceFailureClassifierBridge.detectSoftBlock(response.statusCode, body)
         if (softBlock != null) return ResponseGuardResult.Rejected(softBlock)
 
+        val noindex = SourceFailureClassifierBridge.detectMetaNoindex(response.headers)
+        if (noindex != null) return ResponseGuardResult.Rejected(noindex)
+
         if (response.redirectCount > limits.maxRedirects) {
             return ResponseGuardResult.Rejected(
                 SourceFailure.TooManyRedirects(response.redirectCount, limits.maxRedirects)
@@ -154,4 +157,7 @@ class ResponseGuard(
 internal object SourceFailureClassifierBridge {
     fun detectSoftBlock(statusCode: Int, body: String): SourceFailure? =
         com.example.urlintelligence.failure.SourceFailureClassifier.detectSoftBlock(statusCode, body)
+
+    fun detectMetaNoindex(headers: Map<String, String>): SourceFailure? =
+        com.example.urlintelligence.failure.SourceFailureClassifier.detectMetaNoindex(headers)
 }

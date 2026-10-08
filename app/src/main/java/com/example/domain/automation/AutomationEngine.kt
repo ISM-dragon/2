@@ -879,7 +879,7 @@ class AutomationEngine(
                 audit.success(
                     "QUALIFICATION_RESULT",
                     "[${job.jobId}] DEAL QUALIFIED: ${job.propertyAddress} (score ${evaluation.score}/100, " +
-                        "suggested $suggestedOfferLabel)"
+                        "suggested $suggestedOfferLabel)",
                     runId = runId,
                     jobId = job.jobId,
                     correlationId = correlationId
@@ -1011,7 +1011,7 @@ class AutomationEngine(
                 val persisted = persistTransition(generating, blocked.job, runId, correlationId)
                 audit.warn("OFFER_BLOCKED", "[${job.jobId}] $reason", runId, job.jobId, correlationId)
                 logTransition(generating, blocked.job, persisted, "missing deterministic offer price", runId, correlationId)
-                return StepResult(persisted ?: generating, advanced = persisted != null, outcome = JobOutcome.skipped(blocked = 1))
+                return StepResult(persisted ?: generating, advanced = persisted != null, outcome = JobOutcome.skipped(blocked = true))
             }
 
             val decision = ledger.begin(AutomationEffect.GENERATE_OFFER, job.propertyId, job.jobId, runId)

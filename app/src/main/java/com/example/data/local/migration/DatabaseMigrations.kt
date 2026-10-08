@@ -592,6 +592,6 @@ private class Migration2To3 : Migration(2, 3) {
 }
 
 /** All migrations, registered by [com.example.data.local.AppDatabase]. */
-internal object DatabaseMigrations {
+object DatabaseMigrations {
     val ALL: Array<Migration> = arrayOf(Migration1To2(), Migration2To3(), Migration3To4())
 }
