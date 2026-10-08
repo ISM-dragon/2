@@ -150,7 +150,8 @@ class RealEstateAiApp : Application() {
             propertyDao = database.propertyDao(),
             sourceDao = database.propertySourceDao(),
             enrichmentDao = database.propertyEnrichmentDao(),
-            financialDao = database.propertyFinancialDao()
+            financialDao = database.propertyFinancialDao(),
+            intelligenceDao = database.intelligenceDao()
         )
 
         offerRepository = OfferRepository(
