@@ -82,6 +82,11 @@ class CompositeFetchPolicy(private val policies: List<FetchPolicy>) : FetchPolic
  * Fetches `https://host/robots.txt` through the same [HttpFetcher] used for listings, caches the
  * parsed rules per origin (TTL) and applies the most specific rule for the request path. Robots
  * responses are never cached on failure.
+ *
+ * Fail-closed by default: when robots.txt cannot be evaluated (5xx, timeout, redirect loop,
+ * transport error) the origin is denied rather than assumed permissive, matching RFC 9309 and the
+ * `urlintelligence` compliance gate. `404`/`410` still mean "no rules published" and allow.
+ * [UnavailableBehavior.ALLOW] remains available for deployments that have cleared an origin offline.
  */
 class RobotsTxtFetchPolicy(
     private val httpFetcher: HttpFetcher,
@@ -89,7 +94,7 @@ class RobotsTxtFetchPolicy(
     private val userAgent: String = FetchOptions.DEFAULT_USER_AGENT,
     private val cacheTtlMillis: Long = 6 * 60 * 60 * 1000,
     /** Behaviour when robots.txt cannot be retrieved (5xx, timeout, redirect loop). */
-    private val behaviorWhenUnavailable: UnavailableBehavior = UnavailableBehavior.ALLOW
+    private val behaviorWhenUnavailable: UnavailableBehavior = UnavailableBehavior.DENY
 ) : FetchPolicy {
 
     enum class UnavailableBehavior { ALLOW, DENY }

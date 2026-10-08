@@ -252,6 +252,8 @@ class PropertyUrlValidator(
         }
         val sensitive = queryParameters.filter { PropertyUrlNormalizer.isSensitiveParameter(it.name) }
         if (sensitive.isNotEmpty()) {
+            // Accurate as of the normalizer change: credential-like parameters are dropped from the
+            // canonical URL, so they are not fetched, logged, persisted or deduplicated on.
             issues.add(
                 warning(
                     UrlValidationCode.SENSITIVE_PARAMETERS_PRESENT,

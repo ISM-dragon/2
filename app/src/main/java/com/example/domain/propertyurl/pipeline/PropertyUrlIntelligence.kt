@@ -30,8 +30,10 @@ import com.example.domain.propertyurl.port.FetchPolicyDecision
 import com.example.domain.propertyurl.port.HttpFetcher
 import com.example.domain.propertyurl.port.IdGenerator
 import com.example.domain.propertyurl.port.Sleeper
+import com.example.domain.propertyurl.port.SourceCredentials
 import com.example.domain.propertyurl.port.TelemetryEvent
 import com.example.domain.propertyurl.port.TelemetrySink
+import com.example.domain.propertyurl.source.PropertySourceDefinition
 import com.example.domain.propertyurl.source.SourceRegistry
 import com.example.domain.propertyurl.source.SourceStatus
 import com.example.domain.propertyurl.url.PropertyUrlResolver
@@ -482,9 +484,10 @@ class PropertyUrlIntelligence(
                 attemptIncrement = 1
             ).applied
 
+            val sourceDefinition = registry.byId(sourceId) ?: resolved.detection.definition
+                ?: com.example.domain.propertyurl.source.SourceCatalog.GENERIC_WEB
             val context = AdapterContext(
-                source = registry.byId(sourceId) ?: resolved.detection.definition
-                    ?: com.example.domain.propertyurl.source.SourceCatalog.GENERIC_WEB,
+                source = sourceDefinition,
                 adapterId = adapterId,
                 adapterVersion = adapter.descriptor.version,
                 requestId = current.requestId,
@@ -494,7 +497,7 @@ class PropertyUrlIntelligence(
                 telemetry = environment.telemetry,
                 failureClassifier = failureClassifier,
                 parserChain = parserChain,
-                credentials = environment.credentialProvider.credentialsFor(sourceId)
+                credentials = credentialsFor(sourceDefinition)
             )
 
             val requestToSend = adapter.buildRequest(resolved, context)
@@ -787,6 +790,22 @@ class PropertyUrlIntelligence(
         }
         return execute(persisted(rewound), resolved, adapter.descriptor.adapterId, adapter, request)
     }
+
+    /**
+     * Credentials for one source, or null when the source must stay anonymous.
+     *
+     * Public listing pages (every portal adapter, and `generic_web`, which fetches arbitrary
+     * user-supplied URLs) are fetched with no credentials at all. A [CredentialProvider] entry that
+     * happens to be registered under such a source id therefore cannot turn a public page fetch into
+     * a credentialed request: an `Authorization`/`Cookie`/API-key header is only ever attached to a
+     * source that explicitly declares `requiresCredentials` (MLS/IDX feeds, county records).
+     */
+    private fun credentialsFor(source: PropertySourceDefinition?): SourceCredentials? =
+        if (source?.capabilities?.requiresCredentials == true) {
+            environment.credentialProvider.credentialsFor(source.sourceId)
+        } else {
+            null
+        }
 
     private fun checkSourceSupport(resolved: ResolvedPropertyUrl): SourceFailure? {
         val definition = resolved.detection.definition

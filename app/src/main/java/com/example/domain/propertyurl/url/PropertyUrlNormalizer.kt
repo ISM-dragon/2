@@ -239,7 +239,15 @@ object PropertyUrlNormalizer {
 
         for (parameter in parsed) {
             val lowered = parameter.name.lowercase(Locale.US)
-            if (isSensitiveParameter(lowered)) sensitive.add(parameter.name)
+            if (isSensitiveParameter(lowered)) {
+                // Credential-like values are never part of the canonical URL: it is what gets
+                // fetched, persisted, logged and used as the deduplication seed. The parameter is
+                // recorded by *name* only so diagnostics can still say something was dropped.
+                // Every other URL layer in this codebase behaves the same way.
+                sensitive.add(parameter.name)
+                removed.add(parameter.name)
+                continue
+            }
             if (options.stripTrackingParameters && isTrackingParameter(lowered)) {
                 removed.add(parameter.name)
                 continue

@@ -90,3 +90,70 @@
 - حُدّثت fixtures الموجودة كي تستخدم قيماً اصطناعية واضحة لا تشبه credentials حقيقية.
 
 **تعذر تشغيل الاختبارات في هذه البيئة:** لا يتوفر Java أو Gradle أو سكربتات/ملفات Gradle Wrapper في checkout. أُجري بدلاً من ذلك فحص `git diff --check` وفحص XML/المراجع الساكنة؛ يجب تشغيل `testDebugUnitTest` و`assembleDebug` في بيئة Android/Gradle قبل الدمج.
+
+---
+
+# جولة تدقيق ثانية: حدود استيراد العقارات والاعتمادات
+
+**تاريخ التدقيق:** 2026-10-08
+
+**النطاق:** مسار استيراد صفحات العقارات من الروابط (`domain/propertyurl`، `data/urlintelligence`، وحدة `urlintelligence`)، وحدود الاعتمادات (ترويسات الطلب، معلمات الرابط، التخزين، السجلات). لم تُمَس ميزات المالية أو CRM أو الإثراء أو Deal Room.
+
+## النتائج والإصلاحات
+
+### SEC-08 — روابط الصور المستخرجة من مستند غير موثوق تُجلب دون فحص الشبكة — مرتفع — مُعالج
+
+**المشاهدة:** `ValueGuards.imageUrl` (التطبيق) و`PropertyNormalizer.isHttpUrl` (وحدة `urlintelligence`) كانا يقبلان أي رابط `http(s)` — بما في ذلك `https://192.168.1.1/…` و`https://169.254.169.254/…` و`https://[::1]/…` و`https://gateway.internal/…` — ثم تُخزَّن هذه الروابط في `PropertyEntity.primaryImageUrl` و`PropertyImageEntity.imageUrl` وتُجلب لاحقاً مباشرةً عبر `AsyncImage`/Coil في `PropertyCard` و`PropertyDetailScreen`. أي صفحة listing معادية تستطيع بذلك توجيه التطبيق إلى أجهزة الشبكة المحلية للمستخدم، وهو نفس المسار الذي يرفضه جلب المستند نفسه. الحواجز الموجودة لم تكن كافية: `usesCleartextTraffic=false` يمنع `http://` فقط، ولا يمنع `https://` على عنوان خاص.
+
+**الإصلاح:** صار فحص روابط الصور مطابقاً لفحص رابط الـlisting: مخطط `http(s)` مطلق فقط، بدون userinfo، بدون IP literal، وباسم مضيف عام (يُرفض loopback/link-local/RFC1918/CGNAT/metadata). أُضيف أيضاً رفض مقاطع `..` في المسار، ورفض الصيغة النسبية `//host/…`.
+
+### SEC-09 — فحص المضيف الخاص لا يغطي نطاقات الأسماء غير القابلة للتوجيه — متوسط — مُعالج
+
+**المشاهدة:** `UrlHosts.isPrivateNetwork` كان يفحص نطاقات IPv4 جزئياً ولا يعرف `*.internal` ولا `*.home.arpa` ولا `*.arpa` ولا `metadata[.google.internal]`، كما كان يفوت `224/4` و`240/4` و`192.0.0/24` و`192.0.2/24` و`198.18/15` و`198.51.100/24` و`203.0.113/24`. النتيجة أن `PropertyUrlValidator` كان يعيد `Valid` لرابط مثل `https://gateway.internal/…`. كان `DEFAULT_REDIRECT_GUARD` و`intelligence/source/PropertyUrlResolver` يعوّضان ذلك بقوائم مكرّرة خاصّة بهما، ما يعني أن أي مستخدم آخر للدالة يبقى مكشوفاً. وكان هناك أيضاً إنذار كاذب: أي مضيف يبدأ بـ`fc` (مثل `fc.example.com`) كان يُعتبر خاصاً.
+
+**الإصلاح:** وُحّدت القوائم داخل `isPrivateNetwork` (أسماء غير قابلة للتوجيه + نطاقات IPv4 المحجوزة كاملة + بادئات IPv6 غير العامة)، وأُصلح الإنذار الكاذب باشتراط `:` قبل معاملة المضيف كـIPv6. بقي `PublicOnlyDns` هو الفحص الحاسم للعناوين بعد التحليل.
+
+### SEC-10 — سطر `User-agent:` فارغ في robots.txt يلغي قاعدة `*` — متوسط — مُعالج
+
+**المشاهدة:** `RobotsTxt.selectGroup` كان يطابق الرمز عبر `loweredAgent.contains(token)` دون استثناء الرمز الفارغ، و`RobotsTxt.parse` يضيف قيمة `User-agent:` الفارغة كما هي. ملف robots.txt مقطوع أو مشوّه مثل `User-agent:` ثم `Allow: /` كان يُختار لكل crawler ويحجب مجموعة `User-agent: *` بالكامل، فيُسمح بجلب مسارات منعها الموقع صراحةً.
+
+**الإصلاح:** الرمز الفارغ لا يطابق أي crawler، فتسقط المجموعة إلى `*`. لم يتغيّر تحليل الملف ولا أسبقية المجموعات المسماة.
+
+### SEC-11 — بوابة robots تفشل مفتوحة عند تعذّر التقييم — متوسط — مُعالج
+
+**المشاهدة:** `RobotsTxtFetchPolicy` كان افتراضيه `UnavailableBehavior.ALLOW`، والإنتاج يستخدم `DefaultFetchPolicies.robotsAware(...)` بهذا الافتراض. أي 5xx أو timeout أو حلقة redirect في `/robots.txt` كانت تعني «مسموح»، بينما الوحدة الشقيقة `RobotsPolicy` تفشل مغلقة والوثائق تصف البوابة بأنها fail-closed.
+
+**الإصلاح:** الافتراض صار `DENY` (مع بقاء `404/410` = «لا قواعد منشورة» = مسموح، وبقاء `ALLOW` خياراً صريحاً لمن فحص المصدر خارجياً). **تغيير سلوك مقصود:** عند انقطاع `/robots.txt` يفشل الاستيراد بدلاً من المتابعة.
+
+### SEC-12 — قيم الاعتماد في الرابط تبقى في الرابط القانوني وتُحفظ كنص صريح — مرتفع — مُعالج
+
+**المشاهدة:** `PropertyUrlNormalizer.canonicalizeQuery` كان يسجّل أسماء المعلمات الحساسة في `sensitiveParameters` لكنه **يُبقيها بقيمها** في الرابط القانوني. وهذا الرابط هو ما يُجلب (`HttpRequest(url = resolved.url.normalized)`)، وما يُبنى منه `identitySeed`، ومنه `ResolvedPropertyUrl.idempotencyKey` الذي يُكتب نصاً صريحاً في `JobCodec` داخل `<filesDir>/property-url-intelligence/jobs/*.json`. كان هذا يخالف ثلاثة مواضع أخرى: رسالة `PropertyUrlValidator` («they are stripped before fetch»)، والاختبار `imported jobs do not retain credential-like URL query values`، ووحدة `urlintelligence` التي تحذف هذه المعلمات فعلاً، و`OkHttpHttpFetcher`/`OkHttpPropertyTransport` اللذان يرفضان الرابط أصلاً إذا حملها.
+
+**الإصلاح:** تُحذف المعلمات الحساسة من الرابط القانوني (ويُسجّل الاسم فقط للتشخيص)، وصار `idempotencyKey` المشتق من الرابط بصمة SHA-256 بدل النص الصريح كدفاع إضافي. لم تتأثر معرّفات الـlisting (`zpid`, `listingId`, `pid`) لأنها ليست أسماءً حساسة.
+
+### SEC-13 — مصدر عام قد يُرسل ترويسات اعتماد — منخفض — مُعالج
+
+**المشاهدة:** `PropertyUrlIntelligence` كان يمرّر `credentialProvider.credentialsFor(sourceId)` إلى `AdapterContext` لأي مصدر، دون ربط ذلك بـ`capabilities.requiresCredentials`. الإنتاج يستخدم `CredentialProvider.NONE` فلا أثر مباشر اليوم، لكن أي إدخال اعتمادات تحت معرّف `zillow` أو `generic_web` (وهو المصدر الذي يجلب روابط المستخدم التعسفية) كان سيُرفق `Authorization`/`Cookie`/`X-Api-Key` بطلب صفحة عامة، و`SourceCredentials.extraHeaders` غير مُرشَّح.
+
+**الإصلاح:** لا تُرفق اعتمادات إلا لمصدر يعلن `requiresCredentials = true` (حالياً `mls_feed` و`county_records`). بقيت آلية الإرفاق كما هي لمن يعلنها.
+
+## مجالات فُحصت ولم تحتج تعديلاً
+
+| المجال | النتيجة |
+|---|---|
+| Android Keystore | `keyForEncryption` يقرأ ثم ينشئ ثم يعيد القراءة؛ مسار فك التشفير لا ينشئ ولا يدوّر مفتاحاً. AES-256-GCM، IV عشوائي 12 بايت مع `setRandomizedEncryptionRequired(true)`، وسم 128-bit. المصدر المؤقت في الذاكرة يُختار فقط عندما لا يكون التشغيل على Dalvik/Android. |
+| معالجة ciphertext | `decryptOrNull` يفشل مغلقاً (`null`) على Base64 تالف أو طول أقصر من IV+وسم أو فشل مصادقة أو غياب مفتاح، ويلتقط `Exception` دون تسجيل الـciphertext أو الرسالة؛ و`decrypt` يرفع `CryptoDecryptionException` بدل إظهار قيمة فارغة صالحة. |
+| حجب الرموز في السجلات | `Redaction` تحجب bearer/JWT/مفاتيح Google/تعيينات `key=value`/بريد/هواتف، و`isSensitiveHeader` تغطي `authorization`/`cookie`/`set-cookie`/`proxy-authorization` وأي اسم يحوي `token`/`secret`/`api-key`. `JobCodec` يمرّر `rawInput` و`normalizedUrl` و`sourceUrl` عبر `Redaction.url`. لا `println`/`Log` في مسار الاستيراد. |
+| تقييد الشبكة الخاصة | `PublicOnlyDns` يرفض أي إجابة ليست عامة بالكامل (يشمل IPv4-mapped IPv6، ULA، link-local، multicast، benchmarking، documentation) ويُستخدم نفسه للاتصال فلا توجد نافذة إعادة تحليل. |
+| تقييد الـredirects | `followRedirects=false` في النقلين، والـredirect يُتحقق منه يدوياً عبر `isAllowedPublicUrl` **و**`redirectGuard` معاً (لا يكفي تجاوز أحدهما)، وتُجرَّد كل الترويسات المخصّصة عند تغيّر الـorigin. |
+| سياسة robots | تُجلب عبر نفس النقل بدون اعتمادات، وتُخزَّن مؤقتاً 6 ساعات لكل origin، ولا تُخزَّن عند الفشل. |
+| المدخلات الضخمة/المشوّهة | حدود طول الرابط 2048، وحدود جسم الاستجابة مفروضة في النقلين ثم يُعاد فحصها في `ResponseGuard`، و`RobotsRules`/`RobotsTxt` تتجاهلان الأسطر المشوّهة، و`JobCodec` يتدهور إلى «حقل غير موجود» بدل فشل الاستعادة. |
+| ترويسات الاعتماد في الاستيراد العام | `SourceFetchRequest.FORBIDDEN_HEADERS` + `Redaction.isSensitiveHeader` في `OkHttpPropertyTransport`، وتجريد كل الترويسات عند تغيّر الـorigin في `OkHttpHttpFetcher`، وبوابة `requiresCredentials` الجديدة (SEC-13). |
+| افتراضات النسخ الاحتياطي | `allowBackup="false"` مع `data_extraction_rules`/`backup_rules` تستثني database/file/sharedpref/root/external. النسخ اليدوي يصدر العقارات والمالية والعروض وقالب العروض فقط، ولا يصدّر مفاتيح Gemini ولا رموز Gmail، ويعيد التحقق من مسار PDF عبر `OfferPdfStorage.resolveExistingPdf`. |
+
+## الاختبارات المضافة
+
+- `app/src/test/java/com/example/domain/propertyurl/IngestionBoundarySecurityTest.kt`: رفض روابط الصور الخاصة/المحلية/المحمّلة بالاعتمادات، وفحص الأسماء والنطاقات غير القابلة للتوجيه، ورفض `*.internal` قبل الجلب، وحذف قيم الاعتماد من الرابط القانوني، و`User-agent` الفارغ، وفشل بوابة robots مغلقاً (و`404` مسموح، و`ALLOW` الصريح ما زال يعمل)، وعدم إرسال اعتمادات لصفحة عامة مع استمرار إرسالها لمصدر يعلنها، وعدم تسرّب القيم إلى سجل الوظائف.
+- `urlintelligence/src/test/kotlin/com/example/urlintelligence/IngestionImageGuardTest.kt`: إسقاط الصور ذات المضيف الخاص/المحلي في `PropertyNormalizer`، ومنع ترقية صورة primary معادية، وإبقاء الصور العامة.
+
+**تعذّر تشغيل الاختبارات في هذه البيئة:** لا يوجد Java ولا Gradle ولا مترجم Kotlin في الـsandbox، ولا يمكن جلبها: `repo1.maven.org` و`dl.google.com` و`services.gradle.org` و`plugins.gradle.org` وأصول إصدارات GitHub كلها غير قابلة للوصول (الاتصال مسموح فقط بـgithub.com وcodeload وapi.github.com وPyPI). لذلك لم يُنفَّذ `testDebugUnitTest` ولا `:urlintelligence:test`. ما نُفِّذ فعلياً هنا: `git diff --check` (نظيف)، وفحص توازن الأقواس/السلاسل/التعليقات على كل ملف مُعدَّل (متوازن)، وتحقّق يدوي من وجود كل معرّف مستخدم ورؤيته (`ACCEPT`، `UrlParser` internal، `isBlockedHost` internal، `SourceCredentials`، `PropertySourceDefinition`، `JobCodec.encode`). يجب تشغيل `gradle :app:testDebugUnitTest :urlintelligence:test` قبل الدمج.

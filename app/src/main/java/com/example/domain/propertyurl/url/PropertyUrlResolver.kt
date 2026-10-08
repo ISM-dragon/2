@@ -36,13 +36,27 @@ data class ResolvedPropertyUrl(
 
     val isSourceSupported: Boolean get() = detection.isSupported
 
-    /** Stable key for deduplication: the source id and its listing id when known, else the URL. */
+    /**
+     * Stable key for deduplication: the source id and its listing id when known, else a digest of
+     * the URL.
+     *
+     * The URL seed is hashed rather than stored verbatim because a pasted link can carry
+     * credential-like query values (`access_token=…`, `sig=…`). This key is written to the job
+     * store on disk, so it must not become a clear-text copy of a secret; a digest keeps the
+     * deduplication semantics (same URL ⇒ same key) without persisting the value.
+     */
     val idempotencyKey: String
         get() = if (!sourceId.isNullOrBlank() && !externalListingId.isNullOrBlank()) {
             "$sourceId:$externalListingId"
         } else {
-            url.identitySeed
+            "url:" + sha256Hex(url.identitySeed).take(32)
         }
+
+    private fun sha256Hex(value: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { byte -> "%02x".format(byte) }
+    }
 }
 
 sealed interface UrlResolutionResult {
