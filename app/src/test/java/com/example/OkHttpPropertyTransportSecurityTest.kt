@@ -128,7 +128,7 @@ class OkHttpPropertyTransportSecurityTest {
     fun `legacy property fetcher rejects private DNS answers before connecting`() = runBlocking {
         val loopback = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
         val injected = OkHttpClient.Builder()
-            .dns(Dns { listOf(loopback) })
+            .dns(dnsOverride(listOf(loopback)))
             .build()
 
         val result = OkHttpHttpFetcher(client = injected).fetch(
@@ -198,7 +198,7 @@ class OkHttpPropertyTransportSecurityTest {
         )
 
         blockedAddresses.forEach { address ->
-            val injected = OkHttpClient.Builder().dns(Dns { listOf(address) }).build()
+            val injected = OkHttpClient.Builder().dns(dnsOverride(listOf(address))).build()
             val result = OkHttpHttpFetcher(client = injected).fetch(
                 HttpRequest(url = "https://www.example.com/listing/123")
             )
@@ -215,7 +215,7 @@ class OkHttpPropertyTransportSecurityTest {
         val publicAddress = InetAddress.getByAddress(byteArrayOf(8, 8, 8, 8))
         val privateAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
         val injected = OkHttpClient.Builder()
-            .dns(Dns { listOf(publicAddress, privateAddress) })
+            .dns(dnsOverride(listOf(publicAddress, privateAddress)))
             .build()
 
         val result = OkHttpHttpFetcher(client = injected).fetch(
@@ -238,5 +238,13 @@ class OkHttpPropertyTransportSecurityTest {
         assertFalse(guard("https://user:unit-test-secret@example.com/listing/123"))
         assertFalse(guard("https://127.0.0.1/admin"))
         assertFalse(guard("https://service.internal/listing/123"))
+    }
+
+    /**
+     * okhttp 4 declares [Dns] as a Kotlin interface, so a lambda/SAM conversion is not available
+     * and the DNS answers under test must be injected through an explicit implementation.
+     */
+    private fun dnsOverride(addresses: List<InetAddress>): Dns = object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> = addresses
     }
 }

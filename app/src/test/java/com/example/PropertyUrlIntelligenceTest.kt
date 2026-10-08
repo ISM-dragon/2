@@ -400,6 +400,68 @@ class PropertyUrlIntelligenceTest {
             override suspend fun insertMarketDataList(list: List<com.example.data.local.entity.MarketDataEntity>) {}
             override suspend fun insertRentEstimateList(list: List<com.example.data.local.entity.RentEstimateEntity>) {}
             override suspend fun insertTaxRecordList(list: List<com.example.data.local.entity.TaxRecordEntity>) {}
+
+            // ── Canonical identity, merge and backup surface. The dedup engine under test only reads
+            // getAllPropertiesList(), so the remaining DAO members are explicit inert stubs: a test
+            // fake that silently grew behaviour here could mask an identity regression.
+            override suspend fun getPropertyByCanonicalKey(canonicalKey: String): PropertyEntity? =
+                listOf(existingProperty).firstOrNull { it.canonicalKey == canonicalKey }
+
+            override suspend fun findPropertiesByApn(apn: String): List<PropertyEntity> =
+                listOf(existingProperty).filter { apn.isNotBlank() && it.apn == apn }
+
+            override suspend fun findPropertiesByMlsNumber(mlsNumber: String): List<PropertyEntity> =
+                listOf(existingProperty).filter { mlsNumber.isNotBlank() && it.mlsNumber == mlsNumber }
+
+            override suspend fun getPropertiesWithoutCanonicalKey(limit: Int): List<PropertyEntity> =
+                listOf(existingProperty).filter { it.canonicalKey == null }.take(limit)
+
+            override suspend fun getKeylessCandidates(zipCode: String, city: String, limit: Int): List<PropertyEntity> =
+                listOf(existingProperty)
+                    .filter { it.canonicalKey == null && it.zipCode == zipCode && it.city == city }
+                    .take(limit)
+
+            override suspend fun updateCanonicalIdentity(
+                id: String,
+                canonicalKey: String,
+                normalizedAddress: String,
+                unitNumber: String,
+                county: String,
+                countyFips: String,
+                apn: String,
+                propertySubType: String,
+                verifiedAt: Long
+            ) {}
+
+            override suspend fun setPrimarySource(id: String, sourceId: String?) {}
+            override suspend fun touchSeenAt(id: String, seenAt: Long) {}
+
+            override suspend fun countPropertiesWithoutCanonicalKey(): Int =
+                listOf(existingProperty).count { it.canonicalKey == null }
+
+            override suspend fun getPropertyIdsByCanonicalKey(canonicalKey: String): List<String> =
+                listOf(existingProperty).filter { it.canonicalKey == canonicalKey }.map { it.id }
+
+            override suspend fun getImagesListForProperty(propertyId: String): List<com.example.data.local.entity.PropertyImageEntity> =
+                emptyList()
+
+            override suspend fun getSalesHistoryListForProperty(propertyId: String): List<com.example.data.local.entity.SalesHistoryEntity> =
+                emptyList()
+
+            override suspend fun repointImages(sourcePropertyId: String, targetPropertyId: String) {}
+            override suspend fun repointSalesHistory(sourcePropertyId: String, targetPropertyId: String) {}
+            override suspend fun repointComps(sourcePropertyId: String, targetPropertyId: String) {}
+
+            override suspend fun findComp(
+                targetPropertyId: String,
+                compAddress: String,
+                saleDate: String
+            ): com.example.data.local.entity.PropertyCompEntity? = null
+
+            override suspend fun insertComp(comp: com.example.data.local.entity.PropertyCompEntity): Long = 0L
+            override suspend fun updateComp(comp: com.example.data.local.entity.PropertyCompEntity) {}
+            override suspend fun deleteComp(id: Long) {}
+            override suspend fun clearCompLinksByPropertyId(propertyId: String) {}
         }
 
         val deduplicator = PropertyDeduplicator(fakePropertyDao)

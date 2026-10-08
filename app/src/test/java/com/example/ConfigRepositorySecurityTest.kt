@@ -110,5 +110,34 @@ class ConfigRepositorySecurityTest {
         override suspend fun saveOfferTemplate(template: OfferTemplateEntity) {
             offerTemplate = template
         }
+
+        // Gmail mutations are outside this test's scope; the double reports "no row updated" so a
+        // caller can never mistake this fake for a live credential store.
+        override suspend fun updateGmailAuthStatus(status: String, lastError: String?): Int = 0
+        override suspend fun updateGmailAccountSettings(
+            accountEmail: String,
+            senderName: String,
+            signature: String,
+            defaultSubjectTemplate: String
+        ): Int = 0
+        override suspend fun disconnectGmail(authStatus: String): Int = 0
+        override suspend fun updateGmailTokens(
+            accessToken: String?,
+            refreshToken: String?,
+            expiresAt: Long,
+            authStatus: String,
+            isConnected: Boolean,
+            lastError: String?
+        ): Int = 0
+        override suspend fun updateGmailTokensIfUnchanged(
+            expectedStoredAccessToken: String?,
+            expectedStoredRefreshToken: String,
+            accessToken: String,
+            refreshToken: String?,
+            expiresAt: Long,
+            authStatus: String,
+            isConnected: Boolean,
+            lastError: String?
+        ): Int = 0
     }
 }

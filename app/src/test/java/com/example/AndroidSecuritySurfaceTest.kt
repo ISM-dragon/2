@@ -24,7 +24,8 @@ class AndroidSecuritySurfaceTest {
         val applicationInfo = packageManager.getApplicationInfo(context.packageName, 0)
 
         assertFalse((applicationInfo.flags and ApplicationInfo.FLAG_ALLOW_BACKUP) != 0)
-        assertFalse(applicationInfo.usesCleartextTraffic)
+        // Public SDK surface for android:usesCleartextTraffic is the flag, not a field.
+        assertFalse((applicationInfo.flags and ApplicationInfo.FLAG_USES_CLEARTEXT_TRAFFIC) != 0)
 
         val packageInfo = packageManager.getPackageInfo(
             context.packageName,

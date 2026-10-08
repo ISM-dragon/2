@@ -85,6 +85,11 @@ class FakeAutomationDao : AutomationDao {
     override suspend fun getLatestRun(): AutomationRunEntity? =
         synchronized(lock) { runs.values.maxByOrNull { it.startTime } }
 
+    override suspend fun getIncompleteRuns(): List<AutomationRunEntity> =
+        synchronized(lock) {
+            runs.values.filter { it.status == AutomationRunStatus.RUNNING }.sortedBy { it.startTime }
+        }
+
     override suspend fun getRunById(runId: Long): AutomationRunEntity? = synchronized(lock) { runs[runId] }
 
     override suspend fun getRunsByStatus(status: String): List<AutomationRunEntity> =

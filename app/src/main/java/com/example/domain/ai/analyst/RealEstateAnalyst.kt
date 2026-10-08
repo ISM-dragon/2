@@ -31,15 +31,7 @@ class RealEstateAnalyst(
         repeat(maxAttempts) { index ->
             val attempt = index + 1
             val response = contentGenerator.generateContent(
-                prompt = if (validationFeedback.isEmpty()) {
-                    basePrompt
-                } else {
-                    buildString {
-                        append(basePrompt)
-                        append("\n\nYour previous response failed local validation. Correct the full response using the same evidence only. Do not add claims or numbers. Validation errors:\n")
-                        validationFeedback.forEach { append("- ").append(it).append('\n') }
-                    }
-                },
+                prompt = if (validationFeedback.isEmpty()) basePrompt else basePrompt + feedbackBlock(validationFeedback),
                 systemPrompt = trustedSystemPrompt,
                 responseMimeType = "application/json"
             )
@@ -64,12 +56,12 @@ class RealEstateAnalyst(
                 )
             }
 
-            validationFeedback = validation.errors
+            validationFeedback = sanitizeValidationFeedback(validation.errors)
             if (attempt == maxAttempts) {
                 return RealEstateAnalystResult.Failure(
                     message = "Gemini response did not satisfy the analyst output contract after $attempt attempt(s).",
                     attempts = attempt,
-                    validationErrors = validation.errors
+                    validationErrors = validationFeedback.ifEmpty { validation.errors }
                 )
             }
         }
@@ -79,6 +71,39 @@ class RealEstateAnalyst(
             attempts = maxAttempts,
             validationErrors = validationFeedback
         )
+    }
+
+    /**
+     * Repair instructions stay deliberately boring. Validation diagnostics are single-line, bounded
+     * in length and count, free of framing/control characters, and never contain instruction-like
+     * language or the packet delimiters: a hostile listing value echoed back inside a JSON key must
+     * not be able to reopen the untrusted packet through the retry prompt, which sits *outside* the
+     * untrusted evidence block.
+     */
+    private fun sanitizeValidationFeedback(errors: List<String>): List<String> = errors
+        .asSequence()
+        .map { it.replace(FEEDBACK_WHITESPACE_RUN, " ").trim() }
+        .filter { it.isNotEmpty() }
+        .map { if (it.length > MAX_FEEDBACK_LINE_CHARS) it.take(MAX_FEEDBACK_LINE_CHARS).trimEnd() + "..." else it }
+        .filter { AnalystTextSanitizer.isModelBoundarySafe(it) }
+        .filterNot { AnalystTextSanitizer.containsPromptInjectionPattern(it) }
+        .filterNot { it.contains(BEGIN_PACKET_MARKER) || it.contains(END_PACKET_MARKER) }
+        .take(MAX_FEEDBACK_LINES)
+        .toList()
+
+    private fun feedbackBlock(feedback: List<String>): String = buildString {
+        append("\n\nYour previous response failed local validation. Correct the full response using the same evidence only. Do not add claims or numbers. Validation errors:\n")
+        if (feedback.isEmpty()) {
+            append("- Return one complete JSON object matching the schema, with no extra properties.\n")
+            return@buildString
+        }
+        var budget = MAX_FEEDBACK_CHARS
+        for (line in feedback) {
+            val entry = "- $line\n"
+            if (entry.length > budget) break
+            append(entry)
+            budget -= entry.length
+        }
     }
 
     private data class PacketBoundary(val begin: String, val end: String)
@@ -120,7 +145,8 @@ class RealEstateAnalyst(
         appendLine("Never calculate or output cap rate, NOI, cash flow, DSCR, ROI, rent yield, purchase price adjustments, or any other financial metric. The deterministic local financial engine owns all calculations.")
         appendLine("Do not output numeric figures in narrative text, whether written with digits, spelled-out number words, superscripts, fractions, or Roman numerals. Numeric input values are for qualitative context only; the app displays recorded values and deterministic financial outputs separately.")
         appendLine("Statements and questions must be plain prose: no backticks, code fences, control characters, or invisible formatting characters.")
-        appendLine("Use evidenceRefs exactly as supplied; only IDs present in the packet's evidence list are valid. FACT requires non-estimate evidence; ESTIMATE must cite a supplied MARKET_ESTIMATE or RENT_ESTIMATE; INFERENCE requires supporting evidence; UNKNOWN must have no evidenceRefs and confidence zero.")
+        appendLine("Use evidenceRefs exactly as supplied; only IDs present in the packet's evidence list are valid. FACT requires non-estimate evidence from a supplied property, market-data, tax, or comparable record; ESTIMATE must cite a supplied MARKET_ESTIMATE or RENT_ESTIMATE; INFERENCE requires supporting evidence; UNKNOWN must have no evidenceRefs and confidence zero.")
+        appendLine("A DETERMINISTIC_FINANCIAL_ENGINE value is a derived calculation, not an observed property fact: never cite it as FACT, never restate it as a fact about the property, and read it only qualitatively as INFERENCE.")
         appendLine("If no supported red flag exists, return an empty redFlags array. Do not turn an unknown into a factual risk.")
         appendLine("Confidence is epistemic confidence from zero to one, not a deal score or financial metric. INFERENCE and ESTIMATE confidence must stay strictly below one; only a FACT that restates a supplied record may reach one. When support is missing, respond UNKNOWN with zero confidence instead of asserting certainty.")
         appendLine("For due diligence, ask concrete verification questions; the basis may be UNKNOWN when the related information was not supplied.")
@@ -143,5 +169,12 @@ class RealEstateAnalyst(
         const val END_PACKET_MARKER = "END_UNTRUSTED_EVIDENCE_PACKET"
 
         private const val MAX_BOUNDARY_NONCE_ATTEMPTS = 4
+
+        /** Retry diagnostics are bounded so the feedback prompt stays small and deterministic. */
+        private const val MAX_FEEDBACK_LINES = 12
+        private const val MAX_FEEDBACK_LINE_CHARS = 240
+        private const val MAX_FEEDBACK_CHARS = 2_000
+
+        private val FEEDBACK_WHITESPACE_RUN = Regex("[\\s\\p{Cc}\\p{Cf}]+")
     }
 }

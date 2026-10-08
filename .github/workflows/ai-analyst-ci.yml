@@ -50,6 +50,7 @@ jobs:
             --tests "com.example.RealEstateAnalystInputFactoryTest" \
             --tests "com.example.RealEstateAnalystHardeningTest" \
             --tests "com.example.domain.crm.*" \
+            --tests "com.example.RealEstateAnalystAdversarialContractTest"
             >"$RUNNER_TEMP/ai-analyst-gradle.log" 2>&1
           status=$?
           cat "$RUNNER_TEMP/ai-analyst-gradle.log"
