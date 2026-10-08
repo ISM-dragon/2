@@ -1,5 +1,7 @@
 package com.example.domain.intelligence.source
 
+import com.example.domain.propertyurl.url.UrlHosts
+import com.example.domain.propertyurl.url.UrlSensitiveParameters
 import java.net.URI
 
 data class ResolvedUrlInfo(
@@ -38,14 +40,26 @@ object PropertyUrlResolver {
                 trimmed
             }
             URI.create(withProtocol)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             return ResolvedUrlInfo(
                 isValid = false,
                 originalUrl = rawUrl,
                 sanitizedUrl = "",
                 domain = "",
                 identifiedSource = "Unsupported",
-                validationError = "Invalid URL syntax: ${e.message}"
+                validationError = "Invalid URL syntax."
+            )
+        }
+
+        val scheme = uri.scheme?.lowercase()
+        if (scheme != "https" || uri.rawUserInfo != null) {
+            return ResolvedUrlInfo(
+                isValid = false,
+                originalUrl = rawUrl,
+                sanitizedUrl = "",
+                domain = uri.host.orEmpty(),
+                identifiedSource = "Unsupported",
+                validationError = "Only public HTTPS property links without embedded credentials are allowed."
             )
         }
 
@@ -60,11 +74,24 @@ object PropertyUrlResolver {
                 validationError = "Invalid web domain."
             )
         }
+        if (UrlHosts.isIpLiteral(host) || UrlHosts.isPrivateNetwork(host) ||
+            host == "metadata.google.internal" || host == "metadata" ||
+            host.endsWith(".internal") || host.endsWith(".home.arpa")
+        ) {
+            return ResolvedUrlInfo(
+                isValid = false,
+                originalUrl = rawUrl,
+                sanitizedUrl = "",
+                domain = "",
+                identifiedSource = "Unsupported",
+                validationError = "Local, private, and IP-literal destinations are not supported."
+            )
+        }
 
-        // Sanitize URL by removing tracking query parameters
+        // Sanitize URL by removing tracking and credential-like query parameters
         val sanitizedQuery = uri.query?.split("&")?.filter { param ->
             val key = param.substringBefore("=").lowercase()
-            !SENSITIVE_QUERY_PARAMS.contains(key)
+            !SENSITIVE_QUERY_PARAMS.contains(key) && !UrlSensitiveParameters.isSensitive(key)
         }?.joinToString("&")
 
         val sanitized = buildString {
@@ -81,11 +108,13 @@ object PropertyUrlResolver {
         }
 
         val source = when {
-            host.contains("zillow.com") -> "Zillow"
-            host.contains("redfin.com") -> "Redfin"
-            host.contains("realtor.com") -> "Realtor.com"
-            host.contains("homes.com") -> "Homes.com"
-            host.contains("trulia.com") || host.contains("compass.com") || host.contains("coldwellbanker.com") -> "Generic"
+            isDomainOrSubdomain(host, "zillow.com") -> "Zillow"
+            isDomainOrSubdomain(host, "redfin.com") -> "Redfin"
+            isDomainOrSubdomain(host, "realtor.com") -> "Realtor.com"
+            isDomainOrSubdomain(host, "homes.com") -> "Homes.com"
+            isDomainOrSubdomain(host, "trulia.com") ||
+                isDomainOrSubdomain(host, "compass.com") ||
+                isDomainOrSubdomain(host, "coldwellbanker.com") -> "Generic"
             else -> "Unsupported"
         }
 
@@ -97,4 +126,7 @@ object PropertyUrlResolver {
             identifiedSource = source
         )
     }
+
+    private fun isDomainOrSubdomain(host: String, domain: String): Boolean =
+        host == domain || host.endsWith(".$domain")
 }

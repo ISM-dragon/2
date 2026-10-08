@@ -40,8 +40,8 @@ data class UrlValidationIssue(
 
 /** Validation policy. Defaults are the production values used for user-supplied property URLs. */
 data class UrlValidationOptions(
-    /** http:// is accepted (some IDX/wholesale sites still serve it) but flagged. */
-    val allowInsecureHttp: Boolean = true,
+    /** Cleartext is disabled by the Android app and must be explicitly opted into by non-production callers. */
+    val allowInsecureHttp: Boolean = false,
     /** Refusing raw IP hosts also blocks a large family of SSRF probes. */
     val allowIpLiteralHosts: Boolean = false,
     /** The intelligence layer must never be used to fetch cloud metadata / localhost. */

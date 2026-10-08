@@ -17,7 +17,7 @@ class RedfinUrlSourceAdapter : PropertyUrlSourceAdapter {
 
     override fun supports(url: String): Boolean {
         val host = try { URI.create(url.trim()).host?.lowercase() ?: "" } catch (e: Exception) { "" }
-        return supportedDomains.any { host.contains(it) }
+        return supportedDomains.any { host == it || host.endsWith(".$it") }
     }
 
     override suspend fun extract(url: String): PropertyExtractionResult {
@@ -98,11 +98,11 @@ class RedfinUrlSourceAdapter : PropertyUrlSourceAdapter {
                 provenanceRecords = provenance,
                 latencyMs = System.currentTimeMillis() - startTime
             )
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             return PropertyExtractionResult(
                 success = false,
                 errorCode = AdapterErrorCodes.PARSING_FAILED,
-                errorMessage = "Failed to parse Redfin property: ${e.message}",
+                errorMessage = "Failed to parse Redfin property.",
                 latencyMs = System.currentTimeMillis() - startTime
             )
         }

@@ -4,6 +4,7 @@ import com.example.data.local.dao.AutomationDao
 import com.example.data.local.entity.AutomationEffect
 import com.example.data.local.entity.AutomationExecutionEntity
 import com.example.data.local.entity.EffectStatus
+import com.example.domain.propertyurl.util.Redaction
 
 /** Decision returned by [AutomationExecutionLedger.begin]. */
 data class EffectDecision(
@@ -96,7 +97,7 @@ class AutomationExecutionLedger(
                     status = EffectStatus.FAILED.name,
                     attempt = existing?.attempt ?: 1,
                     resultRef = existing?.resultRef,
-                    error = error,
+                    error = error?.let { Redaction.message(it, maxLength = 400) },
                     startedAt = existing?.startedAt ?: now,
                     finishedAt = now
                 )

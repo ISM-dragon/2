@@ -4,6 +4,7 @@ import java.net.IDN
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.Locale
 
 /** Why a URL was rejected. Codes are stable and safe to log / emit as metrics. */
 sealed class UrlValidationError {
@@ -94,7 +95,7 @@ data class NormalizedUrl(
 
 data class UrlValidationConfig(
     val maxLength: Int = 2048,
-    val allowedSchemes: Set<String> = setOf("http", "https"),
+    val allowedSchemes: Set<String> = setOf("https"),
     /** Dropped before canonicalization: tracking noise that breaks dedup. */
     val trackingParameters: Set<String> = DEFAULT_TRACKING_PARAMETERS,
     /** Security: never fetch private/loopback/link-local/metadata hosts (SSRF guard). */
@@ -159,9 +160,9 @@ class PropertyUrlValidator(private val config: UrlValidationConfig = UrlValidati
 
         val uri = try {
             URI(withScheme)
-        } catch (t: Exception) {
+        } catch (_: Exception) {
             return UrlValidationResult.Invalid(
-                UrlValidationError.Malformed(t.message ?: "unparseable URL")
+                UrlValidationError.Malformed("unparseable URL")
             )
         }
         if (!uri.isAbsolute) {
@@ -171,7 +172,7 @@ class PropertyUrlValidator(private val config: UrlValidationConfig = UrlValidati
             return UrlValidationResult.Invalid(UrlValidationError.CredentialsInUrl)
         }
 
-        val scheme = uri.scheme?.lowercase() ?: return UrlValidationResult.Invalid(
+        val scheme = uri.scheme?.lowercase(Locale.US) ?: return UrlValidationResult.Invalid(
             UrlValidationError.Malformed("missing scheme")
         )
         if (scheme !in config.allowedSchemes) {
@@ -186,7 +187,7 @@ class PropertyUrlValidator(private val config: UrlValidationConfig = UrlValidati
             IDN.toASCII(rawHost.trimEnd('.'), IDN.ALLOW_UNASSIGNED)
         } catch (t: IllegalArgumentException) {
             return UrlValidationResult.Invalid(UrlValidationError.Malformed("invalid host '$rawHost'"))
-        }.lowercase()
+        }.lowercase(Locale.US)
 
         if (asciiHost.isBlank() || asciiHost.startsWith(".") || asciiHost.endsWith(".")) {
             return UrlValidationResult.Invalid(UrlValidationError.HostNotAllowed(asciiHost))
@@ -209,9 +210,10 @@ class PropertyUrlValidator(private val config: UrlValidationConfig = UrlValidati
         val kept = LinkedHashMap<String, String>()
         val dropped = ArrayList<String>()
         allParams.forEach { (key, value) ->
-            val normalizedKey = key.lowercase()
+            val normalizedKey = key.lowercase(Locale.US)
             val isTracking = normalizedKey.startsWith("utm_") || normalizedKey in config.trackingParameters
-            if (isTracking || !config.keepQueryParameters) dropped.add(key) else kept[key] = value
+            val isSensitive = SensitiveUrlParameters.isSensitive(normalizedKey)
+            if (isTracking || isSensitive || !config.keepQueryParameters) dropped.add(key) else kept[key] = value
         }
 
         val port = uri.port.takeIf { it > 0 && it != defaultPort(scheme) }

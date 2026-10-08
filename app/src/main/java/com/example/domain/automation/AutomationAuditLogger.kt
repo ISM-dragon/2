@@ -4,6 +4,7 @@ import com.example.data.local.dao.AutomationDao
 import com.example.data.local.entity.AutomationJobEntity
 import com.example.data.local.entity.AutomationLogEntity
 import com.example.data.local.entity.JobState
+import com.example.domain.propertyurl.util.Redaction
 
 /**
  * Structured audit trail of the execution system.
@@ -40,7 +41,9 @@ class AutomationAuditLogger(
         write(
             level = if (to.isFailure || to == JobState.BLOCKED) "WARN" else "INFO",
             tag = "STATE_TRANSITION",
-            message = "[${job.jobId}] $from -> $to ($detail)",
+            // The detail can include arbitrary provider/exception text. Keep audit records to the
+            // state-machine event; do not persist payloads, property details, or raw errors.
+            message = "Job state changed: $from -> $to.",
             runId = runId,
             jobId = job.jobId,
             correlationId = correlationId,
@@ -51,11 +54,12 @@ class AutomationAuditLogger(
     }
 
     suspend fun retryScheduled(job: AutomationJobEntity, runId: Long?, correlationId: String?, delayMs: Long) {
+        val safeStep = job.failedStep?.takeIf { it.matches(Regex("[A-Z0-9_]{1,64}")) } ?: "step"
         write(
             level = "WARN",
             tag = "RETRY_SCHEDULED",
-            message = "[${job.jobId}] attempt ${job.attempts}/${job.maxRetries} failed at " +
-                "${job.failedStep ?: "step"}; next attempt in ${delayMs / 1000}s (${job.lastError ?: "unknown error"})",
+            message = "Retry scheduled for $safeStep " +
+                "(attempt ${job.attempts}/${job.maxRetries}) after ${delayMs / 1000}s.",
             runId = runId,
             jobId = job.jobId,
             correlationId = correlationId,
@@ -81,12 +85,12 @@ class AutomationAuditLogger(
             dao.insertLog(
                 AutomationLogEntity(
                     runId = runId,
-                    jobId = jobId,
-                    correlationId = correlationId,
+                    jobId = safeIdentifier(jobId),
+                    correlationId = safeIdentifier(correlationId),
                     timestamp = clock.now(),
                     level = level,
-                    tag = tag,
-                    message = message,
+                    tag = safeIdentifier(tag)?.uppercase() ?: "AUDIT",
+                    message = Redaction.message(message, maxLength = MAX_AUDIT_MESSAGE_LENGTH),
                     stateBefore = stateBefore,
                     stateAfter = stateAfter,
                     attempt = attempt,
@@ -94,5 +98,15 @@ class AutomationAuditLogger(
                 )
             )
         }
+    }
+
+    private fun safeIdentifier(value: String?): String? {
+        if (value.isNullOrBlank() || value.length > MAX_AUDIT_IDENTIFIER_LENGTH) return null
+        return value.takeIf { it.all { character -> character.isLetterOrDigit() || character in "._:-" } }
+    }
+
+    private companion object {
+        const val MAX_AUDIT_MESSAGE_LENGTH = 500
+        const val MAX_AUDIT_IDENTIFIER_LENGTH = 128
     }
 }

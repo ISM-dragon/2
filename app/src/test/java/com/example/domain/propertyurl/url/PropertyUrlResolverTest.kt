@@ -114,6 +114,13 @@ class PropertyUrlResolverTest {
     }
 
     @Test
+    fun `cleartext property URLs are rejected before fetch`() {
+        val result = resolver.resolve("http://www.zillow.com/homedetails/12345678_zpid")
+        assertTrue(result is UrlResolutionResult.Rejected)
+        assertEquals(UrlValidationCode.UNSUPPORTED_SCHEME, (result as UrlResolutionResult.Rejected).primaryCode)
+    }
+
+    @Test
     fun `private network hosts are rejected (ssrf guard)`() {
         listOf(
             "http://127.0.0.1:8080/admin",

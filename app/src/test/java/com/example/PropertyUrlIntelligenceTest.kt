@@ -54,7 +54,13 @@ class PropertyUrlIntelligenceTest {
         assertFalse(invalidRes.isValid)
         assertNotNull(invalidRes.validationError)
 
-        // 7. Blank URL
+        // 7. Cleartext and domain lookalikes are not accepted as a trusted listing source.
+        val cleartext = PropertyUrlResolver.resolve("http://www.zillow.com/homedetails/1/12345_zpid/")
+        assertFalse(cleartext.isValid)
+        val lookalike = PropertyUrlResolver.resolve("https://www.zillow.com.evil-clone.net/homedetails/1/12345_zpid/")
+        assertEquals("Unsupported", lookalike.identifiedSource)
+
+        // 8. Blank URL
         val blankRes = PropertyUrlResolver.resolve("   ")
         assertFalse(blankRes.isValid)
     }
@@ -66,6 +72,7 @@ class PropertyUrlIntelligenceTest {
 
         assertTrue(adapter.supports(url))
         assertFalse(adapter.supports("https://www.redfin.com/home/123"))
+        assertFalse(adapter.supports("https://www.zillow.com.evil-clone.net/homedetails/123"))
 
         val result = adapter.extract(url)
         assertTrue("Extraction should succeed", result.success)

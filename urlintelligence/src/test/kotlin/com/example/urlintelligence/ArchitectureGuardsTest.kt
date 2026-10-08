@@ -91,6 +91,8 @@ class ArchitectureGuardsTest {
         assertTrue(forbiddenHeaders.contains("authorization"))
         assertTrue(forbiddenHeaders.contains("cookie"))
         assertTrue(forbiddenHeaders.contains("x-api-key"))
+        assertTrue(forbiddenHeaders.contains("x-goog-api-key"))
+        assertTrue(forbiddenHeaders.contains("x-access-token"))
     }
 
     @Test

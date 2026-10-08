@@ -6,6 +6,7 @@ import com.example.data.local.AppDatabase
 import com.example.data.local.dao.*
 import com.example.data.local.entity.*
 import com.example.domain.property.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -240,9 +241,11 @@ class PropertyImportRepository(
                     ImportOutcome.SKIPPED -> skipped++
                 }
             }
-        } catch (e: Exception) {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
             failed++
-            failure = "${e.javaClass.simpleName}: ${e.message}"
+            failure = "Property import failed."
         }
         val status = when {
             failure != null -> PropertyImportStatus.FAILED

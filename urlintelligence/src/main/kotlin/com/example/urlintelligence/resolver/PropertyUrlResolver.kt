@@ -33,8 +33,11 @@ import com.example.urlintelligence.source.SourceDetector
 import com.example.urlintelligence.source.SourceRegistry
 import com.example.urlintelligence.url.NormalizedUrl
 import com.example.urlintelligence.url.PropertyUrlValidator
+import com.example.urlintelligence.url.SensitiveUrlParameters
 import com.example.urlintelligence.url.UrlValidationError
 import com.example.urlintelligence.url.UrlValidationResult
+import java.net.URI
+import java.util.Locale
 import java.util.UUID
 import kotlin.random.Random
 
@@ -190,7 +193,7 @@ class PropertyUrlResolver(
         val trimmed = rawUrl.trim()
         val rawKey = IdempotencyKey.forUrl(trimmed.lowercase())
         var job = PropertyImportJob.create(
-            rawUrl = trimmed,
+            rawUrl = sanitizeRawUrlForStorage(trimmed),
             idempotencyKey = rawKey,
             jobId = idGenerator(),
             maxAttempts = options.maxAttempts ?: retryPolicy.maxAttempts,
@@ -422,6 +425,26 @@ class PropertyUrlResolver(
         keys.forEach { key -> resultStore.complete(key, result) }
         jobStore.save(job)
         return result
+    }
+
+    /** Store a credential-free copy of the pasted URL; validation/fetch still use the original input. */
+    private fun sanitizeRawUrlForStorage(rawUrl: String): String {
+        val candidate = rawUrl.trim().let { value ->
+            if (value.contains("://")) value else "https://$value"
+        }
+        val uri = runCatching { URI(candidate) }.getOrNull() ?: return "Invalid URL (redacted)"
+        val authority = uri.rawAuthority?.substringAfterLast('@') ?: return "Invalid URL (redacted)"
+        val safeQuery = uri.rawQuery?.split('&')?.joinToString("&") { parameter ->
+            val name = parameter.substringBefore('=')
+            if (SensitiveUrlParameters.isSensitive(name)) "$name=REDACTED" else parameter
+        }
+        return buildString {
+            append(uri.scheme?.lowercase(Locale.US) ?: "https")
+            append("://").append(authority)
+            append(uri.rawPath.orEmpty())
+            if (!safeQuery.isNullOrBlank()) append('?').append(safeQuery)
+            // Omit fragments; they are not sent over HTTP and may carry OAuth-style tokens.
+        }
     }
 
     private fun isAllowListed(sourceId: String): Boolean =

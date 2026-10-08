@@ -21,7 +21,7 @@ import com.example.domain.propertyurl.port.CredentialProvider
 import com.example.domain.propertyurl.port.DefaultFetchPolicies
 import com.example.domain.propertyurl.port.FetchOptions
 import com.example.domain.propertyurl.port.HttpFetcher
-import com.example.domain.propertyurl.port.HttpUrlConnectionFetcher
+import com.example.domain.propertyurl.port.OkHttpHttpFetcher
 import com.example.domain.propertyurl.port.IdGenerator
 import com.example.domain.propertyurl.port.Sleeper
 import com.example.domain.propertyurl.port.SystemClock
@@ -78,7 +78,7 @@ object PropertyUrlIntelligenceFactory {
      */
     fun create(
         jobStore: PropertyImportJobStore,
-        httpFetcher: HttpFetcher = HttpUrlConnectionFetcher(),
+        httpFetcher: HttpFetcher = OkHttpHttpFetcher(),
         clock: Clock = SystemClock(),
         idGenerator: IdGenerator = UuidIdGenerator(),
         telemetry: TelemetrySink = com.example.domain.propertyurl.port.NoopTelemetry,

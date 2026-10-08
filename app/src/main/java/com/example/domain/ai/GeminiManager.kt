@@ -3,21 +3,35 @@ package com.example.domain.ai
 import com.example.data.local.dao.ConfigDao
 import com.example.data.local.entity.ApiConfigurationEntity
 import com.example.data.security.CryptoManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import okhttp3.Authenticator
+import okhttp3.CookieJar
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.Proxy
 import java.util.concurrent.TimeUnit
 
 class GeminiManager(
     private val configDao: ConfigDao
 ) : GeminiContentGenerator {
+    // Provider credentials and prompts must never be replayed to redirect targets or cached in
+    // cookies. Disabling retries also keeps generated requests from being duplicated implicitly.
     private val httpClient = OkHttpClient.Builder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .cookieJar(CookieJar.NO_COOKIES)
+        .authenticator(Authenticator.NONE)
+        .proxyAuthenticator(Authenticator.NONE)
+        .proxy(Proxy.NO_PROXY)
+        .retryOnConnectionFailure(false)
         .connectTimeout(25, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(25, TimeUnit.SECONDS)
@@ -30,10 +44,19 @@ class GeminiManager(
         val now = System.currentTimeMillis()
 
         for (config in configs) {
-            val decryptedKey = CryptoManager.decrypt(config.apiKey)
-            if (decryptedKey.isBlank() || config.status == "DISABLED") {
+            if (config.status == "DISABLED" || config.apiKey.isBlank()) continue
+            val decryptedKey = CryptoManager.decryptOrNull(config.apiKey)
+            if (decryptedKey == null) {
+                configDao.updateSlotStatus(
+                    config.slotIndex,
+                    "ERROR",
+                    0L,
+                    API_KEY_DECRYPTION_ERROR
+                )
                 continue
             }
+            if (decryptedKey.isBlank()) continue
+
             // Check if cooldown elapsed
             if (config.status == "COOLDOWN" && now > config.cooldownUntil) {
                 configDao.updateSlotStatus(config.slotIndex, "READY", 0L, null)
@@ -48,7 +71,11 @@ class GeminiManager(
 
     suspend fun testConnection(slotIndex: Int): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val config = configDao.getApiConfigBySlot(slotIndex) ?: return@withContext Pair(false, "Slot not found")
-        val rawKey = CryptoManager.decrypt(config.apiKey).trim()
+        val rawKey = CryptoManager.decryptOrNull(config.apiKey)?.trim()
+        if (rawKey == null) {
+            configDao.updateSlotStatus(slotIndex, "ERROR", 0L, API_KEY_DECRYPTION_ERROR)
+            return@withContext Pair(false, API_KEY_DECRYPTION_ERROR)
+        }
         if (rawKey.isBlank()) return@withContext Pair(false, "API Key is empty")
 
         try {
@@ -65,10 +92,12 @@ class GeminiManager(
                 configDao.updateSlotStatus(slotIndex, "ERROR", 0L, testResponse.second)
                 Pair(false, testResponse.second)
             }
-        } catch (e: Exception) {
-            val err = e.message ?: "Connection test failed"
-            configDao.updateSlotStatus(slotIndex, "ERROR", 0L, err)
-            Pair(false, err)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            val safeError = "Gemini connection test failed. Check the key and network connection."
+            configDao.updateSlotStatus(slotIndex, "ERROR", 0L, safeError)
+            Pair(false, safeError)
         }
     }
 
@@ -80,12 +109,28 @@ class GeminiManager(
         val configs = configDao.getAllApiConfigsList()
         val now = System.currentTimeMillis()
 
-        // Filter valid candidates
-        val eligibleConfigs = configs.filter { config ->
-            val decryptedKey = CryptoManager.decrypt(config.apiKey)
-            decryptedKey.isNotBlank() &&
-            config.status != "DISABLED" &&
-            (config.status != "COOLDOWN" || now > config.cooldownUntil)
+        // Decrypt each credential once. Corrupt ciphertext is explicitly marked unusable rather
+        // than being interpreted as a valid empty key or passed to the provider.
+        val eligibleConfigs = configs.mapNotNull { config ->
+            if (config.status == "DISABLED" || config.apiKey.isBlank()) return@mapNotNull null
+            val apiKey = CryptoManager.decryptOrNull(config.apiKey)
+            if (apiKey == null) {
+                configDao.updateSlotStatus(
+                    config.slotIndex,
+                    "ERROR",
+                    0L,
+                    API_KEY_DECRYPTION_ERROR
+                )
+                return@mapNotNull null
+            }
+            if (
+                apiKey.isBlank() ||
+                (config.status == "COOLDOWN" && now <= config.cooldownUntil) ||
+                config.status !in setOf("READY", "ACTIVE", "COOLDOWN")
+            ) {
+                return@mapNotNull null
+            }
+            config to apiKey
         }
 
         if (eligibleConfigs.isEmpty()) {
@@ -101,10 +146,10 @@ class GeminiManager(
         var lastError: String? = null
 
         // Try eligible configurations with automatic failover and backoff
-        for (config in eligibleConfigs) {
+        for ((config, storedPlaintextKey) in eligibleConfigs) {
             val slotIndex = config.slotIndex
             val model = if (config.model.isNotBlank()) config.model else "gemini-2.5-flash"
-            val apiKey = CryptoManager.decrypt(config.apiKey).trim()
+            val apiKey = storedPlaintextKey.trim()
 
             configDao.updateSlotStatus(slotIndex, "ACTIVE", 0L, null)
 
@@ -143,12 +188,14 @@ class GeminiManager(
                             }
                         }
                     }
-                } catch (e: Exception) {
-                    val msg = (e.message ?: "Network error").replace(apiKey, "[REDACTED]")
-                    lastError = msg
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    val safeError = "Gemini request failed. Check the key and network connection."
+                    lastError = safeError
                     if (attempt == 1) {
-                        configDao.updateSlotStatus(slotIndex, "ERROR", 0L, msg)
-                        configDao.incrementSlotError(slotIndex, msg)
+                        configDao.updateSlotStatus(slotIndex, "ERROR", 0L, safeError)
+                        configDao.incrementSlotError(slotIndex, safeError)
                     }
                 }
             }
@@ -170,6 +217,9 @@ class GeminiManager(
         model: String,
         responseMimeType: String? = null
     ): Pair<Boolean, String> {
+        if (!SAFE_MODEL_NAME.matches(model)) {
+            return Pair(false, "Gemini model configuration is invalid.")
+        }
         val requestJson = JSONObject().apply {
             val contentsArray = JSONArray()
             val userContent = JSONObject().apply {
@@ -201,6 +251,9 @@ class GeminiManager(
 
         // Pass API key via x-goog-api-key header instead of query parameter to prevent exposure in logs or URLs
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
+        if (!isTrustedGeminiEndpoint(url, model)) {
+            return Pair(false, "Gemini endpoint validation failed.")
+        }
         val body = requestJson.toString().toRequestBody(jsonMediaType)
         val request = Request.Builder()
             .url(url)
@@ -210,8 +263,12 @@ class GeminiManager(
             .build()
 
         return httpClient.newCall(request).execute().use { response ->
-            val responseBody = response.body?.string() ?: ""
-            if (response.isSuccessful) {
+            if (!response.isSuccessful) {
+                // Never persist or return provider error bodies: they are untrusted and could echo
+                // keys, request details, or user/property data.
+                Pair(false, geminiHttpErrorMessage(response.code))
+            } else {
+                val responseBody = response.body?.string().orEmpty()
                 val rootJson = JSONObject(if (responseBody.isNotBlank()) responseBody else "{}")
                 val candidates = rootJson.optJSONArray("candidates")
                 val candidate = candidates?.optJSONObject(0)
@@ -219,20 +276,29 @@ class GeminiManager(
                 val parts = content?.optJSONArray("parts")
                 val text = parts?.optJSONObject(0)?.optString("text", "") ?: ""
                 if (text.isBlank()) {
-                    Pair(false, "Gemini returned empty response")
+                    Pair(false, "Gemini returned an empty response.")
                 } else {
                     Pair(true, text.trim())
                 }
-            } else {
-                // Mask any key if present in error message
-                val sanitized = responseBody.replace(apiKey, "[REDACTED]")
-                when (response.code) {
-                    401, 403 -> Pair(false, "HTTP ${response.code} (Unauthorized): API key is invalid or lacks permission.")
-                    429 -> Pair(false, "HTTP 429 (Rate Limit): Quota exhausted for slot.")
-                    in 500..599 -> Pair(false, "HTTP ${response.code} (Service Unavailable): Upstream Gemini service error.")
-                    else -> Pair(false, "HTTP ${response.code}: $sanitized")
-                }
             }
         }
+    }
+
+    private fun isTrustedGeminiEndpoint(value: String, model: String): Boolean {
+        val url = value.toHttpUrlOrNull() ?: return false
+        return url.scheme == "https" &&
+            url.host == GEMINI_API_HOST &&
+            url.port == 443 &&
+            url.encodedPath == "/v1beta/models/$model:generateContent" &&
+            url.username.isEmpty() &&
+            url.password.isEmpty() &&
+            url.encodedQuery == null &&
+            url.fragment == null
+    }
+
+    private companion object {
+        val SAFE_MODEL_NAME = Regex("[A-Za-z0-9._-]{1,100}")
+        const val GEMINI_API_HOST = "generativelanguage.googleapis.com"
+        const val API_KEY_DECRYPTION_ERROR = "Stored API key could not be decrypted. Re-enter the key."
     }
 }
