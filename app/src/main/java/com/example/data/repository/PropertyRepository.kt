@@ -134,6 +134,10 @@ class PropertyRepository(
     /** Seeds sources, the demo dataset (through the dedup pipeline) and canonical identities. */
     suspend fun seedInitialDataIfEmpty() = withContext(Dispatchers.IO) {
         importer.seedDefaultSources()
+        val sampleIds = setOf("prop-tx-001", "prop-az-002", "prop-tx-003", "prop-ga-004", "prop-tx-005", "prop-fl-006")
+        for (id in sampleIds) {
+            propertyDao.deletePropertyById(id)
+        }
         val count = propertyDao.getPropertiesCount()
         if (count == 0) {
             for (bundle in PropertySeedData.getSeedBundles()) {
