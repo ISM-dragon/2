@@ -26,3 +26,4 @@ rootProject.name = "RealEstateAI"
 
 include(":app")
 include(":urlintelligence")
+include(":repairestimator")
