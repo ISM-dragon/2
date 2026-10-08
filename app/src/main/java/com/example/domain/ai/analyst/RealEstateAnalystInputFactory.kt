@@ -12,7 +12,9 @@ import org.json.JSONObject
 /**
  * Maps one property's whitelisted fields to the model boundary. This is intentionally not a generic
  * entity serializer: descriptions, images, coordinates, deal flags, other properties, and unrelated
- * database tables are never placed in the Gemini request.
+ * database tables are never placed in the Gemini request. All untrusted free text passes through
+ * [AnalystTextSanitizer] so hostile listing imports cannot smuggle control, invisible, or code-fence
+ * characters into the prompt.
  */
 class RealEstateAnalystInputFactory(
     private val maxComparables: Int = RealEstateAnalystInputSchema.MAX_COMPARABLES
@@ -44,6 +46,10 @@ class RealEstateAnalystInputFactory(
             return AnalystInputValue(value = value, evidenceRef = id)
         }
 
+        // Untrusted listing/record text is neutralized before it crosses the model boundary:
+        // control, invisible, and code-fence characters are stripped, whitespace is collapsed, and
+        // the value is capped. A field that is entirely injection payload sanitizes to null, so the
+        // analyst sees an explicit gap (UNKNOWN) instead of attacker text.
         fun text(
             id: String,
             name: String,
@@ -53,7 +59,7 @@ class RealEstateAnalystInputFactory(
         ) = field(
             id,
             name,
-            value?.trim()?.take(MAX_TEXT_FIELD_LENGTH)?.takeIf { it.isNotEmpty() },
+            AnalystTextSanitizer.sanitize(value, MAX_TEXT_FIELD_LENGTH),
             source,
             asOfEpochMillis
         )
