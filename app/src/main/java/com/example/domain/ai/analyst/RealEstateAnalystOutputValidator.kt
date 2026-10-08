@@ -294,13 +294,20 @@ class RealEstateAnalystOutputValidator {
         val keys = value.keys()
         while (keys.hasNext()) {
             val key = keys.next()
-            if (!properties.has(key)) {
+            // Schema-declared keys are developer-controlled and keep their exact spelling. Keys the
+            // model invented are attacker-influenced: a hostile listing value can be echoed into a
+            // key, and these paths travel back inside the retry prompt. Those keys are reduced to a
+            // bounded identifier-style token - or masked - so neither instructions nor framing
+            // characters can ride along inside a validation message.
+            val knownProperty = properties.has(key)
+            val location = if (knownProperty) key else key.toSafeLocationSegment()
+            if (!knownProperty) {
                 when (additional) {
-                    is JSONObject -> validateAgainstSchema(value.opt(key), additional, "$path.$key", rootSchema, errors)
-                    false -> errors += "$path.$key is not allowed."
+                    is JSONObject -> validateAgainstSchema(value.opt(key), additional, "$path.$location", rootSchema, errors)
+                    false -> errors += "$path.$location is not allowed."
                 }
             } else {
-                validateAgainstSchema(value.opt(key), properties.getJSONObject(key), "$path.$key", rootSchema, errors)
+                validateAgainstSchema(value.opt(key), properties.getJSONObject(key), "$path.$location", rootSchema, errors)
             }
             if (errors.size >= MAX_ERRORS) return
         }
@@ -383,6 +390,10 @@ class RealEstateAnalystOutputValidator {
                     if (claim.confidence <= 0.0) errors += "$path non-UNKNOWN claims require positive confidence."
                     if (citedEvidence.any { it.source in ESTIMATE_SOURCES }) {
                         errors += "$path must be ESTIMATE when it relies on a supplied estimate."
+                    }
+                    if (citedEvidence.any { it.source == AnalystEvidenceSource.DETERMINISTIC_FINANCIAL_ENGINE }) {
+                        errors += "$path must not restate a deterministic-engine metric as a FACT; " +
+                            "use INFERENCE for a qualitative reading of engine output."
                     }
                 }
                 AnalystClaimType.ESTIMATE -> {
@@ -472,6 +483,31 @@ class RealEstateAnalystOutputValidator {
         }
     }
 
+    /**
+     * Bounded, identifier-style rendering of a model-supplied JSON key for diagnostics. Only
+     * letters, digits, `_`, and `-` survive (never quotes, braces, backticks, whitespace, control,
+     * invisible, or separator characters), the token is capped, and a key that still reads as an
+     * instruction - before or after hidden glyphs are dropped - collapses to a placeholder. This is
+     * what keeps validation feedback from becoming a second prompt-injection channel on retry.
+     */
+    private fun String.toSafeLocationSegment(): String {
+        val candidate = filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+        if (candidate.isEmpty()) return UNKNOWN_LOCATION_SEGMENT
+        // Instruction language can hide behind separator or camelCase spelling, so the denylist is
+        // checked against a word-split probe as well as the original key.
+        val probe = candidate
+            .replace(NON_ALNUM_RUN, " ")
+            .replace(CAMEL_CASE_BOUNDARY, " ")
+        val probeWords = probe.lowercase().split(' ').filter { it.isNotEmpty() }
+        if (AnalystTextSanitizer.containsPromptInjectionPattern(this) ||
+            AnalystTextSanitizer.containsPromptInjectionPattern(probe) ||
+            probeWords.any { it in RESERVED_LOCATION_WORDS }
+        ) {
+            return UNKNOWN_LOCATION_SEGMENT
+        }
+        return candidate.take(MAX_LOCATION_SEGMENT_CHARS)
+    }
+
     private fun parseOutput(root: JSONObject): RealEstateAnalystOutput {
         fun parseClaim(json: JSONObject): AnalystClaim {
             val refsJson = json.getJSONArray("evidenceRefs")
@@ -554,6 +590,26 @@ class RealEstateAnalystOutputValidator {
 
         /** Hard cap on response size accepted for parsing; generous for a legitimate packet. */
         const val MAX_RESPONSE_CHARS = 100_000
+
+        /** Longest model-supplied key fragment that may appear inside a diagnostic path. */
+        const val MAX_LOCATION_SEGMENT_CHARS = 48
+
+        /** Placeholder for a key that is empty, unprintable, or instruction-like. */
+        const val UNKNOWN_LOCATION_SEGMENT = "?"
+
+        val NON_ALNUM_RUN = Regex("[^\\p{L}\\p{Nd}]+")
+        val CAMEL_CASE_BOUNDARY = Regex("(?<=\\p{Ll})(?=\\p{Lu})")
+
+        /**
+         * Words that identify model framing or credential vocabulary. A key containing one of them
+         * is masked instead of echoed, so camelCase or underscore spelling ("ignorePrevious
+         * Instructions", "system_prompt") cannot relay an instruction through a diagnostic.
+         */
+        val RESERVED_LOCATION_WORDS = setOf(
+            "system", "developer", "assistant", "instruction", "instructions", "prompt", "prompts",
+            "schema", "override", "ignore", "disregard", "bypass", "reveal", "credential",
+            "credentials", "secret", "apikey", "password", "token"
+        )
 
         val ESTIMATE_SOURCES = setOf(
             AnalystEvidenceSource.MARKET_ESTIMATE,
