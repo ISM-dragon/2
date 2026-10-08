@@ -36,6 +36,24 @@ data class FinancialResult(
     val breakEvenOccupancyPct: Double
 )
 
+/**
+ * LEGACY calculator, frozen for the standalone Analyzer screen only.
+ *
+ * [com.example.domain.finance.underwriting.UnderwritingEngine] is the single financial source
+ * of truth: every persisted, automated or qualified underwriting goes through it and is
+ * verified against the Python oracle's golden vectors. Nothing new should call this object;
+ * the [FinancialInput]/[FinancialResult] types remain because older screens and the
+ * qualification contract still speak them (see `FinancialResultProjection`).
+ */
+@Deprecated(
+    message = "UnderwritingEngine is the single financial source of truth; this legacy " +
+        "calculator survives only for the standalone Analyzer screen. Persisted and automated " +
+        "underwriting must go through UnderwritingEngine (via FinancialRepository).",
+    replaceWith = ReplaceWith(
+        "UnderwritingEngine",
+        "com.example.domain.finance.underwriting.UnderwritingEngine"
+    )
+)
 object FinancialEngine {
 
     fun calculate(input: FinancialInput): FinancialResult {

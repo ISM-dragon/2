@@ -16,10 +16,14 @@ computed by arithmetic that two independent implementations agree on.
 | Shipped engine | `app/src/main/java/com/example/domain/finance/underwriting/` (12 files) | The pure-Kotlin port the app calls. No Android dependencies. |
 | Parity tests | `app/src/test/java/com/example/UnderwritingGoldenVectorsTest.kt`, `UnderwritingEdgeCasesTest.kt` | Replay every vector through the real engine and diff path by path; plus degenerate-input tests. |
 
-The legacy `FinancialEngine` (`com.example.domain.finance.FinancialEngine`) is
-still present for the older screens and their existing tests; it is **not** the
-underwriting spec and its semantics (e.g. a `999.0` all-cash DSCR sentinel)
-must not leak into new code.
+The legacy `FinancialEngine` (`com.example.domain.finance.FinancialEngine`)
+is **deprecated** and frozen for the standalone Analyzer screen only. It is not
+the underwriting spec and its semantics (e.g. a `999.0` all-cash DSCR
+sentinel) must not leak into new code. `UnderwritingEngine` is the single
+financial source of truth: `FinancialRepository` computes every persisted,
+automated and qualified figure through it, and the legacy `FinancialResult`
+shape survives only as the deterministic projection in
+`FinancialResultProjection`.
 
 ## 2. Verifying it
 
@@ -131,6 +135,17 @@ purchase + financed rehab, never on purchase price alone.
 * `PropertyRoiCalculatorViewModel` no longer asks the model for numbers: the
   engine computes the metrics, the model is asked for qualitative commentary
   only, and `RoiMetricsCalculator.withNarrative` is the single, prose-only code
-  path from model output into the screen model. Its persistence call still
-  writes the legacy `FinancialEngine` snapshot via `FinancialRepository`;
-  migrating `FinancialAnalysisEntity` to the underwriting result is a follow-up.
+  path from model output into the screen model. Its persistence call now
+  stores the exact canonical `UnderwritingInput` that rendered the screen
+  (`FinancialRepository.underwriteProperty`), so the saved row and the
+  displayed metrics can never disagree.
+* `FinancialRepository` is fully migrated to the canonical engine: automated
+  runs are assembled by `PropertyUnderwritingFactory`, which uses observed
+  data (rent estimates, tax records, HOA) exactly and reports every missing
+  observation with an explicit validation finding (`MISSING_RENT_ESTIMATE`,
+  `MISSING_PROPERTY_TAX_RECORD`, ...) instead of the old silent fallbacks
+  (0.8%-of-price rent, 1.2%-of-price taxes, $35k/$5k source-type renovation).
+  Remaining defaults are the named assumptions in `UnderwritingAssumptions` /
+  `FinancingModelDefaultsRegistry`. Persisted comparison scenarios are the
+  same deal re-run under every declared financing model. Regression and
+  edge-case coverage lives in `FinancialRepositorySourceOfTruthTest`.

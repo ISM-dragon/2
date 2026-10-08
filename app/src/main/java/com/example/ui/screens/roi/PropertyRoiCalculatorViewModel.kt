@@ -4,7 +4,6 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.RealEstateAiApp
-import com.example.domain.finance.FinancialInput
 import com.example.domain.finance.underwriting.AssumptionRecord
 import com.example.domain.finance.underwriting.DealRating
 import com.example.domain.finance.underwriting.InvestmentStrategy
@@ -466,9 +465,12 @@ class PropertyRoiCalculatorViewModel(application: Application) : AndroidViewMode
     }
 
     /**
-     * Persists the analysis. The stored row is produced by the legacy
-     * `FinancialEngine` snapshot that [com.example.data.repository.FinancialRepository]
-     * understands; the screen itself renders the deterministic underwriting result above.
+     * Persists the analysis. The stored row is produced by the same deterministic
+     * underwriting run that rendered the screen: [RoiMetricsCalculator.underwritingInput] is
+     * the exact deal the user is looking at, and
+     * [com.example.data.repository.FinancialRepository] underwrites it through the canonical
+     * [com.example.domain.finance.underwriting.UnderwritingEngine], so the saved numbers can
+     * never drift from the displayed ones.
      */
     fun saveAnalysisToDatabase() {
         val pId = uiState.value.propertyDetails.propertyId ?: return
@@ -477,22 +479,7 @@ class PropertyRoiCalculatorViewModel(application: Application) : AndroidViewMode
         val m = uiState.value.marketData
 
         viewModelScope.launch {
-            val input = FinancialInput(
-                purchasePrice = p.purchasePrice,
-                closingCosts = p.purchasePrice * (p.closingCostRatePct / 100.0),
-                renovationCost = p.renovationCost,
-                monthlyRent = m.estimatedMonthlyRent,
-                vacancyRatePct = m.vacancyRatePct,
-                propertyTaxAnnual = m.propertyTaxAnnual,
-                insuranceAnnual = m.insuranceAnnual,
-                maintenancePct = m.maintenancePct,
-                managementPct = m.propertyManagementPct,
-                utilitiesMonthly = m.utilitiesMonthly,
-                downPaymentPct = p.downPaymentPct,
-                interestRatePct = p.interestRatePct,
-                loanTermYears = p.loanTermYears
-            )
-            financialRepo.analyzeProperty(pId, input)
+            financialRepo.underwriteProperty(pId, RoiMetricsCalculator.underwritingInput(p, m))
         }
     }
 
