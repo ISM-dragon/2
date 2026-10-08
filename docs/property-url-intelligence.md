@@ -79,7 +79,11 @@ when (outcome) {
 ### Compliance and politeness (on by default where it matters)
 
 * `port/FetchPolicy` gate before every fetch; `DefaultFetchPolicies.robotsAware(...)` parses the target
-  origin's `/robots.txt` (cached 6 h, 404/410 ⇒ allow) with prefix, `*` and `$` semantics.
+  origin's `/robots.txt` (cached 6 h, 404/410 ⇒ allow) with prefix, `*` and `$` semantics. When
+  `robots.txt` cannot be evaluated at all (5xx, timeout, transport error) the origin is **denied**
+  (`RobotsTxtFetchPolicy.UnavailableBehavior.DENY`); a deployment that has cleared an origin offline
+  can opt back into `ALLOW`. A blank `User-agent:` token never matches a crawler, so a malformed file
+  cannot shadow the `User-agent: *` rules.
 * `pipeline/SourceRateLimiter` — per-source token bucket (default 12 req/min, burst 1).
 * `pipeline/SourceHealthTracker` — circuit breaker: after N source-level failures the source is parked
   for a cool-down and then probed half-open.

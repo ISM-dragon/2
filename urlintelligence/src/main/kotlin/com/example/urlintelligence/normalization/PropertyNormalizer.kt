@@ -17,6 +17,8 @@ import com.example.urlintelligence.provenance.MergePolicy
 import com.example.urlintelligence.provenance.ProvenanceMap
 import com.example.urlintelligence.provenance.VerificationSummary
 import com.example.urlintelligence.retry.Clock
+import com.example.urlintelligence.url.PropertyUrlValidator
+import com.example.urlintelligence.url.UrlParts
 import java.util.Locale
 
 sealed class NormalizationOutcome {
@@ -49,6 +51,9 @@ class PropertyNormalizer(
     private val requiredFields: Set<PropertyField> = PropertyField.REQUIRED_FIELDS,
     private val strictRanges: Boolean = true
 ) {
+
+    /** Stateless host screen reused for the image URLs this normalizer lets through. */
+    private val imageHostPolicy = PropertyUrlValidator()
 
     fun normalize(
         draft: PropertyDraft,
@@ -114,7 +119,7 @@ class PropertyNormalizer(
 
         val images = normalizeImages(draft, warnings)
         val primaryImage = draft.string(PropertyField.PRIMARY_IMAGE_URL)
-            ?.takeIf { isHttpUrl(it) && it !in images }
+            ?.takeIf { isPublicImageUrl(it) && it !in images }
             ?: images.firstOrNull()
 
         val description = draft.string(PropertyField.DESCRIPTION)
@@ -341,19 +346,46 @@ class PropertyNormalizer(
 
     private fun normalizeImages(draft: PropertyDraft, warnings: MutableList<String>): List<String> {
         val all = ArrayList<String>()
-        draft.string(PropertyField.PRIMARY_IMAGE_URL)?.let { if (isHttpUrl(it)) all.add(it) }
-        draft.stringList(PropertyField.IMAGE_URLS).forEach { if (isHttpUrl(it)) all.add(it) }
+        draft.string(PropertyField.PRIMARY_IMAGE_URL)?.let { if (isPublicImageUrl(it)) all.add(it) }
+        draft.stringList(PropertyField.IMAGE_URLS).forEach { if (isPublicImageUrl(it)) all.add(it) }
         val deduped = all.distinct().take(50)
         if (all.size > deduped.size) warnings.add("dropped ${all.size - deduped.size} duplicate image url(s)")
         return deduped
     }
 
-    private fun isHttpUrl(value: String): Boolean =
-        value.startsWith("http://", ignoreCase = true) || value.startsWith("https://", ignoreCase = true)
+    /**
+     * Image URLs come out of documents this module does not control, and callers render them with
+     * their own image loader. They therefore get the same public-destination screening the fetch
+     * boundary applies: absolute http(s), no embedded credentials, no IP literals and no
+     * loopback/link-local/private/metadata hosts.
+     */
+    internal fun isPublicImageUrl(value: String): Boolean {
+        if (value.length > MAX_IMAGE_URL_LENGTH) return false
+        if (!value.startsWith("http://", ignoreCase = true) &&
+            !value.startsWith("https://", ignoreCase = true)
+        ) return false
+        val uri = try {
+            java.net.URI(value)
+        } catch (t: Exception) {
+            return false
+        }
+        if (!uri.userInfo.isNullOrBlank()) return false
+        val host = UrlParts.hostOf(value).trim('.')
+        if (host.isBlank() || !host.contains('.')) return false
+        if (host.startsWith("[") || host.contains(':')) return false // IPv6 literal
+        if (IPV4_LITERAL.matches(host)) return false
+        if (imageHostPolicy.isBlockedHost(host)) return false
+        return UrlParts.pathOf(value).split('/').none { it == ".." }
+    }
 
     private fun currentYear(): Int {
         val calendar = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
         return calendar.get(java.util.Calendar.YEAR)
+    }
+
+    private companion object {
+        const val MAX_IMAGE_URL_LENGTH = 2048
+        val IPV4_LITERAL = Regex("""^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$""")
     }
 }
 

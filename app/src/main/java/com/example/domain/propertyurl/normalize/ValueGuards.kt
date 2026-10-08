@@ -1,6 +1,8 @@
 package com.example.domain.propertyurl.normalize
 
 import com.example.domain.propertyurl.model.PropertyField
+import com.example.domain.propertyurl.url.UrlHosts
+import com.example.domain.propertyurl.url.UrlParser
 import java.util.Locale
 
 /**
@@ -98,14 +100,34 @@ object ValueGuards {
         return GuardResult(false, "unrecognised state: $value")
     }
 
+    /**
+     * Screens an image URL taken from an untrusted listing document.
+     *
+     * These URLs are persisted and later dereferenced by the image loader, so a hostile page could
+     * otherwise point the app at loopback, link-local, RFC1918 or cloud-metadata endpoints — the
+     * same destinations the document fetch path already refuses. Absolute https/http on a public
+     * host name is therefore required: no protocol-relative, credentialed, IP-literal or
+     * non-routable targets.
+     */
     fun imageUrl(value: String?): GuardResult {
         val cleaned = value?.trim() ?: return GuardResult(false, "missing")
         if (cleaned.length < 12 || cleaned.length > 2048) return GuardResult(false, "image url length")
         val lowered = cleaned.lowercase(Locale.US)
-        if (!lowered.startsWith("http://") && !lowered.startsWith("https://") && !lowered.startsWith("//")) {
+        if (!lowered.startsWith("https://") && !lowered.startsWith("http://")) {
             return GuardResult(false, "image url scheme not supported")
         }
         if (lowered.contains("data:image")) return GuardResult(false, "inline data images are not persisted")
+
+        val parts = UrlParser.decompose(cleaned)
+        if (!parts.userInfo.isNullOrEmpty()) return GuardResult(false, "image url credentials")
+        val host = parts.host
+        if (host.isNullOrBlank()) return GuardResult(false, "image url host missing")
+        if (UrlHosts.isIpLiteral(host)) return GuardResult(false, "image url host is an ip literal")
+        if (!UrlHosts.isValidHostSyntax(host) || !UrlHosts.hasTld(host)) {
+            return GuardResult(false, "image url host is malformed")
+        }
+        if (UrlHosts.isPrivateNetwork(host)) return GuardResult(false, "image url host is not public")
+        if (parts.path.split('/').any { it == ".." }) return GuardResult(false, "image url path traversal")
         return ACCEPT
     }
 

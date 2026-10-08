@@ -150,22 +150,61 @@ object UrlHosts {
         return ipv4Octets(lowered)?.let { it[0] == 127 } == true
     }
 
-    /** True for RFC1918 / link-local / CGNAT / unique-local ranges — the layer refuses to fetch these. */
+    /**
+     * True for RFC1918 / link-local / CGNAT / reserved ranges *and* for the non-routable name
+     * spaces (`.local`, `.internal`, `.home.arpa`, `.arpa`, cloud metadata) — the layer refuses to
+     * fetch any of these.
+     *
+     * The name checks matter because they are the only ones that work before DNS: a split-horizon
+     * or attacker-controlled resolver can answer `listing.internal` with a routable public address,
+     * so the address-based check in [com.example.domain.propertyurl.port.PublicOnlyDns] is not a
+     * substitute for refusing the name in the first place.
+     */
     fun isPrivateNetwork(host: String): Boolean {
-        val lowered = stripLeadingWww(host)
+        val lowered = host.lowercase(Locale.US).trim('.')
+        if (isNonRoutableName(lowered) || isNonRoutableName(stripLeadingWww(lowered))) return true
         if (isLoopback(lowered)) return true
-        val octets = ipv4Octets(lowered) ?: return lowered.startsWith("fc") || lowered.startsWith("fd") ||
-            lowered.startsWith("fe80:") || lowered.startsWith("[fc") || lowered.startsWith("[fd")
-        return when (octets[0]) {
-            10 -> true
-            172 -> octets[1] in 16..31
-            192 -> octets[1] == 168
-            169 -> octets[1] == 254
-            100 -> octets[1] in 64..127
-            0 -> true
+        if (lowered.contains(':')) {
+            // Any IPv6 literal spelling that is not global unicast (ULA, link-local, loopback,
+            // unspecified). Global IPv6 answers are still validated per address by PublicOnlyDns.
+            return lowered.startsWith("fc") || lowered.startsWith("fd") ||
+                lowered.startsWith("fe") || lowered.startsWith("::") ||
+                lowered.startsWith("[fc") || lowered.startsWith("[fd") ||
+                lowered.startsWith("[fe") || lowered.startsWith("[::")
+        }
+        val octets = ipv4Octets(lowered) ?: return false
+        val a = octets[0]
+        val b = octets[1]
+        val c = octets[2]
+        return when {
+            a == 0 || a == 10 || a == 127 -> true // 0.0.0.0/8, RFC1918, loopback
+            a >= 224 -> true // multicast (224/4) and reserved (240/4)
+            a == 100 && b in 64..127 -> true // carrier-grade NAT
+            a == 169 && b == 254 -> true // link local / cloud metadata
+            a == 172 && b in 16..31 -> true // RFC1918
+            a == 192 && b == 168 -> true // RFC1918
+            a == 192 && b == 0 && (c == 0 || c == 2) -> true // IETF protocol assignments, TEST-NET-1
+            a == 192 && b == 88 && c == 99 -> true // deprecated 6to4 relay anycast
+            a == 198 && (b == 18 || b == 19) -> true // benchmarking
+            a == 198 && b == 51 && c == 100 -> true // TEST-NET-2
+            a == 203 && b == 0 && c == 113 -> true // TEST-NET-3
             else -> false
         }
     }
+
+    private fun isNonRoutableName(name: String): Boolean {
+        if (name.isEmpty()) return false
+        if (NON_ROUTABLE_HOSTS.contains(name)) return true
+        return NON_ROUTABLE_SUFFIXES.any { name.endsWith(it) }
+    }
+
+    /** Cloud metadata endpoints and the loopback name, in every spelling callers use. */
+    private val NON_ROUTABLE_HOSTS = setOf("localhost", "metadata", "metadata.google.internal")
+
+    /** Infrastructure / private-use name spaces that are never a public listing host. */
+    private val NON_ROUTABLE_SUFFIXES = setOf(
+        ".localhost", ".local", ".internal", ".home.arpa", ".arpa", ".localdomain", ".lan"
+    )
 
     private fun ipv4Octets(host: String): List<Int>? {
         val match = IPV4.matchEntire(host) ?: return null

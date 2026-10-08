@@ -55,10 +55,18 @@ class RobotsTxt private constructor(
         val loweredAgent = userAgent.lowercase(Locale.US)
         val specific = groups
             .filter { group -> group.agents.none { it == "*" } }
-            .filter { group -> group.agents.any { loweredAgent.contains(it) } }
-            .maxByOrNull { group -> group.agents.maxOf { it.length } }
+            .filter { group -> group.agents.any { isAgentMatch(it, loweredAgent) } }
+            .maxByOrNull { group -> group.agents.filter { it.isNotBlank() }.maxOf { it.length } }
         return specific ?: groups.firstOrNull { group -> group.agents.any { it == "*" } }
     }
+
+    /**
+     * A blank `User-agent:` value (a truncated or malformed robots.txt) names no crawler, so it must
+     * never match: treating it as a wildcard lets a stray blank line shadow the `*` group and
+     * silently re-allow every path that group disallowed.
+     */
+    private fun isAgentMatch(agentToken: String, loweredAgent: String): Boolean =
+        agentToken.isNotBlank() && loweredAgent.contains(agentToken)
 
     companion object {
 
