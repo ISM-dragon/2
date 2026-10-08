@@ -217,7 +217,7 @@ private class Migration1To2 : Migration(1, 2) {
                     db.execSQL(shape.createTableSql)
                     shape.indexSql.forEach { db.execSQL(it) }
                 }
-                shape.columns.any { it !in existing } -> rebuildToV2Shape(db, shape)
+                existing != shape.columns.toSet() -> rebuildToV2Shape(db, shape)
                 else -> shape.indexSql.forEach { db.execSQL(it) }
             }
         }
@@ -512,6 +512,28 @@ SELECT `p`.`id`, COALESCE(`t`.`assessedValue`, 0.0), COALESCE(`t`.`assessmentYea
 FROM `properties` AS `p`
 LEFT JOIN `tax_records` AS `t` ON `t`.`propertyId` = `p`.`id`
 LEFT JOIN `rent_estimates` AS `r` ON `r`.`propertyId` = `p`.`id`""")
+
+        // ── offer_email_sends ──────────────────────────────────────────────────────────────────
+        db.execSQL("""CREATE TABLE IF NOT EXISTS `offer_email_sends` (`idempotencyKey` TEXT NOT NULL, `offerId` TEXT NOT NULL, `status` TEXT NOT NULL, `attemptCount` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `startedAt` INTEGER, `sentAt` INTEGER, `messageId` TEXT, `nextAttemptAt` INTEGER, `lastError` TEXT, `lastFailureKind` TEXT, PRIMARY KEY(`idempotencyKey`))""")
+        db.execSQL("""CREATE UNIQUE INDEX IF NOT EXISTS `index_offer_email_sends_offerId` ON `offer_email_sends` (`offerId`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_offer_email_sends_status` ON `offer_email_sends` (`status`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_offer_email_sends_nextAttemptAt` ON `offer_email_sends` (`nextAttemptAt`)""")
+
+        // ── offer_audit_events ─────────────────────────────────────────────────────────────────
+        db.execSQL("""CREATE TABLE IF NOT EXISTS `offer_audit_events` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `offerId` TEXT NOT NULL, `idempotencyKey` TEXT, `eventType` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `status` TEXT, `details` TEXT)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_offer_audit_events_offerId_timestamp` ON `offer_audit_events` (`offerId`, `timestamp`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_offer_audit_events_idempotencyKey` ON `offer_audit_events` (`idempotencyKey`)""")
+
+        // ── property_ai_analysis ───────────────────────────────────────────────────────────────
+        db.execSQL("""CREATE TABLE IF NOT EXISTS `property_ai_analysis` (`propertyId` TEXT NOT NULL, `summary` TEXT NOT NULL, `investmentThesis` TEXT NOT NULL, `strengthsJson` TEXT NOT NULL, `weaknessesJson` TEXT NOT NULL, `risksJson` TEXT NOT NULL, `redFlagsJson` TEXT NOT NULL, `recommendedStrategy` TEXT NOT NULL, `recommendedOfferRange` TEXT NOT NULL, `questionsForSellerJson` TEXT NOT NULL, `dueDiligenceJson` TEXT NOT NULL, `confidence` REAL NOT NULL, `evidenceJson` TEXT NOT NULL, `analyzedAt` INTEGER NOT NULL, PRIMARY KEY(`propertyId`))""")
+
+        // ── property_source_links ──────────────────────────────────────────────────────────────
+        db.execSQL("""CREATE TABLE IF NOT EXISTS `property_source_links` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `propertyId` TEXT NOT NULL, `source` TEXT NOT NULL, `sourceUrl` TEXT NOT NULL, `listingId` TEXT, `isPrimary` INTEGER NOT NULL, `lastSyncedAt` INTEGER NOT NULL)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_property_source_links_propertyId` ON `property_source_links` (`propertyId`)""")
+        db.execSQL("""CREATE INDEX IF NOT EXISTS `index_property_source_links_sourceUrl` ON `property_source_links` (`sourceUrl`)""")
+
+        // ── source_health ──────────────────────────────────────────────────────────────────────
+        db.execSQL("""CREATE TABLE IF NOT EXISTS `source_health` (`source` TEXT NOT NULL, `successCount` INTEGER NOT NULL, `failureCount` INTEGER NOT NULL, `successRate` REAL NOT NULL, `failureRate` REAL NOT NULL, `averageLatencyMs` INTEGER NOT NULL, `lastSuccessAt` INTEGER, `lastFailureAt` INTEGER, `parserVersion` TEXT NOT NULL, `healthStatus` TEXT NOT NULL, `lastErrorReason` TEXT, PRIMARY KEY(`source`))""")
     }
 }
 
