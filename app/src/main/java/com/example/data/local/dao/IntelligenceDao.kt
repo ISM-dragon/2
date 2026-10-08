@@ -22,6 +22,9 @@ interface IntelligenceDao {
     @Query("SELECT * FROM property_source_links WHERE propertyId = :propertyId")
     fun getSourcesForProperty(propertyId: String): Flow<List<PropertySourceLinkEntity>>
 
+    @Query("SELECT * FROM property_source_links WHERE propertyId = :propertyId")
+    suspend fun getSourcesListForProperty(propertyId: String): List<PropertySourceLinkEntity>
+
     @Query("SELECT * FROM property_provenance WHERE propertyId = :propertyId")
     fun getProvenanceForProperty(propertyId: String): Flow<List<PropertyProvenanceEntity>>
 
