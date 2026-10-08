@@ -62,7 +62,8 @@ class PropertyImportJobStateMachineTest {
         assertEquals(ImportJobState.SUCCEEDED, job.state)
         assertTrue(job.state.isTerminal)
         assertTrue(job.state.isSuccessful)
-        assertEquals(8, job.transitions.size)
+        // One transition per accepted event; creation itself is not a transition.
+        assertEquals(7, job.transitions.size)
         assertEquals("zillow", job.sourceId)
         assertEquals(ImportJobState.CREATED, job.transitions.first().from)
         assertEquals(ImportJobState.SUCCEEDED, job.transitions.last().to)
@@ -205,9 +206,9 @@ class IdempotencyTest {
 
     @Test
     fun `reservations are exclusive`() {
-        val store: IdempotencyStore<String> = InMemoryIdempotencyStore(TestClock())
+        val store: IdempotencyStore<String> = InMemoryIdempotencyStore<String>(TestClock())
         val key = IdempotencyKey("k")
-        val record = com.example.urlintelligence.idempotency.IdempotencyRecord(
+        val record = com.example.urlintelligence.idempotency.IdempotencyRecord<String>(
             key = key,
             state = IdempotencyState.IN_FLIGHT,
             createdAtEpochMillis = 0L,

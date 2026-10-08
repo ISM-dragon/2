@@ -1,6 +1,8 @@
 package com.example.urlintelligence.adapter
 
 import com.example.urlintelligence.model.PropertyField
+import com.example.urlintelligence.parser.ParserSpec
+import com.example.urlintelligence.parser.SignatureProbe
 import com.example.urlintelligence.provenance.Confidence
 import com.example.urlintelligence.retry.Clock
 import com.example.urlintelligence.source.KnownSources
@@ -17,9 +19,29 @@ class HomesAdapter(
     clock: Clock = Clock.SYSTEM
 ) : StructuredDataPropertySourceAdapter(transport, KnownSources.HOMES, clock) {
 
+    override val parserSpec: ParserSpec = PARSER_SPEC
+
     override fun selectors(): List<FieldSelector> = SELECTORS
 
     companion object {
+        /** Parser contract; bump [ParserSpec.version] when the selector table changes. */
+        val PARSER_SPEC: ParserSpec = ParserSpec(
+            parserId = "homes.html",
+            version = "2",
+            probes = listOf(
+                SignatureProbe("property-id", Regex("\"propertyId\"\\s*:\\s*\"?[0-9]{6,12}"), required = true),
+                SignatureProbe("json-ld", Regex("application/ld\\+json", RegexOption.IGNORE_CASE)),
+                SignatureProbe("homes-cdn", Regex("images\\.homes\\.com", RegexOption.IGNORE_CASE))
+            ),
+            minProbesMatched = 2,
+            minFieldsExtracted = 3,
+            expectedFields = setOf(
+                PropertyField.LIST_PRICE,
+                PropertyField.BEDROOMS,
+                PropertyField.ADDRESS_LINE1
+            )
+        )
+
         val SELECTORS: List<FieldSelector> = listOf(
             FieldSelector(
                 field = PropertyField.LIST_PRICE,

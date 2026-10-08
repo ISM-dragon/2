@@ -3,6 +3,8 @@ package com.example.urlintelligence.adapter
 import com.example.urlintelligence.html.Html
 import com.example.urlintelligence.model.PropertyDraft
 import com.example.urlintelligence.model.PropertyField
+import com.example.urlintelligence.parser.ParserSpec
+import com.example.urlintelligence.parser.SignatureProbe
 import com.example.urlintelligence.provenance.Confidence
 import com.example.urlintelligence.provenance.ExtractionMethod
 import com.example.urlintelligence.retry.Clock
@@ -20,6 +22,8 @@ class GenericWebAdapter(
     transport: PropertyHttpTransport,
     clock: Clock = Clock.SYSTEM
 ) : StructuredDataPropertySourceAdapter(transport, KnownSources.GENERIC, clock) {
+
+    override val parserSpec: ParserSpec = PARSER_SPEC
 
     override fun selectors(): List<FieldSelector> = SELECTORS
 
@@ -47,6 +51,25 @@ class GenericWebAdapter(
     }
 
     private companion object {
+
+        /**
+         * Deliberately loose contract: the generic adapter accepts any public page, so it
+         * needs no required probes. It still watches for its three entry points, which turns
+         * "this page used to have JSON-LD" into an observable warning.
+         */
+        val PARSER_SPEC: ParserSpec = ParserSpec(
+            parserId = "generic.html",
+            version = "1",
+            probes = listOf(
+                SignatureProbe("json-ld", Regex("application/ld\\+json", RegexOption.IGNORE_CASE)),
+                SignatureProbe("og-title", Regex("property=\"og:title\"", RegexOption.IGNORE_CASE)),
+                SignatureProbe("address-heading", Regex("<h1[^>]*>\\s*[0-9]", RegexOption.IGNORE_CASE))
+            ),
+            minProbesMatched = 1,
+            minFieldsExtracted = 1,
+            downgradeUnverifiedOnDrift = true
+        )
+
         val H1_RE = Regex(
             "<h1[^>]*>(.*?)</h1>",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)

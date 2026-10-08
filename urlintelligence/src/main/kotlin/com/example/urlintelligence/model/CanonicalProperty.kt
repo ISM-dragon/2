@@ -1,6 +1,7 @@
 package com.example.urlintelligence.model
 
 import com.example.urlintelligence.provenance.ProvenanceMap
+import com.example.urlintelligence.provenance.VerificationSummary
 
 /** Physical type of the asset, normalized across sources. */
 enum class CanonicalPropertyType {
@@ -48,8 +49,9 @@ data class CanonicalAddress(
             line1?.let { value -> add(value) }
             unit?.let { value -> add("Unit $value") }
             city?.let { value -> add(value) }
-            stateOrProvince?.let { value -> add(value) }
-            postalCode?.let { value -> add(value) }
+            // US convention: the state and ZIP form one token ("Austin, TX 78704"), not two.
+            val region = listOfNotNull(stateOrProvince, postalCode).joinToString(" ")
+            if (region.isNotBlank()) add(region)
         }.joinToString(", ")
 
     /** Stable identity key used to detect the same physical property across sources. */
@@ -136,8 +138,26 @@ data class CanonicalProperty(
     val fetchedAtEpochMillis: Long = 0L,
     val completeness: CompletenessReport,
     val provenance: ProvenanceMap,
-    val warnings: List<String> = emptyList()
+    val warnings: List<String> = emptyList(),
+    /**
+     * How well this record is verified: parser-verified (a versioned parser matched the
+     * document) vs live-fetch-verified (the document was fetched from the provider now).
+     * Never claims more than was actually performed.
+     */
+    val verification: VerificationSummary = VerificationSummary.NONE,
+    /** Digest of the extracted content, used for property-level idempotency. */
+    val contentDigest: String = "",
+    /** `parserId@version` values that produced fields on this record. */
+    val parserVersions: List<String> = emptyList()
 ) {
+
+    /** True only when a live fetch against the provider produced data for this record. */
+    val isLiveVerified: Boolean
+        get() = verification.liveVerified
+
+    /** True when a versioned parser matched the source document. */
+    val isParserVerified: Boolean
+        get() = verification.parserVerified
 
     val pricePerSqFtUsd: Double?
         get() {

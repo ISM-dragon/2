@@ -210,6 +210,9 @@ data class PropertyImportJob(
             ImportJobState.PARSING to mapOf(
                 ImportJobEvent.PARSE_SUCCEEDED to ImportJobState.NORMALIZING,
                 ImportJobEvent.PARSE_FAILED to ImportJobState.FAILED,
+                // A document can refuse to be used after the fetch (X-Robots-Tag: noindex,
+                // login/consent interstitial). That is a policy stop, not a retryable error.
+                ImportJobEvent.POLICY_BLOCKED to ImportJobState.FAILED,
                 ImportJobEvent.CANCEL to ImportJobState.CANCELLED
             ),
             ImportJobState.NORMALIZING to mapOf(

@@ -120,14 +120,23 @@ object CanonicalPropertyMapper {
         )
     }
 
-    /** Human readable provenance summary, safe to show in a details screen or log. */
+    /**
+     * Human readable provenance summary, safe to show in a details screen or log.
+     *
+     * Each line names the source, the extractor, the parser version and how well the value is
+     * verified — so "parser verified" is never displayed as "verified against the provider".
+     */
     fun provenanceSummary(property: CanonicalProperty): String =
         property.provenance.entries().entries
             .sortedBy { it.key.name }
             .joinToString(separator = "\n") { (field, provenance) ->
                 "${field.stableName}: ${provenance.sourceId} (${provenance.method}, " +
-                    "confidence=${"%.2f".format(provenance.confidence)})"
+                    "${provenance.parserRef}, confidence=${"%.2f".format(provenance.confidence)}, " +
+                    "verification=${provenance.verification})"
             }
+
+    /** One-line, user-safe statement of what was actually verified for this property. */
+    fun verificationSummary(property: CanonicalProperty): String = property.verification.describe()
 
     fun sourceTypeOf(property: CanonicalProperty): String = when (property.listingStatus) {
         CanonicalListingStatus.FOR_SALE,

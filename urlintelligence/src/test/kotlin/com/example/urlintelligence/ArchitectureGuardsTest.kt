@@ -53,13 +53,17 @@ class ArchitectureGuardsTest {
 
     @Test
     fun `no java time usage so the module runs on older android runtimes`() {
+        // The token is assembled at runtime and this file is skipped: the guard would otherwise
+        // match the literal it is searching for and always fail.
+        val forbidden = "java" + ".time."
         files()
             .filter { it.path.endsWith(".kt") }
+            .filter { !it.name.contains("ArchitectureGuardsTest") }
             .forEach { file ->
                 val text = file.readText()
                 assertTrue(
                     "${file.path} must not use java.time (requires API 26 / desugaring)",
-                    !text.contains("java.time.")
+                    !text.contains(forbidden)
                 )
             }
     }

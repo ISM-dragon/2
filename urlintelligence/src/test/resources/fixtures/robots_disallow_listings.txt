@@ -1,0 +1,7 @@
+# Example provider robots.txt (fixture)
+User-agent: *
+Disallow: /search/
+Disallow: /homedetails/private-*
+Allow: /homedetails/
+Crawl-delay: 10
+Sitemap: https://www.example-portal.test/sitemap.xml

@@ -1,6 +1,7 @@
 package com.example.urlintelligence.normalization
 
 import com.example.urlintelligence.failure.SourceFailure
+import com.example.urlintelligence.idempotency.Digests
 import com.example.urlintelligence.idempotency.IdempotencyKey
 import com.example.urlintelligence.model.CanonicalAddress
 import com.example.urlintelligence.model.CanonicalListingStatus
@@ -14,6 +15,7 @@ import com.example.urlintelligence.provenance.Confidence
 import com.example.urlintelligence.provenance.ExtractionMethod
 import com.example.urlintelligence.provenance.MergePolicy
 import com.example.urlintelligence.provenance.ProvenanceMap
+import com.example.urlintelligence.provenance.VerificationSummary
 import com.example.urlintelligence.retry.Clock
 import java.util.Locale
 
@@ -182,6 +184,23 @@ class PropertyNormalizer(
             canonicalUrl = draft.resolvedUrl.ifBlank { draft.requestUrl }
         )
 
+        // Provenance is built from the draft (which carries the parser id/version, the
+        // document digest and the fetch origin), then audited: a field that survives
+        // normalization without provenance is a bug, not an acceptable gap.
+        val provenance = draft.provenance(extractedAt)
+        val missingProvenance = present.filterNot { provenance.contains(it) }
+        if (missingProvenance.isNotEmpty()) {
+            warnings.add(
+                "internal: ${missingProvenance.size} field(s) lost provenance: " +
+                    missingProvenance.joinToString { it.stableName }
+            )
+        }
+        val verification = VerificationSummary.from(provenance.entries(), draft.origin)
+        val contentDigest = Digests.fieldsDigest(
+            sourceId = draft.sourceId,
+            values = draft.snapshot().mapValues { (_, value) -> value.value }
+        )
+
         val property = CanonicalProperty(
             canonicalId = canonicalId,
             sourceId = draft.sourceId,
@@ -209,8 +228,11 @@ class PropertyNormalizer(
             parcelId = draft.string(PropertyField.PARCEL_ID)?.trim(),
             fetchedAtEpochMillis = extractedAt,
             completeness = CompletenessReport.compute(present, requiredFields),
-            provenance = draft.provenance(extractedAt),
-            warnings = warnings
+            provenance = provenance,
+            warnings = warnings,
+            verification = verification,
+            contentDigest = contentDigest,
+            parserVersions = verification.parsers
         )
 
         if (line1 == null && draft.sourcePropertyId == null) {
@@ -348,6 +370,12 @@ object CanonicalPropertyMerger {
         policy: MergePolicy = MergePolicy.HighestConfidence
     ): CanonicalProperty {
         val provenance = primary.provenance.merge(secondary.provenance, policy)
+        val mergedOrigin = if (primary.verification.origin == com.example.urlintelligence.provenance.FetchOrigin.LIVE_NETWORK) {
+            primary.verification.origin
+        } else {
+            secondary.verification.origin
+        }
+        val mergedVerification = VerificationSummary.from(provenance.entries(), mergedOrigin)
         val merged = primary.copy(
             sourcePropertyId = primary.sourcePropertyId ?: secondary.sourcePropertyId,
             propertyType = if (primary.propertyType == CanonicalPropertyType.UNKNOWN) secondary.propertyType else primary.propertyType,
@@ -373,7 +401,9 @@ object CanonicalPropertyMerger {
                 primary.completeness.present + secondary.completeness.present
             ),
             provenance = provenance,
-            warnings = primary.warnings + secondary.warnings
+            warnings = primary.warnings + secondary.warnings,
+            verification = mergedVerification,
+            parserVersions = mergedVerification.parsers
         )
         return merged
     }

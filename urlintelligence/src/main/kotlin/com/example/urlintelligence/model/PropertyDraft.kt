@@ -1,9 +1,13 @@
 package com.example.urlintelligence.model
 
+import com.example.urlintelligence.parser.SchemaDriftReport
 import com.example.urlintelligence.provenance.Confidence
 import com.example.urlintelligence.provenance.ExtractionMethod
+import com.example.urlintelligence.provenance.FetchOrigin
 import com.example.urlintelligence.provenance.FieldProvenance
 import com.example.urlintelligence.provenance.ProvenanceMap
+import com.example.urlintelligence.provenance.VerificationSummary
+import com.example.urlintelligence.provenance.verificationLevelFor
 
 /** A single extracted value together with everything needed to build provenance for it. */
 data class DraftField(
@@ -13,7 +17,13 @@ data class DraftField(
     val confidence: Double,
     val extractor: String,
     val rawValue: String?,
-    val note: String?
+    val note: String?,
+    /**
+     * Whether this value is covered by the parser's versioned contract. Heuristics and
+     * degraded (drifted) parses set this to false so the field is never reported as
+     * parser-verified.
+     */
+    val verifiedByParser: Boolean = true
 )
 
 /**
@@ -29,6 +39,31 @@ class PropertyDraft(
     val resolvedUrl: String = requestUrl,
     var sourcePropertyId: String? = null
 ) {
+
+    /** Versioned parser that produced this draft (`zillow.html`), when one exists. */
+    var parserId: String? = null
+
+    /** Version of that parser; stamped onto every field's provenance. */
+    var parserVersion: String? = null
+
+    /** Digest of the document the draft was extracted from. */
+    var documentDigest: String? = null
+
+    /** Where the document came from; only a live fetch can yield live-verified fields. */
+    var origin: FetchOrigin = FetchOrigin.UNSPECIFIED
+
+    /** Schema-drift verdict for the document this draft came from. */
+    var drift: SchemaDriftReport? = null
+
+    /**
+     * Marks every field recorded so far as not covered by the parser contract. Used when a
+     * document drifted away from the parser's signature, so nothing is over-claimed.
+     */
+    fun downgradeVerificationToUnverified() {
+        val snapshot = fields.entries.toList()
+        fields.clear()
+        snapshot.forEach { (field, draft) -> fields[field] = draft.copy(verifiedByParser = false) }
+    }
 
     private val fields: LinkedHashMap<PropertyField, DraftField> = LinkedHashMap()
 
@@ -134,12 +169,21 @@ class PropertyDraft(
                 confidence = draft.confidence,
                 rawValue = draft.rawValue,
                 extractedAtEpochMillis = extractedAtEpochMillis,
-                notes = draft.note
+                notes = draft.note,
+                parserId = parserId,
+                parserVersion = parserVersion,
+                documentDigest = documentDigest,
+                verification = verificationLevelFor(draft.verifiedByParser, origin)
             )
         }
         return ProvenanceMap(map)
     }
 
+    /** Field-level verification tally for this draft's document. */
+    fun verification(extractedAtEpochMillis: Long): VerificationSummary =
+        VerificationSummary.from(provenance(extractedAtEpochMillis).entries(), origin)
+
     override fun toString(): String =
-        "PropertyDraft(source=$sourceId, fields=${fields.size}, id=$sourcePropertyId)"
+        "PropertyDraft(source=$sourceId, fields=${fields.size}, id=$sourcePropertyId, " +
+            "parser=${parserId ?: "-"}@${parserVersion ?: "-"}, origin=$origin)"
 }

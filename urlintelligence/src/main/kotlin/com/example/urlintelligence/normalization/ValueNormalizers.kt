@@ -159,9 +159,9 @@ object DateParser {
         }
         // Strip a trailing UTC designator / offset; we intentionally normalize to UTC.
         val candidate = value
-            .replace(Regex("Z$"), "")
-            .replace(Regex("[+-][0-9]{2}:?[0-9]{2}$"), "")
-            .replace(Regex("\.[0-9]+$"), "")
+            .replace(Regex("Z\$"), "")
+            .replace(Regex("[+-][0-9]{2}:?[0-9]{2}\$"), "")
+            .replace(Regex("\\.[0-9]+\$"), "")
             .trim()
         FORMATS.forEach { pattern ->
             try {

@@ -76,6 +76,11 @@ data class NormalizedUrl(
     val query: Map<String, String>,
     val droppedParameters: List<String>
 ) {
+    /**
+     * Host without a leading `www.`. Used by the identity keys: `www.zillow.com` and
+     * `zillow.com` are one listing for dedup purposes even though the canonical URL keeps the
+     * spelling the provider actually serves.
+     */
     val hostWithoutWww: String
         get() = host.removePrefix("www.")
 
@@ -217,6 +222,9 @@ class PropertyUrlValidator(private val config: UrlValidationConfig = UrlValidati
         }
 
         val port = uri.port.takeIf { it > 0 && it != defaultPort(scheme) }
+        // The canonical URL stays faithful to the host the provider serves (`www.zillow.com` is
+        // what we will actually fetch and what robots.txt governs). Deduplication across
+        // `www.`/bare spellings is handled by the identity keys, not by rewriting the target.
         val canonical = buildCanonical(scheme, asciiHost, port, path, kept)
 
         return UrlValidationResult.Valid(

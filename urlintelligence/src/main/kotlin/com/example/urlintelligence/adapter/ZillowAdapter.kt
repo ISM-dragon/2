@@ -1,6 +1,8 @@
 package com.example.urlintelligence.adapter
 
 import com.example.urlintelligence.model.PropertyField
+import com.example.urlintelligence.parser.ParserSpec
+import com.example.urlintelligence.parser.SignatureProbe
 import com.example.urlintelligence.provenance.Confidence
 import com.example.urlintelligence.provenance.ExtractionMethod
 import com.example.urlintelligence.retry.Clock
@@ -20,9 +22,34 @@ class ZillowAdapter(
     clock: Clock = Clock.SYSTEM
 ) : StructuredDataPropertySourceAdapter(transport, KnownSources.ZILLOW, clock) {
 
+    override val parserSpec: ParserSpec = PARSER_SPEC
+
     override fun selectors(): List<FieldSelector> = SELECTORS
 
     companion object {
+        /**
+         * Parser contract. Bump [ParserSpec.version] whenever the selector table below
+         * changes: drift detection and per-field provenance both key off it.
+         */
+        val PARSER_SPEC: ParserSpec = ParserSpec(
+            parserId = "zillow.html",
+            version = "3",
+            probes = listOf(
+                SignatureProbe("zpid", Regex("\"zpid\"\\s*:\\s*\"?[0-9]{6,12}"), required = true),
+                SignatureProbe("json-ld", Regex("application/ld\\+json", RegexOption.IGNORE_CASE)),
+                SignatureProbe("zillow-cdn", Regex("zillowstatic\\.com", RegexOption.IGNORE_CASE))
+            ),
+            minProbesMatched = 2,
+            minFieldsExtracted = 3,
+            expectedFields = setOf(
+                PropertyField.LIST_PRICE,
+                PropertyField.BEDROOMS,
+                PropertyField.ADDRESS_LINE1,
+                PropertyField.CITY,
+                PropertyField.STATE
+            )
+        )
+
         val SELECTORS: List<FieldSelector> = listOf(
             FieldSelector(
                 field = PropertyField.LIST_PRICE,

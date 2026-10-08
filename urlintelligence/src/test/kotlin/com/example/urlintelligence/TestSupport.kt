@@ -6,6 +6,7 @@ import com.example.urlintelligence.adapter.SourceFetchRequest
 import com.example.urlintelligence.adapter.SourceFetchResponse
 import com.example.urlintelligence.failure.SourceFailure
 import com.example.urlintelligence.model.PropertyDraft
+import com.example.urlintelligence.provenance.FetchOrigin
 import com.example.urlintelligence.retry.Clock
 import com.example.urlintelligence.retry.Sleeper
 import com.example.urlintelligence.source.SourceDescriptor
@@ -42,15 +43,6 @@ class TestClock(var now: Long = 1_700_000_000_000L) : Clock {
     }
 }
 
-/** Sleeper that records delays instead of waiting. */
-class RecordingSleeper : Sleeper {
-    val delays = mutableListOf<Long>()
-
-    override suspend fun delay(millis: Long) {
-        delays += millis
-    }
-}
-
 /**
  * Scriptable transport.
  *
@@ -63,10 +55,49 @@ class FakeTransport(
     private val statuses: List<Int> = listOf(200),
     private val failures: List<SourceFailure?> = listOf(null),
     private val finalUrls: List<String>? = null,
-    private val headers: Map<String, String> = emptyMap()
+    private val headers: Map<String, String> = emptyMap(),
+    /**
+     * Origin reported to the pipeline. Defaults to [FetchOrigin.REPLAYED]: a scripted
+     * transport must never be able to produce live-verified data.
+     */
+    private val origin: FetchOrigin = FetchOrigin.REPLAYED,
+    /** Overrides the body content type (defaults to text/html). */
+    private val contentType: String? = "text/html",
+    private val redirectCount: Int = 0,
+    /** Reported wire size; -1 lets the pipeline fall back to the body length. */
+    private val reportedByteSize: Int = -1,
+    /** Bodies keyed by request URL, taking precedence over [bodies] when present. */
+    private val bodiesByUrl: Map<String, String> = emptyMap()
 ) : PropertyHttpTransport {
 
     val requests: MutableList<SourceFetchRequest> = mutableListOf()
+
+    /**
+     * URL-keyed bodies, tolerant of the canonicalisation the pipeline applies (the resolver
+     * requests `NormalizedUrl.canonical`, which drops a trailing slash).
+     */
+    private fun lookupBody(url: String): String? {
+        variantsOf(url).forEach { candidate -> bodiesByUrl[candidate]?.let { return it } }
+        return null
+    }
+
+    /**
+     * Equivalent spellings of one request URL: the pipeline canonicalises (dropping a trailing
+     * slash and a leading `www.`), while a test may key the map with either form.
+     */
+    private fun variantsOf(url: String): List<String> = buildList {
+        add(url)
+        if (url.endsWith("/")) add(url.dropLast(1)) else add("$url/")
+        val hostStart = url.indexOf("://") + 3
+        if (hostStart > 2) {
+            val hostEnd = url.indexOf('/', hostStart).let { if (it < 0) url.length else it }
+            val host = url.substring(hostStart, hostEnd)
+            val swapped = if (host.startsWith("www.")) host.removePrefix("www.") else "www.$host"
+            listOf(url.take(hostStart), swapped, url.substring(hostEnd))
+                .joinToString("")
+                .let { add(it); add(if (it.endsWith("/")) it.dropLast(1) else "$it/") }
+        }
+    }
 
     override suspend fun execute(request: SourceFetchRequest): SourceFetchResponse {
         requests += request
@@ -76,7 +107,8 @@ class FakeTransport(
 
         val status = if (index < statuses.size) statuses[index] else statuses.lastOrNull() ?: 200
         val callIndex = requests.size - 1
-        val body = if (callIndex < bodies.size) bodies[callIndex] else bodies.lastOrNull() ?: ""
+        val body = lookupBody(request.requestUrl)
+            ?: if (callIndex < bodies.size) bodies[callIndex] else bodies.lastOrNull() ?: ""
         val finalUrl = finalUrls?.let { if (index < it.size) it[index] else it.lastOrNull() }
             ?: request.requestUrl
 
@@ -88,10 +120,13 @@ class FakeTransport(
         return SourceFetchResponse.Success(
             statusCode = status,
             body = body,
-            contentType = "text/html",
+            contentType = contentType,
             finalUrl = finalUrl,
             fetchedAtEpochMillis = 1_700_000_000_000L,
-            headers = headers
+            headers = headers,
+            reportedByteSize = reportedByteSize,
+            redirectCount = redirectCount,
+            origin = origin
         )
     }
 }
@@ -105,6 +140,12 @@ object SourceFailureClassifierForTests {
 /** Minimal adapter used to exercise registry wiring without touching the network. */
 class FakeAdapter(
     override val descriptor: SourceDescriptor,
+    /**
+     * When supplied, `fetch` goes through the transport (so the response the pipeline sees is
+     * the one the transport produced — used to prove the resolver guards third-party adapters
+     * that implement only the interface). Without it the adapter answers with a canned page.
+     */
+    private val transport: PropertyHttpTransport? = null,
     private val draftProducer: (SourceFetchRequest) -> PropertyDraft = {
         PropertyDraft(descriptor.id, it.requestUrl).apply {
             sourcePropertyId = it.sourcePropertyId
@@ -117,6 +158,7 @@ class FakeAdapter(
 
     override suspend fun fetch(request: SourceFetchRequest): SourceFetchResponse {
         fetchCalls++
+        transport?.let { return it.execute(request) }
         return SourceFetchResponse.Success(
             statusCode = 200,
             body = "<html></html>",
