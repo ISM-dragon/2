@@ -38,6 +38,8 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
+      # The CRM suite (com.example.domain.crm.*) is pure JVM (no Android/Room imports, see
+      # LeadCrmIsolationTest), so it runs in the same invocation as the analyst tests.
       - name: Run AI Analyst test suite
         shell: bash
         run: |
@@ -47,6 +49,7 @@ jobs:
             --tests "com.example.RealEstateAnalystOutputValidatorTest" \
             --tests "com.example.RealEstateAnalystInputFactoryTest" \
             --tests "com.example.RealEstateAnalystHardeningTest" \
+            --tests "com.example.domain.crm.*" \
             >"$RUNNER_TEMP/ai-analyst-gradle.log" 2>&1
           status=$?
           cat "$RUNNER_TEMP/ai-analyst-gradle.log"
