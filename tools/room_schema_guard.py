@@ -1053,6 +1053,21 @@ def main() -> int:
                 "0, 0, 1, 0, '', '', NULL, '')",
                 ("walkapi", "walkapi"),
             ),
+            (
+                "unique offer_email_sends offerId",
+                "INSERT INTO offer_email_sends (idempotencyKey, offerId, status, attemptCount, "
+                "createdAt, updatedAt) VALUES (?, 'offer-1', 'PENDING', 0, 1, 1)",
+                ("send-key-1", "send-key-2"),
+            ),
+            (
+                "unique property_sources adapterKey",
+                "INSERT INTO property_sources (id, name, sourceKind, adapterKey, description, "
+                "isEnabled, priority, requiresAttribution, attributionText, licenseNotes, "
+                "maxRequestsPerMinute, refreshIntervalMinutes, lastSyncAt, lastSyncStatus, "
+                "createdAt, updatedAt) VALUES (?, 'Test Feed', 'MLS', 'test.adapter.v1', '', "
+                "1, 10, 0, '', '', 60, 60, 0, 'NEVER', 1, 1)",
+                ("src-t1", "src-t2"),
+            ),
         ]
         for label, sql, (first_value, second_value) in integrity_checks:
             try:
@@ -1067,6 +1082,48 @@ def main() -> int:
             except sqlite3.IntegrityError:
                 pass
             conn.rollback()
+
+        # v4 new tables population and query checks
+        try:
+            conn.execute(
+                "INSERT INTO property_ai_analysis (propertyId, summary, investmentThesis, "
+                "strengthsJson, weaknessesJson, risksJson, redFlagsJson, recommendedStrategy, "
+                "recommendedOfferRange, questionsForSellerJson, dueDiligenceJson, confidence, "
+                "evidenceJson, analyzedAt) VALUES ('prop-old-1', 'Good deal', 'Cash flow positive', "
+                "'[]', '[]', '[]', '[]', 'BRRRR', '450k-480k', '[]', '[]', 0.92, '{}', 1000)"
+            )
+            conn.execute(
+                "INSERT INTO property_source_links (propertyId, source, sourceUrl, listingId, "
+                "isPrimary, lastSyncedAt) VALUES ('prop-old-1', 'MLS', 'https://example.com/p1', 'mls-1', 1, 1000)"
+            )
+            conn.execute(
+                "INSERT INTO source_health (source, successCount, failureCount, successRate, "
+                "failureRate, averageLatencyMs, lastSuccessAt, lastFailureAt, parserVersion, "
+                "healthStatus, lastErrorReason) VALUES ('MLS', 10, 0, 1.0, 0.0, 150, 1000, NULL, "
+                "'v1.0', 'HEALTHY', NULL)"
+            )
+            conn.execute(
+                "INSERT INTO offer_audit_events (offerId, idempotencyKey, eventType, timestamp, "
+                "status, details) VALUES ('offer-1', 'send-key-1', 'CREATED', 1000, 'SUCCESS', 'Created')"
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            failures.append(f"v4 table insert test failed: {exc}")
+
+        # SET NULL behavior check for primarySourceId and provenanceId
+        conn.execute(
+            "INSERT INTO property_sources (id, name, sourceKind, adapterKey, description, "
+            "isEnabled, priority, requiresAttribution, attributionText, licenseNotes, "
+            "maxRequestsPerMinute, refreshIntervalMinutes, lastSyncAt, lastSyncStatus, "
+            "createdAt, updatedAt) VALUES ('src-t1', 'Temp', 'MLS', 'temp.adapter', '', 1, 10, 0, '', '', 60, 60, 0, 'NEVER', 1, 1)"
+        )
+        conn.execute("UPDATE properties SET primarySourceId = 'src-t1' WHERE id = 'prop-old-3'")
+        conn.commit()
+        conn.execute("DELETE FROM property_sources WHERE id = 'src-t1'")
+        conn.commit()
+        prop3_source = conn.execute("SELECT primarySourceId FROM properties WHERE id = 'prop-old-3'").fetchone()[0]
+        if prop3_source is not None:
+            failures.append(f"SET NULL check: properties.primarySourceId was not nulled on source delete (got {prop3_source})")
 
         # cascade delete behaviour
         conn.execute("DELETE FROM properties WHERE id = 'prop-old-2'")
@@ -1093,6 +1150,105 @@ def main() -> int:
         ).fetchone()[0]
         if kept_conv != 1:
             failures.append("cascade delete: ai conversation must survive with propertyId = NULL")
+
+    # 2c. Full v1 -> v2 -> v3 -> v4 migration chain test from raw/partial v1 schema
+    if not failures:
+        conn_v1 = sqlite3.connect(":memory:")
+        conn_v1.execute("PRAGMA foreign_keys = ON")
+        # create representative partial v1 schema (missing columns, missing tables)
+        conn_v1.execute(
+            "CREATE TABLE `properties` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, "
+            "`address` TEXT NOT NULL, `price` REAL NOT NULL, PRIMARY KEY(`id`))"
+        )
+        conn_v1.execute(
+            "INSERT INTO `properties` (`id`, `title`, `address`, `price`) "
+            "VALUES ('v1-prop', 'V1 Title', '100 Main St', 300000.0)"
+        )
+        conn_v1.execute(
+            "CREATE TABLE `tax_records` (`propertyId` TEXT NOT NULL, `annualTaxAmount` REAL NOT NULL, "
+            "PRIMARY KEY(`propertyId`))"
+        )
+        conn_v1.execute(
+            "INSERT INTO `tax_records` (`propertyId`, `annualTaxAmount`) VALUES ('v1-prop', 3500.0)"
+        )
+        conn_v1.commit()
+
+        # execute Migration1To2 on conn_v1
+        for name, shape_sql in v2_catalog.items():
+            if not shape_sql.upper().startswith("CREATE TABLE"):
+                continue
+            cols = actual_columns(conn_v1, name)
+            # Find the matching table shape from v2
+            v2_table = v2.get(name)
+            if v2_table is None:
+                continue
+            expected_col_names = {c.name for c in v2_table.columns}
+            if not cols:
+                conn_v1.executescript(room_ddl(v2_table)[0])
+                for idx in v2_table.indices:
+                    conn_v1.executescript(
+                        f"CREATE {'UNIQUE ' if idx.unique else ''}INDEX IF NOT EXISTS `{idx.name}` ON `{name}` ({', '.join(f'`{c}`' for c in idx.columns)})"
+                    )
+            elif set(cols.keys()) != expected_col_names:
+                legacy_name = f"{name}__legacy_v1"
+                conn_v1.execute(f"DROP TABLE IF EXISTS `{legacy_name}`")
+                conn_v1.execute(f"ALTER TABLE `{name}` RENAME TO `{legacy_name}`")
+                conn_v1.executescript(room_ddl(v2_table)[0])
+                old_c = set(actual_columns(conn_v1, legacy_name).keys())
+                target_c = actual_columns(conn_v1, name)
+                target_list = ", ".join(f"`{k}`" for k in target_c.keys())
+                select_list = []
+                for c in target_c.values():
+                    if c.name in old_c:
+                        select_list.append(f"`{c.name}`")
+                    elif not c.not_null:
+                        select_list.append("NULL")
+                    elif "INT" in c.type.upper():
+                        select_list.append("0")
+                    elif any(x in c.type.upper() for x in ("REAL", "DOUB", "FLOA")):
+                        select_list.append("0.0")
+                    else:
+                        select_list.append("''")
+                conn_v1.execute(
+                    f"INSERT INTO `{name}` ({target_list}) SELECT {', '.join(select_list)} FROM `{legacy_name}`"
+                )
+                conn_v1.execute(f"DROP TABLE `{legacy_name}`")
+                for idx in v2_table.indices:
+                    conn_v1.executescript(
+                        f"CREATE {'UNIQUE ' if idx.unique else ''}INDEX IF NOT EXISTS `{idx.name}` ON `{name}` ({', '.join(f'`{c}`' for c in idx.columns)})"
+                    )
+            else:
+                for idx in v2_table.indices:
+                    conn_v1.executescript(
+                        f"CREATE {'UNIQUE ' if idx.unique else ''}INDEX IF NOT EXISTS `{idx.name}` ON `{name}` ({', '.join(f'`{c}`' for c in idx.columns)})"
+                    )
+        conn_v1.commit()
+
+        # verify conn_v1 matches v2
+        for table in v2.values():
+            failures += [f"v1->v2 chain: {p}" for p in compare_table(table, conn_v1)]
+
+        # run v2->v3 on conn_v1
+        for stmt in v2_to_v3:
+            conn_v1.executescript(stmt)
+        conn_v1.commit()
+
+        # run v3->v4 on conn_v1
+        for stmt in v3_to_v4:
+            conn_v1.executescript(stmt)
+        conn_v1.commit()
+
+        # verify conn_v1 matches v4 exactly
+        for table in sorted(v4.values(), key=lambda t: t.name):
+            failures += [f"v1->v4 full chain: {p}" for p in compare_table(table, conn_v1)]
+
+        # verify v1 data was preserved into v4
+        v1_p = conn_v1.execute("SELECT id, title, address, price FROM properties WHERE id = 'v1-prop'").fetchone()
+        if not v1_p or v1_p[0] != 'v1-prop' or v1_p[3] != 300000.0:
+            failures.append(f"v1->v4 data preservation: legacy v1 row was lost or corrupted ({v1_p})")
+        v1_tax = conn_v1.execute("SELECT annualTaxAmount FROM tax_records WHERE propertyId = 'v1-prop'").fetchone()
+        if not v1_tax or v1_tax[0] != 3500.0:
+            failures.append(f"v1->v4 data preservation: legacy v1 tax record was lost ({v1_tax})")
 
     # 3. DAO query validation against the migrated database
     if not failures:

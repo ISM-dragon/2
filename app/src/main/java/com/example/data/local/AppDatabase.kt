@@ -72,7 +72,6 @@ abstract class AppDatabase : RoomDatabase() {
                     "real_estate_ai.db"
                 )
                     .addMigrations(*DatabaseMigrations.ALL)
-                    .fallbackToDestructiveMigration(dropAllTables = false)
                     .build()
                 INSTANCE = instance
                 instance

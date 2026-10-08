@@ -5,7 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.AppDatabase
-import com.example.data.local.entity.PropertySourceDefaults
+import com.example.data.local.entity.*
 import com.example.data.local.migration.DatabaseMigrations
 import com.example.data.local.migration.LegacyV2Schema
 import com.example.data.repository.PropertyImportRepository
@@ -15,13 +15,14 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * End to end migration test for the full 2 -> 3 -> 4 chain.
+ * End to end migration test for the full 1 -> 2 -> 3 -> 4 chain.
  *
  * A real v2 database file is built from the [LegacyV2Schema] catalog, seeded with legacy rows -
  * including automation jobs written by the pre-durability engine - and then opened through Room with
@@ -99,7 +100,168 @@ class DatabaseMigrationTest {
             assertTrue("automation rules lease policy missing", rules.jobLeaseTtlMinutes > 0)
             assertTrue("automation_executions table missing", tableExists(database, "automation_executions"))
 
+            // Verify all new v4 tables exist
+            val expectedV4Tables = listOf(
+                "offer_email_sends", "offer_audit_events", "property_ai_analysis",
+                "property_source_links", "source_health", "property_enrichments",
+                "property_import_jobs", "property_sources", "property_provenance",
+                "property_financials", "property_comps"
+            )
+            for (table in expectedV4Tables) {
+                assertTrue("expected v4 table $table is missing", tableExists(database, table))
+            }
+
             assertEquals(4, database.openHelper.readableDatabase.version)
+        } finally {
+            database.close()
+            context.deleteDatabase(dbName)
+        }
+    }
+
+    @Test
+    fun `migrating a v1 database normalizes schema and completes v1 to v4 migration chain`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.deleteDatabase(dbName)
+        createV1Database(context)
+
+        val database = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
+            .addMigrations(*DatabaseMigrations.ALL)
+            .allowMainThreadQueries()
+            .build()
+
+        try {
+            val property = runBlocking { database.propertyDao().getPropertyById("v1-prop-1") }
+            assertNotNull("the legacy v1 property was lost by the migration", property)
+            assertEquals("100 Main St", property!!.address)
+            assertEquals(350_000.0, property.price, 0.001)
+
+            val tax = runBlocking { database.propertyDao().getTaxRecord("v1-prop-1") }
+            assertNotNull("the legacy v1 tax record was lost", tax)
+            assertEquals(4000.0, tax!!.annualTaxAmount, 0.001)
+
+            // Check version 4 reached
+            assertEquals(4, database.openHelper.readableDatabase.version)
+        } finally {
+            database.close()
+            context.deleteDatabase(dbName)
+        }
+    }
+
+    @Test
+    fun `missing migration without fallback throws IllegalStateException loudly`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.deleteDatabase(dbName)
+        createV2Database(context)
+
+        // Only register Migration1To2; missing 2->3 and 3->4
+        val database = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
+            .addMigrations(DatabaseMigrations.ALL[0])
+            .allowMainThreadQueries()
+            .build()
+
+        try {
+            database.openHelper.readableDatabase
+            fail("Expected IllegalStateException due to missing migration path without destructive fallback")
+        } catch (e: IllegalStateException) {
+            assertTrue("Exception should mention missing migration", e.message?.contains("migration", ignoreCase = true) == true)
+        } finally {
+            try { database.close() } catch (_: Exception) {}
+            context.deleteDatabase(dbName)
+        }
+    }
+
+    @Test
+    fun `v4 new tables exist and support durable operations and queries`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.deleteDatabase(dbName)
+
+        val database = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
+            .addMigrations(*DatabaseMigrations.ALL)
+            .allowMainThreadQueries()
+            .build()
+
+        try {
+            // Property AI analysis
+            val aiAnalysis = PropertyAiAnalysisEntity(
+                propertyId = "prop-ai-1",
+                summary = "Strong investment profile",
+                investmentThesis = "High rental yield in emerging market",
+                strengthsJson = "[\"Good location\"]",
+                weaknessesJson = "[]",
+                risksJson = "[]",
+                redFlagsJson = "[]",
+                recommendedStrategy = "BRRRR",
+                recommendedOfferRange = "$300k-$320k",
+                questionsForSellerJson = "[]",
+                dueDiligenceJson = "[]",
+                confidence = 0.92,
+                evidenceJson = "{}",
+                analyzedAt = 1000L
+            )
+            database.intelligenceDao().insertAiAnalysis(aiAnalysis)
+            val fetchedAi = database.intelligenceDao().getAiAnalysis("prop-ai-1")
+            assertNotNull(fetchedAi)
+            assertEquals("BRRRR", fetchedAi!!.recommendedStrategy)
+
+            // Property Source Links
+            val link = PropertySourceLinkEntity(
+                propertyId = "prop-ai-1",
+                source = "ZILLOW",
+                sourceUrl = "https://example.com/zillow/1",
+                listingId = "z-100",
+                isPrimary = true,
+                lastSyncedAt = 1000L
+            )
+            database.intelligenceDao().insertSourceLink(link)
+            val fetchedLink = database.intelligenceDao().findSourceByUrl("https://example.com/zillow/1")
+            assertNotNull(fetchedLink)
+            assertEquals("prop-ai-1", fetchedLink!!.propertyId)
+
+            // Source Health
+            val health = SourceHealthEntity(
+                source = "ZILLOW",
+                successCount = 10,
+                failureCount = 1,
+                successRate = 0.909,
+                failureRate = 0.091,
+                averageLatencyMs = 250L,
+                lastSuccessAt = 1000L,
+                lastFailureAt = 900L,
+                parserVersion = "v1.0",
+                healthStatus = "HEALTHY",
+                lastErrorReason = null
+            )
+            database.intelligenceDao().insertOrUpdateSourceHealth(health)
+            val fetchedHealth = database.intelligenceDao().getSourceHealth("ZILLOW")
+            assertNotNull(fetchedHealth)
+            assertEquals("HEALTHY", fetchedHealth!!.healthStatus)
+
+            // Offer Email Sends
+            val send = OfferEmailSendEntity(
+                idempotencyKey = "send-offer-1",
+                offerId = "offer-test-1",
+                status = OfferEmailSendStatus.PENDING,
+                attemptCount = 0,
+                createdAt = 1000L,
+                updatedAt = 1000L
+            )
+            database.offerDao().insertEmailSendIfAbsent(send)
+            val fetchedSend = database.offerDao().getEmailSend("send-offer-1")
+            assertNotNull(fetchedSend)
+            assertEquals("offer-test-1", fetchedSend!!.offerId)
+
+            // Offer Audit Events
+            val event = OfferAuditEventEntity(
+                offerId = "offer-test-1",
+                idempotencyKey = "send-offer-1",
+                eventType = "REGISTERED",
+                timestamp = 1000L,
+                status = "SUCCESS",
+                details = "Registered send intent"
+            )
+            database.offerDao().insertAuditEvent(event)
+            val allEvents = database.offerDao().getAuditEventsForOffer("offer-test-1")
+            assertEquals(1, allEvents.size)
         } finally {
             database.close()
             context.deleteDatabase(dbName)
@@ -158,6 +320,42 @@ class DatabaseMigrationTest {
         database.openHelper.readableDatabase
             .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", arrayOf(table))
             .use { cursor -> return cursor.moveToFirst() }
+    }
+
+    private fun createV1Database(context: Context) {
+        val file = context.getDatabasePath(dbName)
+        file.parentFile?.mkdirs()
+        val legacy = SQLiteDatabase.openOrCreateDatabase(file, null)
+        try {
+            legacy.execSQL(
+                "CREATE TABLE `properties` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                "`address` TEXT NOT NULL, `city` TEXT NOT NULL, `state` TEXT NOT NULL, `zipCode` TEXT NOT NULL, " +
+                "`price` REAL NOT NULL, `propertyType` TEXT NOT NULL, `bedrooms` INTEGER NOT NULL, " +
+                "`bathrooms` REAL NOT NULL, `squareFeet` INTEGER NOT NULL, `yearBuilt` INTEGER NOT NULL, " +
+                "`lotSizeSqFt` INTEGER NOT NULL, `description` TEXT NOT NULL, `status` TEXT NOT NULL, " +
+                "`primaryImageUrl` TEXT NOT NULL, `scannedAt` INTEGER NOT NULL, `isSaved` INTEGER NOT NULL, " +
+                "`isSavedDeal` INTEGER NOT NULL, `dealScore` INTEGER NOT NULL, PRIMARY KEY(`id`))"
+            )
+            legacy.execSQL(
+                "INSERT INTO `properties` (`id`, `title`, `address`, `city`, `state`, `zipCode`, `price`, " +
+                "`propertyType`, `bedrooms`, `bathrooms`, `squareFeet`, `yearBuilt`, `lotSizeSqFt`, " +
+                "`description`, `status`, `primaryImageUrl`, `scannedAt`, `isSaved`, `isSavedDeal`, `dealScore`) " +
+                "VALUES ('v1-prop-1', 'Main Home', '100 Main St', 'Austin', 'TX', '78701', 350000.0, " +
+                "'Single Family', 3, 2.0, 1500, 2010, 4000, 'v1 desc', 'Active', '', 1000, 0, 0, 50)"
+            )
+            legacy.execSQL(
+                "CREATE TABLE `tax_records` (`propertyId` TEXT NOT NULL, `annualTaxAmount` REAL NOT NULL, " +
+                "`assessmentYear` INTEGER NOT NULL, `assessedValue` REAL NOT NULL, `taxDelinquent` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`propertyId`))"
+            )
+            legacy.execSQL(
+                "INSERT INTO `tax_records` (`propertyId`, `annualTaxAmount`, `assessmentYear`, `assessedValue`, `taxDelinquent`) " +
+                "VALUES ('v1-prop-1', 4000.0, 2024, 320000.0, 0)"
+            )
+            legacy.version = 1
+        } finally {
+            legacy.close()
+        }
     }
 
     private fun createV2Database(context: Context) {
