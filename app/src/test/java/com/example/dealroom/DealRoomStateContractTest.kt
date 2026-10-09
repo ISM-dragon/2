@@ -56,11 +56,21 @@ class DealRoomStateContractTest {
     }
 
     @Test
-    fun modelInputBasisDefaultsToNotSourced() {
-        val basis = ModelInputBasis(label = "Rent")
+    fun modelInputBasisMustStateItsBasisExplicitly() {
+        // `sourced` has no default on purpose (see DealRoomViewModel): a Deal Room input is either
+        // backed by a stored fact or it says why it is not - the model cannot silently claim either.
+        val basis = ModelInputBasis(label = "Rent", sourced = false)
 
         assertFalse(basis.sourced)
         assertEquals("", basis.sourceDetail)
         assertEquals("", basis.notSourcedReason)
+
+        val sourcedBasis = ModelInputBasis(
+            label = "Tax",
+            sourced = true,
+            sourceDetail = "property_tax_records.annual_amount"
+        )
+        assertTrue(sourcedBasis.sourced)
+        assertEquals("", sourcedBasis.notSourcedReason)
     }
 }

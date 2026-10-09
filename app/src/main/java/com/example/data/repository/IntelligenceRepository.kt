@@ -9,6 +9,7 @@ import com.example.data.local.dao.PropertySourceDao
 import com.example.data.local.entity.*
 import com.example.domain.intelligence.job.JobProgressState
 import com.example.domain.intelligence.job.JobStatus
+import com.example.domain.propertyurl.pipeline.ImportOutcome
 import kotlinx.coroutines.flow.*
 
 /**
@@ -75,14 +76,22 @@ class IntelligenceRepository(
         try {
             val outcome = propertyUrlImporter.importAndStore(url)
             val propertyId = outcome.propertyOrNull()?.canonicalId
-            val success = outcome.isSuccess
+            // A suppressed duplicate is an idempotent success: the listing is already stored, the
+            // canonical record is carried on the suppressed job, and re-importing must not look like
+            // a broken import to the caller. Only a rejection or a fetch/parse failure is a failure.
+            val duplicate = outcome is ImportOutcome.Duplicate
+            val success = outcome.isSuccess || duplicate
             val state = JobProgressState(
                 jobId = outcome.job.jobId,
                 url = url,
                 source = "Web",
                 status = if (success) JobStatus.COMPLETED else JobStatus.FAILED,
                 progressPercent = 1.0f,
-                currentStepDescription = if (success) "Import completed successfully" else "Import failed",
+                currentStepDescription = when {
+                    duplicate -> "Already imported; the stored record was reused"
+                    success -> "Import completed successfully"
+                    else -> "Import failed"
+                },
                 propertyId = propertyId,
                 errorMessage = outcome.failure?.message
             )
