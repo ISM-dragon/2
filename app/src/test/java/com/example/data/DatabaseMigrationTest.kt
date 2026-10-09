@@ -93,7 +93,8 @@ class DatabaseMigrationTest {
             val job = runBlocking { database.automationDao().getJobById("legacy-job") }
             assertNotNull("legacy automation job was lost by the v2 -> v3 upgrade", job)
             assertTrue("legacy job has no idempotency key", job!!.idempotencyKey.isNotBlank())
-            assertEquals("legacy-job", job.propertyId)
+            // The job belongs to the legacy property it was created for, not to itself.
+            assertEquals("legacy-1", job.propertyId)
 
             val rules = runBlocking { database.automationDao().getRules() }
             assertNotNull(rules)

@@ -2,6 +2,9 @@ package com.example.urlintelligence.idempotency
 
 import com.example.urlintelligence.failure.SourceFailure
 import com.example.urlintelligence.retry.Clock
+import java.net.URI
+import java.net.URISyntaxException
+import java.util.Locale
 
 /**
  * Deterministic key for an import request.
@@ -18,8 +21,33 @@ data class IdempotencyKey(val value: String) {
         const val DEFAULT_NAMESPACE: String = "property-url"
 
         fun forUrl(canonicalUrl: String, namespace: String = DEFAULT_NAMESPACE): IdempotencyKey {
-            val normalized = canonicalUrl.trim().lowercase()
-            return IdempotencyKey("$namespace:" + sha256(normalized))
+            return IdempotencyKey("$namespace:" + sha256(identityOf(canonicalUrl)))
+        }
+
+        /**
+         * Identity form of a canonical listing URL: the string that decides whether two imports are
+         * the same listing.
+         *
+         * A canonical URL keeps the host spelling the provider serves (that is what is fetched and what
+         * robots.txt governs), so `www.zillow.com` and `zillow.com` are different canonical URLs for the
+         * same listing. The identity drops the `www.` label and lowercases scheme and host. It keeps the
+         * path, the query and any non-default port exactly as canonicalised, because case and
+         * parameters can separate genuinely different listings; that is deliberately not normalised away.
+         */
+        fun identityOf(canonicalUrl: String): String {
+            val trimmed = canonicalUrl.trim()
+            val uri = try {
+                URI(trimmed)
+            } catch (e: URISyntaxException) {
+                return trimmed.lowercase(Locale.US)
+            }
+            val host = uri.host?.lowercase(Locale.US)?.removePrefix("www.")
+                ?: return trimmed.lowercase(Locale.US)
+            val scheme = uri.scheme?.lowercase(Locale.US).orEmpty()
+            val port = if (uri.port >= 0) ":${uri.port}" else ""
+            val path = uri.rawPath.orEmpty()
+            val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+            return "$scheme://$host$port$path$query"
         }
 
         /**
@@ -36,7 +64,7 @@ data class IdempotencyKey(val value: String) {
         ): String {
             val id = sourcePropertyId?.trim().orEmpty()
             return if (id.isBlank()) {
-                "${sourceId.lowercase()}:url-hash:" + sha256(canonicalUrl.trim().lowercase()).take(16)
+                "${sourceId.lowercase()}:url-hash:" + sha256(identityOf(canonicalUrl)).take(16)
             } else {
                 "${sourceId.lowercase()}:${id.lowercase()}"
             }
