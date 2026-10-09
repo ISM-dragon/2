@@ -62,8 +62,11 @@ class OutreachClaimGuard(
 
     private fun ungroundedPropertyFacts(text: String, context: GuardContext): List<GuardFinding> {
         val findings = mutableListOf<GuardFinding>()
+        // Only trusted facts can serve as evidence for factual claims
+        val trustedFacts = context.allowedFacts.filter { OutreachSafetyRules.isTrustedSource(it.sourceLabel) }
+
         fun checkNumbers(regex: Regex, key: PropertyFactKey) {
-            val allowed = context.allowedFacts
+            val allowed = trustedFacts
                 .filter { it.key == key }
                 .flatMap { OutreachSafetyRules.numbersIn(it.value) }
                 .toSet()
@@ -95,7 +98,7 @@ class OutreachClaimGuard(
         }
 
         val groundedBlob = buildString {
-            context.allowedFacts.forEach { append(' ').append(it.value) }
+            trustedFacts.forEach { append(' ').append(it.value) }
             context.sellerStatedNote?.let { append(' ').append(it) }
         }.lowercase()
         OutreachSafetyRules.conditionPhrases.forEach { phrase ->
@@ -106,6 +109,37 @@ class OutreachClaimGuard(
                 )
             }
         }
+
+        fun checkPhrasePattern(regex: Regex, factName: String, trustedEvidencePresent: Boolean) {
+            if (regex.containsMatchIn(text) && !trustedEvidencePresent) {
+                findings += GuardFinding(
+                    GuardCode.INVENTED_PROPERTY_FACT,
+                    "A $factName claim is not supported by trusted property data."
+                )
+            }
+        }
+
+        val hasOccupancyEvidence = trustedFacts.any { it.key == PropertyFactKey.OCCUPANCY } ||
+            (context.sellerStatedNote?.let { OutreachSafetyRules.occupancyClaim.containsMatchIn(it) } == true)
+        checkPhrasePattern(OutreachSafetyRules.occupancyClaim, "occupancy", hasOccupancyEvidence)
+
+        val hasOwnershipEvidence = trustedFacts.any { it.key == PropertyFactKey.OTHER_DESCRIPTIVE && it.value.contains("owner", ignoreCase = true) } ||
+            (context.sellerStatedNote?.let { OutreachSafetyRules.ownershipClaim.containsMatchIn(it) } == true)
+        checkPhrasePattern(OutreachSafetyRules.ownershipClaim, "ownership", hasOwnershipEvidence)
+
+        val hasTaxEvidence = trustedFacts.any { it.value.contains("tax", ignoreCase = true) } ||
+            (context.sellerStatedNote?.let { OutreachSafetyRules.taxClaim.containsMatchIn(it) } == true)
+        checkPhrasePattern(OutreachSafetyRules.taxClaim, "tax", hasTaxEvidence)
+
+        val hasRepairEvidence = trustedFacts.any { it.key == PropertyFactKey.CONDITION_NOTE && it.value.contains("repair", ignoreCase = true) } ||
+            (context.sellerStatedNote?.let { OutreachSafetyRules.repairClaim.containsMatchIn(it) } == true)
+        checkPhrasePattern(OutreachSafetyRules.repairClaim, "repair", hasRepairEvidence)
+
+        val hasHistoryEvidence = trustedFacts.any { it.key == PropertyFactKey.LISTING_STATUS || it.key == PropertyFactKey.OTHER_DESCRIPTIVE } &&
+            trustedFacts.any { it.value.contains("sold", ignoreCase = true) || it.value.contains("list", ignoreCase = true) } ||
+            (context.sellerStatedNote?.let { OutreachSafetyRules.historyClaim.containsMatchIn(it) } == true)
+        checkPhrasePattern(OutreachSafetyRules.historyClaim, "property history", hasHistoryEvidence)
+
         return findings
     }
 

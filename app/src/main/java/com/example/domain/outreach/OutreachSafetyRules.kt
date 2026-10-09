@@ -125,9 +125,38 @@ object OutreachSafetyRules {
             "\\b((?:18|19|20)\\d{2})\\s*(?:build|built|construction)\\b"
     )
     val streetClaim: Regex = Regex(
-        "(?i)\\b\\d{1,6}\\s+[A-Za-z0-9.'-]+(?:\\s+[A-Za-z0-9.'-]+){0,4}\\s+" +
+        "(?i)\\b\\d{1,6}\\s+(?:[A-Za-z.'-]+|\\d{1,3}(?:st|nd|rd|th))(?:\\s+(?:[A-Za-z.'-]+|\\d{1,3}(?:st|nd|rd|th))){0,3}\\s+" +
             "(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|way|court|ct|place|pl)\\b"
     )
+
+    val priceClaim: Regex = Regex(
+        "(?i)\\b(?:listing\\s+price|list\\s+price|asking\\s+price|sale\\s+price|purchase\\s+price|priced\\s+at)\\s*(?:is|was|of|at)?\\s*[$]?\\s*(\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\s*(?:dollars|usd))?\\b"
+    )
+    val occupancyClaim: Regex = Regex(
+        "(?i)\\b(?:vacant|occupied|tenant[ -]occupied|owner[ -]occupied|squatter[s]?)\\b"
+    )
+    val ownershipClaim: Regex = Regex(
+        "(?i)\\b(?:absentee\\s+owner|out[ -]of[ -]state\s+owner|owned\\s+for\\s+\\d+|owned\\s+since\\s+\\d{4}|free\\s+and\\s+clear|no\\s+mortgage)\\b"
+    )
+    val taxClaim: Regex = Regex(
+        "(?i)\\b(?:property\\s+taxes?|annual\\s+taxes?|tax\\s+assessment|delinquent\\s+taxes?|tax\\s+delinquent|tax\\s+lien)\\b"
+    )
+    val repairClaim: Regex = Regex(
+        "(?i)\\b(?:needs\\s+repairs?|repair\\s+needed|repairs?\\s+needed|foundation\\s+repair|roof\\s+repair|plumbing\\s+repair|electrical\\s+repair|major\\s+repairs?)\\b"
+    )
+    val historyClaim: Regex = Regex(
+        "(?i)\\b(?:previously\\s+sold|foreclosure\\s+history|listed\\s+in\\s+\\d{4}|sold\\s+in\\s+\\d{4}|on\\s+the\\s+market\\s+for\\s+\\d+)\\b"
+    )
+
+    private val untrustedSourceKeywords: List<String> = listOf(
+        "model", "ai", "generated", "inferred", "prediction", "guess", "untrusted", "llm", "unverified", "synthesized"
+    )
+
+    fun isTrustedSource(sourceLabel: String): Boolean {
+        val s = sourceLabel.trim().lowercase()
+        if (s.isBlank()) return false
+        return untrustedSourceKeywords.none { s.contains(it) }
+    }
 
     val numberToken: Regex = Regex("\\d+(?:\\.\\d+)?")
 
