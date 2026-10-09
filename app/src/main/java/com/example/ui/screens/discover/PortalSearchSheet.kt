@@ -427,16 +427,20 @@ private fun PortalListingCard(
             ContactChipRow(items = contact?.actions ?: emptyList(), onAction = onContact)
 
             Spacer(modifier = Modifier.height(6.dp))
+            // SuggestionChip has no icon slot, so the icon lives inside the label.
             SuggestionChip(
                 onClick = onSave,
                 enabled = !isSaved,
-                label = { Text(if (isSaved) "Saved to deals" else "Save to my deals", fontSize = 11.sp) },
-                leadingIcon = {
-                    Icon(
-                        if (isSaved) Icons.Filled.BookmarkAdded else Icons.Filled.BookmarkAdd,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp)
-                    )
+                label = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (isSaved) Icons.Filled.BookmarkAdded else Icons.Filled.BookmarkAdd,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (isSaved) "Saved to deals" else "Save to my deals", fontSize = 11.sp)
+                    }
                 },
                 shape = RoundedCornerShape(8.dp),
                 colors = SuggestionChipDefaults.suggestionChipColors(
@@ -458,13 +462,16 @@ private fun ContactChipRow(items: List<ContactAction>, onAction: (ContactAction)
                     SuggestionChip(
                         onClick = { onAction(action) },
                         enabled = action.isAvailable,
-                        label = { Text(action.channel.label, fontSize = 11.sp) },
-                        leadingIcon = {
-                            Icon(
-                                iconFor(action.channel),
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp)
-                            )
+                        label = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    iconFor(action.channel),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(action.channel.label, fontSize = 11.sp)
+                            }
                         },
                         shape = RoundedCornerShape(8.dp),
                         colors = SuggestionChipDefaults.suggestionChipColors(
