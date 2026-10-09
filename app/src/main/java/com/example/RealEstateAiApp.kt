@@ -136,7 +136,13 @@ class RealEstateAiApp : Application() {
             intelligence = propertyUrlIntelligence,
             jobStore = propertyImportJobStore,
             clock = com.example.domain.propertyurl.port.SystemClock(),
-            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            // Retries and jobs interrupted by process death are resumed by this queue's poller. Its
+            // records must reach the same canonical store the UI import path writes to, otherwise the
+            // job ledger reports a completed import that never produced a property row.
+            onPropertyImported = { property ->
+                propertyRepository.insertBundle(propertyUrlImporter.toBundle(property))
+            }
         )
         financialRepository = FinancialRepository(database.financialDao(), database.propertyDao(), database.automationDao())
         configRepository = ConfigRepository(database.configDao())

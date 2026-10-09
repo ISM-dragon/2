@@ -3,6 +3,7 @@ package com.example.domain.propertyurl.pipeline
 import com.example.domain.propertyurl.job.PropertyImportJob
 import com.example.domain.propertyurl.job.PropertyImportJobStore
 import com.example.domain.propertyurl.job.PropertyImportJobState
+import com.example.domain.propertyurl.model.CanonicalProperty
 import com.example.domain.propertyurl.port.Clock
 import com.example.domain.propertyurl.port.TelemetryEvent
 import com.example.domain.propertyurl.port.TelemetrySink
@@ -30,6 +31,13 @@ import kotlinx.coroutines.sync.withPermit
  *
  * The queue is *not* a second scheduler: all job state lives in [PropertyImportJobStore], so killing
  * the process loses nothing but the in-memory channel (the queued rows are recovered on next start).
+ *
+ * The queue does not know where canonical records are stored. It hands every record it produced -
+ * including the ones it recovered after a process death - to [onPropertyImported]; the composition
+ * root decides what "imported" means (in the app that is the same bridge the UI import path uses).
+ * The default sink is a deliberate no-op for tooling and tests: a queue built without one maintains
+ * the job ledger only, so it must never be presented as "the property was imported". The app wiring
+ * is pinned by `WorkflowWiringGuardTest` for exactly that reason.
  */
 class PropertyImportQueue(
     private val intelligence: PropertyUrlIntelligence,
@@ -41,7 +49,9 @@ class PropertyImportQueue(
     private val pollIntervalMillis: Long = 15_000,
     private val maxParallel: Int = 2,
     /** Backlog limit; older items beyond this are dropped with a warning instead of growing unbounded. */
-    private val capacity: Int = 64
+    private val capacity: Int = 64,
+    /** Persistence sink for canonical records produced by background or recovered work. */
+    private val onPropertyImported: suspend (CanonicalProperty) -> Unit = { }
 ) {
 
     private val pending = Channel<QueuedItem>(capacity = capacity)
@@ -118,6 +128,7 @@ class PropertyImportQueue(
         // Retries whose backoff elapsed, plus jobs left in-flight by a previous process.
         outcomes.addAll(intelligence.retryDueJobs(ImportRequest(requestId = requestId)).outcomes)
         outcomes.addAll(intelligence.resumeInterruptedJobs(ImportRequest(requestId = requestId)).outcomes)
+        outcomes.forEach { persist(it) }
 
         return ImportBatchReport(requestId, outcomes, startedAt, clock.nowEpochMillis())
     }
@@ -131,6 +142,7 @@ class PropertyImportQueue(
         val input = item.input
         try {
             val outcome = intelligence.import(input, item.request)
+            persist(outcome)
             telemetry.record(
                 TelemetryEvent(
                     name = "queue.item.finished",
@@ -153,6 +165,34 @@ class PropertyImportQueue(
             )
         } finally {
             inFlight.decrementAndGet()
+        }
+    }
+
+    /**
+     * Hands one produced record to the persistence sink.
+     *
+     * A sink failure is recorded, never rethrown: an exception here would tear down the worker (or
+     * the poller) and stop every later import, turning one bad record into an outage. The job ledger
+     * keeps reporting what the *layer* is responsible for - the fetch, parse and normalize succeeded
+     * - and `queue.persist.failed` is the durable signal that the record did not reach the store.
+     */
+    private suspend fun persist(outcome: ImportOutcome) {
+        val property = outcome.property ?: return
+        if (!outcome.isSuccess) return
+        try {
+            onPropertyImported(property)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            telemetry.record(
+                TelemetryEvent(
+                    name = "queue.persist.failed",
+                    jobId = outcome.job.jobId,
+                    sourceId = outcome.job.sourceId,
+                    outcome = "PERSIST_FAILED",
+                    attributes = mapOf("error" to e.javaClass.simpleName)
+                )
+            )
         }
     }
 

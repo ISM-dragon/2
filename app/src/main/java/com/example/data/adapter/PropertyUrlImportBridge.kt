@@ -4,6 +4,7 @@ import com.example.data.local.entity.ComparablePropertyEntity
 import com.example.data.local.entity.MarketDataEntity
 import com.example.data.local.entity.PropertyEntity
 import com.example.data.local.entity.PropertyImageEntity
+import com.example.data.local.entity.PropertyIngestionMethod
 import com.example.data.local.entity.RentEstimateEntity
 import com.example.data.local.entity.SalesHistoryEntity
 import com.example.data.local.entity.TaxRecordEntity
@@ -29,6 +30,11 @@ import com.example.domain.propertyurl.pipeline.UrlInspection
  * Financial placeholders: [MarketDataEntity] and [RentEstimateEntity] are required by the existing
  * schema, but an import has no valuation data. They are written as zeros on purpose — the layer never
  * invents numbers; the app's own analysis fills them in later.
+ *
+ * Provenance: the bundle carries the portal's own source id, listing id, URL and the `SCRAPE`
+ * ingestion method, because `PropertyImportRepository` records exactly those in `property_provenance`
+ * and uses `sourceId + externalId` as the first deduplication level. An unregistered portal id falls
+ * back to the internal source row, as it did before.
  */
 class PropertyUrlImportBridge(
     private val intelligence: PropertyUrlIntelligence,
@@ -127,7 +133,17 @@ class PropertyUrlImportBridge(
                 taxDelinquent = false
             ),
             salesHistory = emptyList<SalesHistoryEntity>(),
-            comps = emptyList<ComparablePropertyEntity>()
+            comps = emptyList<ComparablePropertyEntity>(),
+            // ── provenance: an import must stay traceable to the exact source record ──────────────
+            // These four values are what `PropertyImportRepository` writes into `property_provenance`.
+            // Left blank they collapse onto the internal fallback source with an empty URL, so the deal
+            // room cannot answer "which listing did this come from" and level-1 deduplication (sourceId
+            // + externalId) can never match a portal import. `sourceUpdatedAt` stays 0: a page fetch has
+            // no trustworthy "last modified by the source" value, and the schema reads 0 as unknown.
+            sourceId = property.primarySourceId,
+            externalId = property.sourceListingId?.takeIf { it.isNotBlank() } ?: property.canonicalId,
+            externalUrl = property.sourceUrl,
+            ingestionMethod = PropertyIngestionMethod.SCRAPE
         )
     }
 

@@ -75,7 +75,10 @@ android {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
-// Room exports its schema JSON here; migrations are verified against these files in tests.
+// Room schema location for KSP. `exportSchema = false` in AppDatabase, so no JSON files are written
+// into app/schemas: the v2/v3/v4 shapes that migrations are verified against live in
+// `data/local/migration/DatabaseMigrations.kt` (`LegacyV2Schema`) and are checked against the
+// historical entity declarations by `tools/room_schema_guard.py`, which CI runs on every push.
 ksp { arg("room.schemaLocation", "$projectDir/schemas") }
 
 // Some unused dependencies are commented out below instead of being removed.

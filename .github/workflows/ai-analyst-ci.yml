@@ -40,6 +40,11 @@ jobs:
 
       # The CRM suite (com.example.domain.crm.*) is pure JVM (no Android/Room imports, see
       # LeadCrmIsolationTest), so it runs in the same invocation as the analyst tests.
+      #
+      # NOTE: the redirection must stay attached to the gradle command (every line of the command,
+      # including the last `--tests` filter, ends with a backslash). A redirect written on its own
+      # line is a separate shell command that always succeeds, so `status=$?` would report the
+      # exit code of `true` instead of Gradle's and the job would be green whatever the tests do.
       - name: Run AI Analyst test suite
         shell: bash
         run: |
@@ -50,7 +55,7 @@ jobs:
             --tests "com.example.RealEstateAnalystInputFactoryTest" \
             --tests "com.example.RealEstateAnalystHardeningTest" \
             --tests "com.example.domain.crm.*" \
-            --tests "com.example.RealEstateAnalystAdversarialContractTest"
+            --tests "com.example.RealEstateAnalystAdversarialContractTest" \
             >"$RUNNER_TEMP/ai-analyst-gradle.log" 2>&1
           status=$?
           cat "$RUNNER_TEMP/ai-analyst-gradle.log"

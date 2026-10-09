@@ -137,7 +137,9 @@ object PropertyUrlIntelligenceFactory {
         telemetry: TelemetrySink = com.example.domain.propertyurl.port.NoopTelemetry,
         scope: kotlinx.coroutines.CoroutineScope,
         pollIntervalMillis: Long = 15_000,
-        maxParallel: Int = 2
+        maxParallel: Int = 2,
+        /** Where canonical records produced by the queue must be stored (see [PropertyImportQueue]). */
+        onPropertyImported: suspend (com.example.domain.propertyurl.model.CanonicalProperty) -> Unit = { }
     ): PropertyImportQueue = PropertyImportQueue(
         intelligence = intelligence,
         jobStore = jobStore,
@@ -145,7 +147,8 @@ object PropertyUrlIntelligenceFactory {
         telemetry = telemetry,
         scope = scope,
         pollIntervalMillis = pollIntervalMillis,
-        maxParallel = maxParallel
+        maxParallel = maxParallel,
+        onPropertyImported = onPropertyImported
     )
 
     /** Options with the layer's recommended mobile defaults (4 MB bodies, 3 attempts, 2 workers). */
