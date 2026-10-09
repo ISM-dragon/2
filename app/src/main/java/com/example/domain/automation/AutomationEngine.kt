@@ -419,9 +419,7 @@ class AutomationEngine(
             return false
         }
         val persisted = persistTransition(job, outcome.job, runId = null, correlationId = "CRASH_RECOVERY", details = details)
-        if (persisted != null) {
-            audit.transition(job, from, outcome.job.state(), null, "CRASH_RECOVERY", decision.reason)
-        }
+        logTransition(job, outcome.job, persisted, decision.reason, runId = null, correlationId = "CRASH_RECOVERY")
         return persisted != null
     }
 
@@ -653,9 +651,13 @@ class AutomationEngine(
         val unresolved = automationDao.getJobByPropertyIdInStates(propertyId, JobState.names(JobState.PENDING + JobState.BLOCKED))
         if (unresolved != null) return unresolved
 
-        // Already resolved by a previous cycle (offer ready/sent/dq): do not replay the pipeline.
+        // Already resolved by a previous cycle: every terminal outcome (SENT, DISQUALIFIED,
+        // FAILED_TERMINAL, CANCELLED) is final for this property. A re-discovered listing must
+        // never grow a twin job behind a terminal row - that is how retry exhaustion used to
+        // produce "more than one result where a single result is expected". Operator-initiated
+        // re-runs create an explicit successor via [retryJob], never silent duplicates.
         val previous = automationDao.getJobByPropertyId(propertyId)
-        if (previous != null && (previous.state() == JobState.SENT || previous.state() == JobState.OFFER_READY)) {
+        if (previous != null && previous.state().isTerminal) {
             return null
         }
 
@@ -798,12 +800,16 @@ class AutomationEngine(
         _currentTaskDescription.value = "Analyzing finances for ${job.propertyAddress}..."
         automationDao.updateProgress("Underwriting ${job.propertyAddress}", job.propertyAddress, "ANALYZING", clock.now())
 
-        val analyzing = persistTransition(
+        val starting = JobStateMachine.transition(
             job,
-            JobStateMachine.transition(job, JobState.ANALYZING, clock.now(), buildRetryPolicy(rules), random = random).job,
-            runId,
-            correlationId
-        ) ?: return StepResult.contended(job)
+            JobState.ANALYZING,
+            clock.now(),
+            buildRetryPolicy(rules),
+            random = random
+        )
+        val analyzing = persistTransition(job, starting.job, runId, correlationId)
+            ?: return StepResult.contended(job)
+        logTransition(job, starting.job, analyzing, "analysis step started", runId, correlationId)
 
         return try {
             doubleCheckKillSwitch()
@@ -854,12 +860,16 @@ class AutomationEngine(
                 outcome = JobOutcome.skipped(failed = 1)
             )
 
-        val qualifying = persistTransition(
+        val starting = JobStateMachine.transition(
             job,
-            JobStateMachine.transition(job, JobState.QUALIFYING, clock.now(), buildRetryPolicy(rules), random = random).job,
-            runId,
-            correlationId
-        ) ?: return StepResult.contended(job)
+            JobState.QUALIFYING,
+            clock.now(),
+            buildRetryPolicy(rules),
+            random = random
+        )
+        val qualifying = persistTransition(job, starting.job, runId, correlationId)
+            ?: return StepResult.contended(job)
+        logTransition(job, starting.job, qualifying, "qualification step started", runId, correlationId)
 
         _status.value = AutomationStatus.QUALIFYING
         _currentTaskDescription.value = "Qualifying ${job.propertyAddress}..."
@@ -935,7 +945,8 @@ class AutomationEngine(
                 random = random
             )
             val persisted = persistTransition(job, transitioned.job, runId, correlationId)
-            if (persisted != null) {
+            logTransition(job, transitioned.job, persisted, "existing offer linked", runId, correlationId)
+            if (persisted != null && persisted.state() == JobState.OFFER_READY) {
                 audit.info(
                     "OFFER_REUSED",
                     "Existing offer reused without regeneration.",
@@ -943,9 +954,9 @@ class AutomationEngine(
                     jobId = job.jobId,
                     correlationId = correlationId
                 )
+                return StepResult(persisted, advanced = true, outcome = JobOutcome.skipped())
             }
-            logTransition(job, transitioned.job, persisted, "existing offer linked", runId, correlationId)
-            return StepResult(persisted ?: job, advanced = true, outcome = JobOutcome.skipped())
+            return StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped())
         }
 
         if (OfferLifecycle.isDelivered(existingOffer?.status)) {
@@ -960,7 +971,8 @@ class AutomationEngine(
             )
             val persisted = persistTransition(job, transitioned.job, runId, correlationId)
             logTransition(job, transitioned.job, persisted, "offer already delivered", runId, correlationId)
-            return StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped(sent = 1))
+            val sent = if (persisted != null && persisted.state() == JobState.SENT) 1 else 0
+            return StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped(sent = sent))
         }
 
         if (!rules.autoGenerateOffers) {
@@ -979,12 +991,16 @@ class AutomationEngine(
             return StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped(blocked = true))
         }
 
-        val generating = persistTransition(
+        val starting = JobStateMachine.transition(
             job,
-            JobStateMachine.transition(job, JobState.OFFER_GENERATION, clock.now(), buildRetryPolicy(rules), random = random).job,
-            runId,
-            correlationId
-        ) ?: return StepResult.contended(job)
+            JobState.OFFER_GENERATION,
+            clock.now(),
+            buildRetryPolicy(rules),
+            random = random
+        )
+        val generating = persistTransition(job, starting.job, runId, correlationId)
+            ?: return StepResult.contended(job)
+        logTransition(job, starting.job, generating, "offer generation step started", runId, correlationId)
 
         _status.value = AutomationStatus.GENERATING_OFFERS
         _currentTaskDescription.value = "Drafting institutional purchase offer for ${job.propertyAddress}..."
@@ -1072,12 +1088,16 @@ class AutomationEngine(
             return StepResult(job, advanced = false, outcome = JobOutcome.skipped())
         }
 
-        val validating = persistTransition(
+        val starting = JobStateMachine.transition(
             job,
-            JobStateMachine.transition(job, JobState.VALIDATING_SEND, clock.now(), buildRetryPolicy(rules), random = random).job,
-            runId,
-            correlationId
-        ) ?: return StepResult.contended(job)
+            JobState.VALIDATING_SEND,
+            clock.now(),
+            buildRetryPolicy(rules),
+            random = random
+        )
+        val validating = persistTransition(job, starting.job, runId, correlationId)
+            ?: return StepResult.contended(job)
+        logTransition(job, starting.job, validating, "send validation step started", runId, correlationId)
 
         _status.value = AutomationStatus.SENDING_OFFERS
         _currentTaskDescription.value = "Validating offer $offerId before transmission..."
@@ -1156,7 +1176,8 @@ class AutomationEngine(
             ledger.markSucceeded(AutomationEffect.SEND_OFFER, offerId, job.jobId, runId, "GMAIL-$offerId")
             val persisted = persistTransition(job, transitioned.job, runId, correlationId)
             logTransition(job, transitioned.job, persisted, "offer already delivered", runId, correlationId)
-            return StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped(sent = 1))
+            val sent = if (persisted != null && persisted.state() == JobState.SENT) 1 else 0
+            return StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped(sent = sent))
         }
 
         _status.value = AutomationStatus.SENDING_OFFERS
@@ -1176,7 +1197,7 @@ class AutomationEngine(
                     random = random
                 )
                 val persisted = persistTransition(job, transitioned.job, runId, correlationId)
-                if (persisted != null) {
+                if (persisted != null && persisted.state() == JobState.SENT) {
                     automationDao.registerSuccess("Offer sent via Gmail.", clock.now())
                     audit.success(
                         "GMAIL_SENT",
@@ -1187,7 +1208,8 @@ class AutomationEngine(
                     )
                 }
                 logTransition(job, transitioned.job, persisted, "offer transmitted", runId, correlationId)
-                StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped(sent = 1))
+                val sentCount = if (persisted != null && persisted.state() == JobState.SENT) 1 else 0
+                return StepResult(persisted ?: job, advanced = false, outcome = JobOutcome.skipped(sent = sentCount))
             } else {
                 val safeError = "Gmail delivery failed or rejected."
                 ledger.markFailed(AutomationEffect.SEND_OFFER, offerId, job.jobId, runId, safeError)
@@ -1357,6 +1379,7 @@ class AutomationEngine(
                 )
                 if (!outcome.applied) return false
                 val persisted = persistTransition(job, outcome.job, runId = null, correlationId = "OPERATOR_RETRY")
+                logTransition(job, outcome.job, persisted, "operator retry", runId = null, correlationId = "OPERATOR_RETRY")
                 if (persisted != null) {
                     audit.warn(
                         "OPERATOR_RETRY",
@@ -1383,6 +1406,7 @@ class AutomationEngine(
         )
         if (!outcome.applied) return false
         val persisted = persistTransition(job, outcome.job, runId = null, correlationId = "OPERATOR_CANCEL")
+        logTransition(job, outcome.job, persisted, "cancelled by operator", runId = null, correlationId = "OPERATOR_CANCEL")
         if (persisted != null) {
             audit.warn("OPERATOR_CANCEL", "Job cancelled by operator.", jobId = jobId)
         }
@@ -1430,6 +1454,12 @@ class AutomationEngine(
         return next.copy(updatedAt = now)
     }
 
+    /**
+     * One STATE_TRANSITION audit record per *committed* transition. A rejected CAS, a same-state
+     * no-op or a rolled-back attempt never reaches this point, so the audit history always agrees
+     * with the persisted state and never contains a misleading entry. The record is attributed to
+     * the committed row (job id, attempt count), so audit and storage can be diffed 1:1.
+     */
     private suspend fun logTransition(
         previous: AutomationJobEntity,
         next: AutomationJobEntity,
@@ -1439,7 +1469,8 @@ class AutomationEngine(
         correlationId: String?
     ) {
         if (persisted == null) return
-        audit.transition(previous, previous.state(), next.state(), runId, correlationId, detail)
+        if (previous.currentState == next.currentState) return // idempotent no-op: nothing was committed
+        audit.transition(persisted, previous.state(), next.state(), runId, correlationId, detail)
     }
 
     /** Records the failure on the job with the correct retryable/terminal/blocked semantics. */
@@ -1472,6 +1503,7 @@ class AutomationEngine(
         )
         val persisted = persistTransition(job, outcome.job, runId, correlationId)
         val result = persisted ?: job
+        logTransition(job, outcome.job, persisted, "step failed ($kind)", runId, correlationId)
         automationDao.registerFailure(message, clock.now())
         audit.warn(
             if (kind == FailureKind.RETRYABLE) "RETRY_SCHEDULED" else "FAILURE",
