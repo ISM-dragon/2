@@ -1,7 +1,9 @@
 # Android security and release audit (2026-10-09)
 
 **Auditor role:** Senior Android application security engineer.
-**Repository / branch:** `ISM-dragon/2`, working branch `arena/2e68db17-2`, base commit `712f9b28` (`main`).
+**Repository / branch:** `ISM-dragon/2`, working branch `arena/2e68db17-2`, branched from `712f9b28` on `main`
+(`main` has since advanced to `41a51339`; the CI baseline in §8.3 is measured against that later commit).
+**Pull request:** [#27](https://github.com/ISM-dragon/2/pull/27).
 **Companion documents:** `SECURITY_AUDIT.md` (round 1, Arabic), `docs/SECURITY_REVIEW_2026-10.md` (round 2).
 This audit re-validates those claims against the current tree, adds evidence for the areas they left open,
 and records exactly what was and was not executed.
@@ -18,7 +20,7 @@ and records exactly what was and was not executed.
 | Static reading of the manifest, resources, Gradle scripts and Kotlin sources | **Executed** on this commit |
 | Pattern scan of the working tree and of the entire git history for credential shapes | **Executed** (V7, V8 below) |
 | Caller/reachability analysis for dead and dormant code paths | **Executed** (V9 below) |
-| Gradle build, unit tests (`:app:testDebugUnitTest`, `:urlintelligence:test`, `:repairestimator:test`), `assembleDebug`, `assembleRelease`, R8, lint, merged-manifest inspection, `apkanalyzer` on the APK | **Not executed in this sandbox.** No JDK, Android SDK or Gradle distribution is installed and the egress allowlist does not reach Maven Central, Google Maven or `services.gradle.org`. These run in GitHub Actions on the pull request (see §8). |
+| Gradle build, unit tests (`:app:testDebugUnitTest`, `:urlintelligence:test`, `:repairestimator:test`), `assembleDebug`, `assembleRelease`, R8, lint, merged-manifest inspection, `apkanalyzer` on the APK | **Not executed in this sandbox** (no JDK, Android SDK or Gradle distribution; the egress allowlist does not reach Maven Central, Google Maven or `services.gradle.org`) — **but executed in GitHub Actions on this pull request.** Exact results, including the baseline comparison against `main`, are in §8.3. |
 
 Every claim below is anchored to a `file:line` in this commit. Commands that produced the evidence are in §7 so a
 reviewer can reproduce them without trusting this document.
@@ -66,6 +68,7 @@ Severity = impact if exercised. Exploitability = what an adversary needs. Status
 | ASR-09 | Low | Requires physical access to a locked device | **Accepted trade-off** | The Keystore key is usable while the device is locked and is not StrongBox-backed. |
 | ASR-10 | Info | Requires a future Network Security Config that permits cleartext | **No action — verified** | `ValueGuards.imageUrl` accepts `http://`; the manifest blocks it at connect time. |
 | ASR-11 | Low (build hygiene) | Requires access to the build machine's Gradle cache | **Open — documented** | Release keystore passwords are read at configuration time with the configuration cache enabled. |
+| ASR-12 | Medium (process / assurance) | n/a — the suite is red on its own | **Partly fixed here; rest pre-existing** | 22 unit tests fail at `main`; the suite does not gate releases in practice. One of them was a release-control regression check (FileProvider scope) — fixed in this PR. |
 
 Nothing in this audit is a credential leak from the shipped APK. No hard-coded signing or service credentials were
 found in the tree or in the history (V7, V8).
@@ -296,6 +299,30 @@ them as CI artifacts, and to prefer a short-lived CI keystore injection over a l
 
 ---
 
+### ASR-12 — The unit-test gate is red before any change — Medium (process) — Partly fixed here
+
+**Evidence:** CI on `main` at `41a51339` fails with **23 failing tests of 1450** in the full-app gate
+(`ai-analyst-ci.yml` → "Full app build and module test gate"). On this branch, before the fix below, the failure set
+was byte-for-byte the same (23 of 1450 → 23 of 1452 once this PR's two tests were added). Full comparison in §8.3.
+
+**Why this is a security finding and not just CI noise:** a failing suite cannot gate a release, so every control
+that is only asserted by a test — backup exclusions, exported-component inventory, FileProvider scope — is
+effectively unverified. Concretely, `AndroidSecuritySurfaceTest.fileProviderIsPrivateAndOnlySharesOfferPdfs` was
+among the failures, so the FileProvider-scope control in §5 was being asserted by a test that never passed in this
+environment. The XML itself is correct (V2); the test was reading the `android:path` attribute with an explicit
+`http://schemas.android.com/apk/res/android` namespace, which returns `null` under Robolectric.
+
+**Fixed here:** `app/src/test/java/com/example/AndroidSecuritySurfaceTest.kt` now reads the attribute with a null
+namespace — matching any namespace, which is exactly how `androidx.core.content.FileProvider` reads `name` and
+`path` at runtime. The test passes after the change and the failure count drops to 22.
+
+**Not fixed here:** the remaining 22 failures are in automation, reliability/E2E, underwriting, deal-scoring,
+seller-outreach and Gmail-concurrency tests. They are unrelated to this audit, they fail identically on `main`, and
+fixing them is not a security change. They should be triaged and the suite made a required status check, otherwise
+no control in §8.1 that is marked "tested by" actually gates anything.
+
+---
+
 ## 5. Areas checked and found sound (no change)
 
 | Area | Evidence |
@@ -485,6 +512,7 @@ and full-file reads of `CryptoManager`, `ConfigRepository`, `GmailService`, `Gma
 
 ### 8.1 Verified controls (evidence in this document)
 
+
 - [x] `allowBackup="false"` and cloud/device-transfer rules exclude database, files, shared prefs, root and external (V1; `backup_rules.xml`, `data_extraction_rules.xml`).
 - [x] `usesCleartextTraffic="false"`, explicitly (V1).
 - [x] Only the launcher activity is exported; `FileProvider` is not exported; no services/receivers (V1, manifest read).
@@ -505,11 +533,8 @@ and full-file reads of `CryptoManager`, `ConfigRepository`, `GmailService`, `Gma
 
 ### 8.2 Unverified — must be confirmed before release
 
-These require a toolchain that is not available here. The pull request runs the first four automatically.
+These require a toolchain or an artifact that is not available here.
 
-- [ ] `:app:testDebugUnitTest` passes, including the two new tests in this PR (GitHub Actions, `ai-analyst-ci.yml` → "Full app build and module test gate").
-- [ ] `:urlintelligence:test` and `:repairestimator:test` pass.
-- [ ] `:app:assembleDebug` succeeds.
 - [ ] **Merged manifest inspection** (`apkanalyzer manifest print app-release.apk`): confirm no dependency contributes an exported activity/service/receiver beyond the launcher, and that `androidx.startup.InitializationProvider` is absent.
 - [ ] `:app:assembleRelease` succeeds **and** R8 is enabled per ASR-01, with the smoke tests in `docs/SECURITY_REVIEW_2026-10.md` §8.
 - [ ] APK secrets sweep on the built artifact (unzip + `strings` on `classes*.dex`, `apkanalyzer` on resources): no key, token or keystore material. Only the public OAuth client ID should be present.
@@ -518,6 +543,39 @@ These require a toolchain that is not available here. The pull request runs the 
 - [ ] Manual device checks: fresh install, backup export → restore round trip, offer PDF generation → view → send, automation surviving a process restart, image loading from a real listing URL.
 - [ ] Privacy disclosure for data sent to Gemini and Gmail (store data-safety form and privacy policy). Not a code change.
 - [ ] ASR-06 decision: implement OAuth with PKCE, or ship with the Gmail send path inert and clearly labelled.
+- [ ] ASR-12 triage: make a green `:app:testDebugUnitTest` a required status check on `main`.
+
+### 8.3 What CI actually produced on this pull request
+
+Branch `arena/2e68db17-2` at `aa949d7`, workflows triggered by the push and by PR #27.
+
+| Workflow / job | Result |
+|---|---|
+| `ai-analyst-ci.yml` → **AI Analyst unit tests** | **pass** (3m09s) — compiles the app unit-test sources and runs the analyst and CRM suites |
+| `e2e-reliability-ci.yml` → **Data layer + underwriting guards (no JVM)** | **pass** (12s) |
+| `ai-analyst-ci.yml` → **Full app build and module test gate** | **fail** (4m17s) — `:app:testDebugUnitTest` with **22 failing tests of 1452**; `:urlintelligence:test` and `:repairestimator:test` passed; `Assemble full-app debug APK` **succeeded** |
+| `e2e-reliability-ci.yml` → **Property-to-offer integration suites** | **fail** — subset of the same 22 |
+| `seller-outreach-ci.yml` → **Seller outreach unit tests** | **fail** — `SellerOutreachEngineTest.groundedBedroomFactCanBeRepeatedByAi`, also failing on `main` |
+
+**Baseline comparison, which is the point:** the same job on `main` at `41a51339` (a commit that does **not**
+contain this branch) reports **23 failing tests of 1450**. Diffing the two failure sets line by line gives
+
+```
+11c11
+< com.example.automation.AutomationEngineConcurrencyTest > two engines racing for the same abandoned job produce a single delivery   (main)
+---
+> com.example.automation.AutomationEngineConcurrencyTest > concurrent cycles on the same database elect exactly one winner           (this branch)
+```
+
+— one flaky concurrency test swapping places with its sibling — plus the removal of
+`AndroidSecuritySurfaceTest > fileProviderIsPrivateAndOnlySharesOfferPdfs`, which this PR fixed. Everything else is
+identical.
+
+**Conclusion:** this branch introduces **no new test failure**. Its two new tests
+(`OfferPdfStorageSecurityTest.viewerGrantIsLimitedToRealPdfFilesDirectlyInsideOffers` and
+`GmailOAuthSecurityTest.sendRefusesAttachmentsThatAreNotApprovedOfferPdfs`) ran and passed — the total went from
+1450 to 1452 with the failure count going from 23 to 22. The 22 remaining failures are pre-existing at `main` and are
+outside this audit's scope (ASR-12). The debug APK assembles, so the production changes compile.
 
 ---
 
@@ -529,6 +587,7 @@ These require a toolchain that is not available here. The pull request runs the 
 | Delete `GmailService.createGmailIntent` and its now-unused imports | `app/src/main/java/com/example/domain/gmail/GmailService.kt` | ASR-03 |
 | Regression test: viewer grants are limited to real PDFs inside `offers/` | `app/src/test/java/com/example/OfferPdfStorageSecurityTest.kt` | ASR-02 |
 | Regression test: the send service rejects unapproved attachments before any network call | `app/src/test/java/com/example/GmailOAuthSecurityTest.kt` | ASR-03 |
+| Restore the FileProvider-scope regression check (namespace-agnostic attribute read) | `app/src/test/java/com/example/AndroidSecuritySurfaceTest.kt` | ASR-12 |
 | This document | `docs/ANDROID_SECURITY_RELEASE_AUDIT.md` | Deliverable |
 
 No UI or business logic was rewritten, no backend was added, no security check was relaxed, and no secret was
