@@ -545,4 +545,29 @@ class FinancialRepositorySourceOfTruthTest {
         runBlocking { repository.underwriteProperty("p1") }
         assertTrue(runBlocking { repository.hasAnalysis("p1") })
     }
+    // Audit characterizations: these document OPEN limitations, not safe-data guarantees.
+    @Test
+    fun auditStaleTaxYearCurrentlyHasNoFreshnessGate() {
+        val old = PropertyUnderwritingFactory.build(property(), rentEstimate(), taxRecord().copy(assessmentYear = 1990))
+        val current = PropertyUnderwritingFactory.build(property(), rentEstimate(), taxRecord().copy(assessmentYear = 2026))
+        assertEquals(current, old) // F06: year is discarded, with no stale-observation warning.
+    }
+
+    @Test
+    fun auditConflictingProviderRentRangeCurrentlyDoesNotBlockEstimate() {
+        val supplied = rentEstimate().copy(rentRangeLow = 5000.0, rentRangeHigh = 1000.0, rentConfidenceScore = 0.0)
+        val result = PropertyUnderwritingFactory.build(property(), supplied, taxRecord())
+        assertEquals(3200.0, result.input.monthlyRent, 0.0)
+        assertEquals(PropertyUnderwritingFactory.build(property(), rentEstimate(), taxRecord()).issues, result.issues)
+    }
+
+    @Test
+    fun auditMissingRentCarriesFindingButUsesZeroScenarioInput() {
+        val built = PropertyUnderwritingFactory.build(property(), null, null)
+        assertEquals(0.0, built.input.monthlyRent, 0.0)
+        assertTrue(built.issues.any { it.code == "MISSING_RENT_ESTIMATE" })
+        assertTrue(built.issues.any { it.code == "MISSING_PROPERTY_TAX_RECORD" })
+        assertNull(built.input.propertyTaxAnnual)
+    }
+
 }
