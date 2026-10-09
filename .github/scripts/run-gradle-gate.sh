@@ -48,6 +48,8 @@ if [ "$status" -ne 0 ]; then
   # multi-line annotation messages. The complete log is in the uploaded artifact.
   diag_file="$log_dir/$log_name.diagnostics.txt"
   {
+    # The reason is on the lines after "* What went wrong:", so keep three lines after it.
+    grep -A 3 '^\* What went wrong:' "$log_file" || true
     grep -E '(^FAILURE:|^\* What went wrong:|^Execution failed for task|^Caused by:|^[[:space:]]*e: |error:|Unresolved reference|Expecting an element|Could not resolve|Could not find|No tests found|tests completed|There were failing tests|Keystore file .* not found| FAILED$)' \
       "$log_file" | head -n 400
     tail -n 5 "$log_file"

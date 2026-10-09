@@ -59,7 +59,6 @@ jobs:
           bash .github/scripts/run-gradle-gate.sh ai-analyst-gradle \
             --no-daemon --stacktrace \
             :app:testDebugUnitTest \
-            :app:ciDeliberateFailureProbe \
             --tests "com.example.RealEstateAnalystOutputValidatorTest" \
             --tests "com.example.RealEstateAnalystInputFactoryTest" \
             --tests "com.example.RealEstateAnalystHardeningTest" \
