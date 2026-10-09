@@ -348,7 +348,7 @@ class PropertyImportRepository(
             // A key another row already holds stays unclaimed; reconcile resolves it later.
             canonicalKey = claimableKey(incomingEntity.canonicalKey, ownedBy = null)
         )
-        propertyDao.insertNewProperty(entity)
+        database.propertyIdentityDao().insertNewProperty(entity)
         writeSatellites(entity.id, bundle)
         touchProvenance(entity.id, sourceId, externalId, bundle, jobId, now, makePrimary = true)
         ImportResult(
