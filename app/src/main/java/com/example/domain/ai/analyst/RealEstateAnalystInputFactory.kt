@@ -111,11 +111,27 @@ class RealEstateAnalystInputFactory(
             sourceConfidence = number("rent.source_confidence", "rentConfidenceScore", rent?.rentConfidenceScore, AnalystEvidenceSource.RENT_ESTIMATE)
         )
 
+        // Missing-data semantics: a tax row whose annual amount is not a positive finite number is a
+        // placeholder written when the source had no tax figure (the import bridge stores 0.0 and the
+        // current year). It is not an observed tax record, so the model receives an explicit gap, not
+        // a $0 "TAX_RECORD" fact or a fabricated assessment year.
+        val observedTax = tax?.annualTaxAmount?.takeIf { it.isFinite() && it > 0.0 }
         val taxInput = AnalystTaxInput(
-            annualTaxUsd = number("tax.annual_tax_usd", "annualTaxUsd", tax?.annualTaxAmount, AnalystEvidenceSource.TAX_RECORD),
-            assessmentYear = integer("tax.assessment_year", "assessmentYear", tax?.assessmentYear, AnalystEvidenceSource.TAX_RECORD),
-            assessedValueUsd = number("tax.assessed_value_usd", "assessedValueUsd", tax?.assessedValue, AnalystEvidenceSource.TAX_RECORD),
-            delinquent = tax?.let { field("tax.delinquent", "taxDelinquent", it.taxDelinquent, AnalystEvidenceSource.TAX_RECORD) } ?: AnalystInputValue()
+            annualTaxUsd = number("tax.annual_tax_usd", "annualTaxUsd", observedTax, AnalystEvidenceSource.TAX_RECORD),
+            assessmentYear = integer(
+                "tax.assessment_year", "assessmentYear",
+                tax?.assessmentYear?.takeIf { observedTax != null }, AnalystEvidenceSource.TAX_RECORD
+            ),
+            assessedValueUsd = number(
+                "tax.assessed_value_usd", "assessedValueUsd",
+                tax?.assessedValue?.takeIf { observedTax != null && it.isFinite() && it > 0.0 },
+                AnalystEvidenceSource.TAX_RECORD
+            ),
+            delinquent = if (observedTax != null && tax != null) {
+                field("tax.delinquent", "taxDelinquent", tax.taxDelinquent, AnalystEvidenceSource.TAX_RECORD)
+            } else {
+                AnalystInputValue()
+            }
         )
 
         val financialInput = AnalystFinancialMetricsInput(

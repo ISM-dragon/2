@@ -2,6 +2,7 @@ package com.example
 
 import com.example.data.local.entity.ComparablePropertyEntity
 import com.example.data.local.entity.PropertyEntity
+import com.example.data.local.entity.TaxRecordEntity
 import com.example.domain.ai.analyst.RealEstateAnalystInputFactory
 import com.example.domain.ai.analyst.RealEstateAnalystInputSchema
 import com.example.domain.ai.analyst.toJsonObject
@@ -102,5 +103,82 @@ class RealEstateAnalystInputFactoryTest {
         assertTrue(json.getJSONObject("taxes").getJSONObject("annualTaxUsd").get("value") === JSONObject.NULL)
         assertTrue(json.getJSONObject("deterministicFinancialMetrics").getJSONObject("capRatePct").get("value") === JSONObject.NULL)
         assertFalse(json.getJSONArray("evidence").toString().contains("internal-property-id"))
+    }
+
+    @Test
+    fun taxPlaceholderWrittenByImportIsAGapNotAnObservedZeroTax() {
+        // The URL import bridge stores 0.0 tax, the current year and delinquent=false when the listing
+        // has no tax figure. Those are placeholders: the model must see no tax fact at all.
+        val property = PropertyEntity(
+            id = "placeholder-tax-property",
+            sourceType = "ON_MARKET",
+            title = "",
+            address = "1 Test Way",
+            city = "Austin",
+            state = "TX",
+            zipCode = "78704",
+            latitude = 0.0,
+            longitude = 0.0,
+            price = 565000.0,
+            propertyType = "Single Family",
+            bedrooms = 3,
+            bathrooms = 2.0,
+            squareFeet = 1800,
+            yearBuilt = 2012,
+            lotSizeSqFt = 0,
+            description = "",
+            status = "Active",
+            primaryImageUrl = "",
+            scannedAt = 0L
+        )
+        val placeholder = TaxRecordEntity(
+            propertyId = property.id,
+            annualTaxAmount = 0.0,
+            assessmentYear = 2026,
+            assessedValue = 0.0,
+            taxDelinquent = false
+        )
+
+        val taxes = RealEstateAnalystInputFactory().create(property, tax = placeholder).toJsonObject()
+            .getJSONObject("taxes")
+
+        assertTrue(taxes.getJSONObject("annualTaxUsd").get("value") === JSONObject.NULL)
+        assertTrue(taxes.getJSONObject("assessmentYear").get("value") === JSONObject.NULL)
+        assertTrue(taxes.getJSONObject("assessedValueUsd").get("value") === JSONObject.NULL)
+        assertTrue(taxes.getJSONObject("delinquent").get("value") === JSONObject.NULL)
+    }
+
+    @Test
+    fun observedTaxRecordIsPassedThroughExactly() {
+        val property = PropertyEntity(
+            id = "observed-tax-property",
+            sourceType = "ON_MARKET",
+            title = "",
+            address = "1 Test Way",
+            city = "Austin",
+            state = "TX",
+            zipCode = "78704",
+            latitude = 0.0,
+            longitude = 0.0,
+            price = 565000.0,
+            propertyType = "Single Family",
+            bedrooms = 3,
+            bathrooms = 2.0,
+            squareFeet = 1800,
+            yearBuilt = 2012,
+            lotSizeSqFt = 0,
+            description = "",
+            status = "Active",
+            primaryImageUrl = "",
+            scannedAt = 0L
+        )
+        val record = TaxRecordEntity(property.id, 6_200.0, 2025, 510_000.0, false)
+
+        val taxes = RealEstateAnalystInputFactory().create(property, tax = record).toJsonObject()
+            .getJSONObject("taxes")
+
+        assertEquals(6_200.0, taxes.getJSONObject("annualTaxUsd").getDouble("value"), 1e-9)
+        assertEquals(2025, taxes.getJSONObject("assessmentYear").getInt("value"))
+        assertEquals(510_000.0, taxes.getJSONObject("assessedValueUsd").getDouble("value"), 1e-9)
     }
 }

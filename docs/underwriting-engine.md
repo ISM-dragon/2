@@ -160,3 +160,66 @@ open. The Deal Room still calls a separate `DeterministicFinancialEngine`, so th
 repository-wide single-source-of-truth language above is not a verified guarantee.
 The audit corrects candidate-price holding costs in the flip MAO solver without
 changing named model defaults. JVM execution remains outstanding.
+
+## 7. Missing-data semantics and the tax consistency fix (2026-10-09)
+
+**Root cause of `PropertyToOfferWorkflowTest` failure.** The test compared the
+stored tax record (`0.0`) with the engine's `propertyTaxAnnual` (`6780.0`). The
+two values were not the same kind of fact:
+
+1. The Zillow listing fixture has no tax figure. `PropertyUrlImportBridge` writes
+   `annualTaxAmount = … ?: 0.0`, a **placeholder meaning "no tax figure"**.
+2. `PropertyUnderwritingFactory` treats a non-positive or non-finite tax as
+   missing: it passes `propertyTaxAnnual = null` and raises
+   `MISSING_PROPERTY_TAX_RECORD`.
+3. The engine resolves the null to the named assumption
+   `UnderwritingAssumptions.PROPERTY_TAX_PCT_OF_PRICE` (1.20%), so
+   `565,000 × 1.20% = 6,780`. The projection persists that resolved value.
+
+So the engine followed the documented contract. The test assertion was wrong:
+it treated a missing placeholder as a verified value of 0 to be consumed. The
+same contract is already asserted by
+`FinancialRepositorySourceOfTruthTest.missingTaxRecordAppliesTheNamedAssumptionAndSaysSo`.
+The test was corrected to check each part of the contract. The production
+behaviour is unchanged for the engine. Hardcoding `0.0` or `6780.0` would have
+been wrong, and the expected value was not weakened.
+
+**Two defects were found and fixed along the same path:**
+
+* `PropertyFinancialRepository.deriveFromSatellites` labelled a stored `0.0` tax
+  as `RECORDS` (observed) and used it as a zero tax. It now uses the same
+  positive-finite rule as the factory, falls back to the named assumption, and
+  labels that result `ESTIMATE`. It also no longer writes the placeholder
+  assessment year.
+* `RealEstateAnalystInputFactory` passed the placeholder `0.0` tax, the placeholder
+  current year and `delinquent=false` to the AI as `TAX_RECORD` facts. These are
+  now explicit gaps (`null`) unless the annual tax is an observed positive value.
+
+**Field semantics** (applies to tax, insurance, rent, rehab and similar inputs):
+
+| State | Representation | Engine behaviour | Visibility |
+| --- | --- | --- | --- |
+| Observed (source-verified) | finite, > 0 stored value; `EXPLICIT` input | used exactly | no finding |
+| Missing | `null` input, or a non-positive / non-finite stored placeholder | rent and rehab: `0`; tax, insurance: named assumption (`MODEL_DEFAULT`) | `WARNING`/`INFO` validation code (`MISSING_*`, `INSURANCE_NAMED_DEFAULT`, `NO_RENOVATION_ESTIMATE`); expense line basis `PERCENT_OF_PRICE` or `NONE`, not `FIXED_ANNUAL` |
+| Stated zero | explicit `0` input (not a stored placeholder) | used as zero | explicit input |
+| Estimated | provider or assumed value | used, marked `MODEL_DEFAULT`/`DERIVED` | `assumptionsUsed` for financing fields; `PropertyFinancialDataSource.ESTIMATE` for asset facts |
+| Non-finite | NaN / ±Infinity input | ignored; the documented default applies | `NON_FINITE_INPUT` `ERROR` |
+
+**Known limits (not fixed here).**
+
+* The `TaxRecordEntity` schema cannot distinguish "a verified zero tax" from
+  "no tax figure". Every zero is treated as missing. A source-verified exemption
+  of $0 therefore cannot be expressed until the schema has a nullable amount or
+  an explicit source flag.
+* `assumptionsUsed` covers financing provenance only. Operating-line defaults
+  (tax, insurance, maintenance, management, vacancy) are visible through
+  `operating.expenseLines[].basis` and `validation`, not through
+  `assumptionsUsed`. Adding them changes the golden-vector schema and needs an
+  oracle update first.
+* `PropertyUrlImportBridge` still writes the current calendar year as
+  `assessmentYear` for placeholder rows. The downstream code now ignores it, but
+  the stored value remains a fabricated date.
+* The Kotlin tests for this change were **not compiled or executed** in this
+  environment. No JDK, Gradle or Android SDK is available, and Maven/Google
+  artifact hosts are unreachable. Run
+  `gradle :app:testDebugUnitTest --tests 'com.example.reliability.PropertyToOfferWorkflowTest' --tests 'com.example.RealEstateAnalystInputFactoryTest' --tests 'com.example.FinancialRepositorySourceOfTruthTest'`.
