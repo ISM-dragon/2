@@ -1474,6 +1474,11 @@ def flip_costs_for_price(price, arv, sell_cost_pct, concessions, rehab, holding,
     charged = max(months, terms["lenderMinimumInterestMonths"])
     interest = interest_only_payment(terms["loanAmount"], terms["interestRatePct"]) * charged \
         if terms["loanAmount"] > ZERO else ZERO
+    # Reprice the percentage-based default at the candidate offer, not the
+    # original asking price. Explicit monthly costs (including zero) stay fixed.
+    holding_monthly = inp.get("holdingCostsMonthly")
+    holding = (F(holding_monthly) if holding_monthly is not None else
+               price * pct_to_rate(DEFAULT_ASSUMPTIONS["holdingCostsMonthlyPctOfPrice"])) * months
     all_in = price + rehab + buy_closing + holding + interest + terms["newLoanFees"]
     profit = arv * (ONE - pct_to_rate(sell_cost_pct)) - concessions - all_in
     return profit, all_in, terms
