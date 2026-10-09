@@ -293,6 +293,10 @@ class AutomationEngine(
             scheduler.schedulePeriodic(rules.scanIntervalMinutes)
             scheduler.enqueueImmediateCycle(CycleTrigger.PROCESS_START)
             if (!scheduler.isPersistent) startFallbackLoopIfNeeded(CycleTrigger.PROCESS_START)
+        } else if (report.interruptedRuns > 0 || report.reconciledJobs > 0 || report.reclaimedLeases > 0) {
+            // Durable resumption is not "starting automation": work the previous process already
+            // began must be finished exactly once even when the operator disabled new automation.
+            scheduler.enqueueImmediateCycle(CycleTrigger.PROCESS_START)
         }
     }
 
@@ -517,11 +521,14 @@ class AutomationEngine(
             )
             closeRun(runId, AutomationRunStatus.COMPLETED, "Cycle complete: ${stats.summary()}", null)
             audit.info("CYCLE_COMPLETE", "Cycle finished: ${stats.summary()}", runId = runId, correlationId = request.correlationId)
-            _status.value = AutomationStatus.IDLE
-            _currentTaskDescription.value = if (stats.pausedOffline) {
-                "Paused (offline) - will resume when connectivity returns"
+            if (stats.pausedOffline) {
+                // The cycle ended cleanly but no work could run: stay visibly paused so the
+                // operator (and the next scheduled cycle) see why nothing happened.
+                _status.value = AutomationStatus.PAUSED_OFFLINE
+                _currentTaskDescription.value = "Paused (offline) - will resume when connectivity returns"
             } else {
-                "Cycle complete. Durable worker will run again on schedule."
+                _status.value = AutomationStatus.IDLE
+                _currentTaskDescription.value = "Cycle complete. Durable worker will run again on schedule."
             }
             CycleOutcome.Completed(runId, stats)
         } catch (halt: AutomationHaltException) {

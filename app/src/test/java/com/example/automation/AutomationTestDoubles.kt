@@ -663,6 +663,22 @@ fun testRules(
 // ------------------------------------------------------------------ engine harness
 
 /**
+ * The "outside world" a process restart must not lose: device time, connectivity, the property
+ * feed, the offer/Gmail gateway and the persisted financial store. Process death resets the
+ * *engine*, never these - so harnesses that share a database also share one world. (An earlier
+ * version created a fresh set of fakes per harness, which made restart/second-engine tests observe
+ * phantom results: emails sent through the new instance were invisible to the old counters and
+ * recovery could not see the offer generated before the "crash".)
+ */
+private class TestWorld {
+    val clock = FakeClock()
+    val network = FakeNetworkMonitor()
+    val offers = FakeOfferGateway()
+    val financial = FakeFinancialGateway(qualifyingAnalysis())
+    val source = FakePropertySource()
+}
+
+/**
  * Wires a real (in-memory) Room database - so the SQL compare-and-swap, lease and unique-index
  * semantics of the production DAO are exercised - together with fake gateway implementations and
  * a deterministic clock.
@@ -679,14 +695,21 @@ class EngineTestHarness(
         .allowMainThreadQueries()
         .build()
 
+    private val world: TestWorld = sharedWorld(this.database)
+
     val dao: AutomationDao = this.database.automationDao()
     val propertyDao = this.database.propertyDao()
-    val clock = FakeClock()
-    val network = FakeNetworkMonitor()
+
+    /** Device time. Shared by every "process" attached to the same database. */
+    val clock: FakeClock get() = world.clock
+    val network: FakeNetworkMonitor get() = world.network
+    val offers: FakeOfferGateway get() = world.offers
+    val financial: FakeFinancialGateway get() = world.financial
+    val source: FakePropertySource get() = world.source
+
+    /** In-memory work queue of *this* process: it dies with the process and is never shared. */
     val scheduler = RecordingScheduler()
-    val offers = FakeOfferGateway()
-    val financial = FakeFinancialGateway(qualifyingAnalysis())
-    val source = FakePropertySource()
+
     val engine = com.example.domain.automation.AutomationEngine(
         context = context,
         automationDao = dao,
@@ -718,7 +741,22 @@ class EngineTestHarness(
     fun state(): AutomationStateEntity? = kotlinx.coroutines.runBlocking { dao.getAutomationState() }
 
     fun close() {
-        if (ownsDatabase) this.database.close()
+        if (ownsDatabase) {
+            forgetWorld(this.database)
+            this.database.close()
+        }
+    }
+
+    companion object {
+        private val worlds =
+            java.util.IdentityHashMap<com.example.data.local.AppDatabase, TestWorld>()
+
+        private fun sharedWorld(database: com.example.data.local.AppDatabase): TestWorld =
+            synchronized(worlds) { worlds.getOrPut(database) { TestWorld() } }
+
+        private fun forgetWorld(database: com.example.data.local.AppDatabase) {
+            synchronized(worlds) { worlds.remove(database) }
+        }
     }
 }
 
