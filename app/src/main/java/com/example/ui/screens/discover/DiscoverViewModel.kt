@@ -52,6 +52,23 @@ class DiscoverViewModel(application: Application) : AndroidViewModel(application
     private val app = application as RealEstateAiApp
     private val propertyRepo = app.propertyRepository
     private val intelligenceRepo = app.intelligenceRepository
+    private val listingScrapeRepo = app.listingScrapeRepository
+
+    /** Live portal search (Zillow) state. Owned by the repository so it survives sheet dismissal. */
+    val portalSearchState = listingScrapeRepo.uiState
+    val portalScrapeSettings = listingScrapeRepo.settings
+
+    fun setPortalLocation(location: String) = listingScrapeRepo.setLocation(location)
+    fun setPortalIntent(intent: com.example.domain.intelligence.scrape.ListingIntent) = listingScrapeRepo.setIntent(intent)
+    fun setPortalMinPrice(value: String) = listingScrapeRepo.setMinPrice(value)
+    fun setPortalMaxPrice(value: String) = listingScrapeRepo.setMaxPrice(value)
+    fun setPortalMinBeds(beds: Int) = listingScrapeRepo.setMinBeds(beds)
+    fun setPortalConsent(consented: Boolean) = listingScrapeRepo.setConsent(consented)
+    fun setPortalRobotsAdvisory(advisory: Boolean) = listingScrapeRepo.setRobotsAdvisory(advisory)
+    fun runPortalSearch() = listingScrapeRepo.search()
+    fun clearPortalResult() = listingScrapeRepo.clearResult()
+    fun savePortalListing(listing: com.example.domain.intelligence.scrape.ScrapedListing) =
+        listingScrapeRepo.saveListing(listing)
 
     private val _filterState = MutableStateFlow(DiscoverFilterState())
     private val _isFilterSheetOpen = MutableStateFlow(false)

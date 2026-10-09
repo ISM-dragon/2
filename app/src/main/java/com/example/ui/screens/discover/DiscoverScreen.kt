@@ -39,6 +39,7 @@ fun DiscoverScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var selectedMapPropId by remember { mutableStateOf<String?>(null) }
     var isAddPropertyDialogOpen by remember { mutableStateOf(false) }
+    var isPortalSearchOpen by remember { mutableStateOf(false) }
 
     Scaffold(
         floatingActionButton = {
@@ -100,6 +101,18 @@ fun DiscoverScreen(
                             .testTag("filter_button")
                     ) {
                         Icon(Icons.Filled.Tune, contentDescription = "Filter", tint = CyanPrimary)
+                    }
+
+                    // Live portal search (Zillow) — fetches what is actually listed right now
+                    IconButton(
+                        onClick = { isPortalSearchOpen = true },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .testTag("portal_search_button")
+                    ) {
+                        Icon(Icons.Filled.TravelExplore, contentDescription = "Live portal search", tint = CyanPrimary)
                     }
 
                     // Refresh Button
@@ -302,6 +315,14 @@ fun DiscoverScreen(
                         }
                     }
                 }
+            }
+
+            // Live portal search (Zillow) sheet
+            if (isPortalSearchOpen) {
+                PortalSearchSheet(
+                    onDismiss = { isPortalSearchOpen = false },
+                    viewModel = viewModel
+                )
             }
 
             // Filter Bottom Sheet
