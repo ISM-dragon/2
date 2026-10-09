@@ -106,10 +106,11 @@ class AndroidSecuritySurfaceTest {
             while (parser.next() != XmlPullParser.END_DOCUMENT) {
                 if (parser.eventType == XmlPullParser.START_TAG && parser.name == "files-path") {
                     filesPathCount++
-                    filesPath = parser.getAttributeValue(
-                        "http://schemas.android.com/apk/res/android",
-                        "path"
-                    )
+                    // A null namespace matches any namespace, which is also how
+                    // androidx.core.content.FileProvider reads this attribute at runtime. Reading it
+                    // with an explicit android: namespace returns null under Robolectric, so the
+                    // assertion would pass only in ways production never exercises.
+                    filesPath = parser.getAttributeValue(null, "path")
                 }
             }
         } finally {
