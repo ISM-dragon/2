@@ -119,6 +119,12 @@ fun DiscoverScreen(
                     }
                 }
 
+                Text(
+                    "Cached local properties only · No licensed nationwide listing provider configured. " +
+                        "Refresh does not fetch live listings; coverage and freshness are unverified.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Slate400
+                )
                 Spacer(modifier = Modifier.height(10.dp))
 
                 // Source Tabs: All | On-Market | Off-Market | Map
@@ -213,7 +219,7 @@ fun DiscoverScreen(
             when (state.filter.viewMode) {
                 DiscoverViewMode.MAP -> {
                     PropertyMapCanvas(
-                        properties = state.properties,
+                        properties = state.properties.filter { it.latitude != 0.0 && it.longitude != 0.0 },
                         selectedPropertyId = selectedMapPropId,
                         onSelectProperty = { selectedMapPropId = it.id },
                         onNavigateToDetail = onNavigateToDetail,
