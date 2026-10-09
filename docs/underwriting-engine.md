@@ -149,3 +149,14 @@ purchase + financed rehab, never on purchase price alone.
   `FinancingModelDefaultsRegistry`. Persisted comparison scenarios are the
   same deal re-run under every declared financing model. Regression and
   edge-case coverage lives in `FinancialRepositorySourceOfTruthTest`.
+
+## Independent accuracy audit (2026-10-09)
+
+See [financial and data accuracy audit](financial-data-accuracy-audit.md) for the
+independent scenario matrix, actual execution results, and unresolved defects.
+Oracle/port parity is **not** proof of economic correctness. In particular,
+wholesale missing-ARV handling, below-line reserves and financed-flip MAO remain
+open. The Deal Room still calls a separate `DeterministicFinancialEngine`, so the
+repository-wide single-source-of-truth language above is not a verified guarantee.
+The audit corrects candidate-price holding costs in the flip MAO solver without
+changing named model defaults. JVM execution remains outstanding.

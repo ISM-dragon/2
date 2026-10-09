@@ -436,7 +436,6 @@ object StrategyAnalyzers {
             sellCostPct = sellCostPct,
             concessions = concessions,
             rehab = totalRehab,
-            holding = holdingCosts,
             targetProfit = targetProfit,
             months = holdMonths
         )
@@ -504,7 +503,6 @@ object StrategyAnalyzers {
         sellCostPct: Double,
         concessions: Double,
         rehab: Double,
-        holding: Double,
         targetProfit: Double,
         months: Int
     ): Double? {
@@ -525,6 +523,11 @@ object StrategyAnalyzers {
             }
             val charged = maxOf(months, terms.lenderMinimumInterestMonths)
             val interest = if (terms.loanAmount > 0.0) terms.interestOnlyPayment * charged else 0.0
+            // A price-based default must move with the candidate offer. An explicit
+            // monthly amount (including zero) remains fixed, as in analyzeFixAndFlip.
+            val holdingMonthly = input.holdingCostsMonthly
+                ?: price * UnderwritingAssumptions.HOLDING_COSTS_MONTHLY_PCT_OF_PRICE / 100.0
+            val holding = holdingMonthly * months
             val allIn = price + rehab + buyClosing + holding + interest + terms.newLoanFeesAndPoints
             return arv * (1.0 - sellCostPct / 100.0) - concessions - allIn
         }

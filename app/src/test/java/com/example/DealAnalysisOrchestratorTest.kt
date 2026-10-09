@@ -630,4 +630,27 @@ class DealAnalysisOrchestratorTest {
         assertFalse(component(result, ScoringWeights.CASH_FLOW, "capRatePct").covered)
         assertTrue(result.missingInputs.contains("capRatePct"))
     }
+    @Test
+    fun auditObservationAgeCurrentlyDoesNotChangeScoreOrConfidence() {
+        // F06 characterization: retrievedAt is not a freshness policy.
+        val old = fullProvenance().copy(records = fullProvenance().records.map { it.copy(retrievedAt = 0L) })
+        val recent = old.copy(records = old.records.map { it.copy(retrievedAt = 1791504000000L) })
+        fun score(manifest: DataProvenanceManifest) = DealAnalysisOrchestrator.score(
+            property = baseProperty(), underwriting = underwriting(), market = fullMarket(),
+            comps = CompCoverage(compsCount = 4), provenance = manifest, asOfYear = 2026
+        )
+        assertEquals(score(old), score(recent))
+    }
+
+    @Test
+    fun auditEqualTierConflictsCurrentlySelectFirstRatherThanNewest() {
+        // F07 characterization: order changes selected evidence when tiers tie.
+        val old = FieldProvenance("estimatedRent", "1000", "synthetic provider A",
+            ProvenanceSourceTier.LICENSED_API, 0L, 0.5)
+        val recent = old.copy(value = "2000", source = "synthetic provider B", retrievedAt = 1791504000000L)
+        val manifest = DataProvenanceManifest("audit-fixture", listOf(old, recent))
+        assertEquals(old, manifest.getProvenanceFor("estimatedRent"))
+        assertEquals(recent, manifest.copy(records = manifest.records.reversed()).getProvenanceFor("estimatedRent"))
+    }
+
 }
