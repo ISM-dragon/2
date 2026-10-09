@@ -128,6 +128,21 @@ jobs:
             >"$RUNNER_TEMP/app-integration-gradle.log" 2>&1
           status=$?
           tail -n 40 "$RUNNER_TEMP/app-integration-gradle.log"
+          if [ "$status" -ne 0 ]; then
+            # The job log is not always readable from outside, so the diagnosis has to leave the log:
+            # compile errors, failing tests and the build's own summary become check annotations
+            # (GitHub keeps only the first handful, so the full picture goes into the PR comment).
+            {
+              grep -E '(^e: file:|^> Task .*FAILED$|^FAILURE:|^Execution failed for task|^\* What went wrong:|^Caused by:|Unresolved reference|No value passed for parameter|tests completed)' \
+                "$RUNNER_TEMP/app-integration-gradle.log"
+              grep -E -A 2 ' FAILED$' "$RUNNER_TEMP/app-integration-gradle.log" | grep -v "^--$"
+            } >"$RUNNER_TEMP/app-integration-diagnosis.txt" 2>/dev/null
+            head -n 12 "$RUNNER_TEMP/app-integration-diagnosis.txt" | while IFS= read -r line; do
+              escaped="${line//'%'/'%25'}"
+              echo "::error::$escaped"
+            done
+            cat "$RUNNER_TEMP/app-integration-diagnosis.txt"
+          fi
           exit "$status"
 
       - name: Run standalone module suites
@@ -139,6 +154,17 @@ jobs:
             >"$RUNNER_TEMP/module-gradle.log" 2>&1
           status=$?
           tail -n 40 "$RUNNER_TEMP/module-gradle.log"
+          if [ "$status" -ne 0 ]; then
+            {
+              grep -E '(^e: file:|^> Task .*FAILED$|^FAILURE:|^Execution failed for task|^Caused by:|Unresolved reference|tests completed)' \
+                "$RUNNER_TEMP/module-gradle.log"
+              grep -E -A 2 ' FAILED$' "$RUNNER_TEMP/module-gradle.log" | grep -v "^--$"
+            } >"$RUNNER_TEMP/module-diagnosis.txt" 2>/dev/null
+            head -n 8 "$RUNNER_TEMP/module-diagnosis.txt" | while IFS= read -r line; do
+              echo "::error::${line//'%'/'%25'}"
+            done
+            cat "$RUNNER_TEMP/module-diagnosis.txt"
+          fi
           exit "$status"
 
       - name: Collect test results
@@ -169,7 +195,16 @@ jobs:
           set +e
           SUMMARY="$RUNNER_TEMP/reliability-summary.md"
           if [ ! -s "$SUMMARY" ]; then
-            printf '## Test results\n\n> The results step produced no summary. Read the check annotations on this job.\n' >"$SUMMARY"
+            {
+              echo "## Test results"
+              echo
+              echo "> No JUnit XML was produced, so the build failed before any test report existed."
+              echo
+              echo '```'
+              head -n 60 "$RUNNER_TEMP/app-integration-diagnosis.txt" 2>/dev/null
+              head -n 20 "$RUNNER_TEMP/module-diagnosis.txt" 2>/dev/null
+              echo '```'
+            } >"$SUMMARY"
           fi
           {
             echo "### E2E reliability audit"

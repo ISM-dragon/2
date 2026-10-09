@@ -273,6 +273,7 @@ class WorkflowHarness(
     class OutagedFeedAdapter(
         override val sourceName: String,
         override val sourceId: String,
+        override val sourceType: String = "OFF_MARKET",
         private val error: Exception = IllegalStateException("provider unavailable")
     ) : PropertySourceAdapter {
         val calls = AtomicInteger(0)

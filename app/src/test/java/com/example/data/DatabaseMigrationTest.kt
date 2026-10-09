@@ -9,6 +9,7 @@ import com.example.data.local.entity.*
 import com.example.data.local.migration.DatabaseMigrations
 import com.example.data.local.migration.LegacyV2Schema
 import com.example.data.repository.PropertyImportRepository
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -260,7 +261,9 @@ class DatabaseMigrationTest {
                 details = "Registered send intent"
             )
             database.offerDao().insertAuditEvent(event)
-            val allEvents = database.offerDao().getAuditEventsForOffer("offer-test-1")
+            // `getAuditTrailForOffer` is the DAO's audit read model (a Flow over
+            // offer_audit_events); the migrated table must serve it unchanged.
+            val allEvents = database.offerDao().getAuditTrailForOffer("offer-test-1").first()
             assertEquals(1, allEvents.size)
         } finally {
             database.close()
