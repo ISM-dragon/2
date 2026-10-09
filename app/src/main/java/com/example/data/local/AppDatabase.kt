@@ -53,6 +53,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun propertySourceDao(): PropertySourceDao
     abstract fun propertyEnrichmentDao(): PropertyEnrichmentDao
     abstract fun propertyFinancialDao(): PropertyFinancialDao
+    abstract fun propertyIdentityDao(): PropertyIdentityDao
     abstract fun financialDao(): FinancialDao
     abstract fun offerDao(): OfferDao
     abstract fun automationDao(): AutomationDao

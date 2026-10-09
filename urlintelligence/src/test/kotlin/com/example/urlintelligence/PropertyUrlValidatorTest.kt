@@ -70,6 +70,24 @@ class PropertyUrlValidatorTest {
     }
 
     @Test
+    fun `distinct listings keep distinct identities`() {
+        val listing = valid("https://www.zillow.com/homedetails/12345678_zpid")
+        val otherListing = valid("https://www.zillow.com/homedetails/87654321_zpid")
+        val sameHostOtherQuery = valid("https://zillow.com/homedetails/12345678_zpid?listing_id=1")
+        val sameHostOtherQueryValue = valid("https://zillow.com/homedetails/12345678_zpid?listing_id=2")
+
+        assertFalse(IdempotencyKey.forUrl(listing.canonical) == IdempotencyKey.forUrl(otherListing.canonical))
+        assertFalse(
+            IdempotencyKey.canonicalPropertyId("zillow", null, listing.canonical) ==
+                IdempotencyKey.canonicalPropertyId("zillow", null, otherListing.canonical)
+        )
+        assertFalse(
+            IdempotencyKey.forUrl(sameHostOtherQuery.canonical) ==
+                IdempotencyKey.forUrl(sameHostOtherQueryValue.canonical)
+        )
+    }
+
+    @Test
     fun `canonical form is stable for idempotency`() {
         val first = valid("https://www.Zillow.com/homedetails/12345678_zpid/?utm_source=x")
         val second = valid("zillow.com/homedetails/12345678_zpid")

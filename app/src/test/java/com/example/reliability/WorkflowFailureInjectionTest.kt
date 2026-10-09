@@ -477,7 +477,8 @@ class WorkflowFailureInjectionTest {
             1,
             harness.database.propertySourceDao().getProvenanceForProperty(stored.id).size
         )
-        assertEquals(1, harness.database.propertyDao().getImagesListForProperty(stored.id).size)
+        // The fixture's structured data lists two photos; the race must not multiply the gallery.
+        assertEquals(2, harness.database.propertyDao().getImagesListForProperty(stored.id).size)
         assertTrue(
             "no worker may report a fabricated record",
             outcomes.none { it is ImportOutcome.Failed }

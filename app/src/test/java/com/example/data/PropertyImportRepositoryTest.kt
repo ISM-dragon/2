@@ -14,6 +14,7 @@ import com.example.data.local.entity.PropertyEnrichmentType
 import com.example.data.local.entity.PropertyEntity
 import com.example.data.local.entity.PropertyImageEntity
 import com.example.data.local.entity.PropertyImportStatus
+import com.example.data.local.entity.PropertyProvenanceEntity
 import com.example.data.local.entity.PropertySourceDefaults
 import com.example.data.local.entity.PropertySourceSyncStatus
 import com.example.data.local.entity.RentEstimateEntity
@@ -292,7 +293,78 @@ class PropertyImportRepositoryTest {
         assertNull(db.propertyDao().getPropertyById("legacy-b"))
     }
 
+    @Test
+    fun `merging a legacy duplicate moves the references that pointed at the loser`() = runBlocking {
+        importer.seedDefaultSources()
+        val base = bundle().property
+        // legacy-a was entered first and survives; legacy-b is the same house entered later.
+        val survivorRow = base.copy(
+            id = "legacy-a",
+            scannedAt = 1_000L,
+            canonicalKey = null,
+            normalizedAddress = "",
+            unitNumber = ""
+        )
+        val loserRow = base.copy(
+            id = "legacy-b",
+            scannedAt = 2_000L,
+            canonicalKey = null,
+            normalizedAddress = "",
+            unitNumber = "",
+            isSaved = true
+        )
+        db.propertyDao().insertProperties(listOf(survivorRow, loserRow))
+        for ((propertyId, externalId) in listOf("legacy-a" to "mls-a", "legacy-b" to "mls-b")) {
+            db.propertySourceDao().insertProvenance(
+                PropertyProvenanceEntity(
+                    propertyId = propertyId,
+                    sourceId = PropertySourceDefaults.MLS_ID,
+                    externalId = externalId,
+                    fetchedAt = 1L,
+                    firstSeenAt = 1L,
+                    lastSeenAt = 1L
+                )
+            )
+        }
+        // A saved property and an offer hang off the loser. Both must follow the survivor.
+        db.openHelper.writableDatabase.execSQL(
+            "INSERT INTO saved_properties (propertyId, savedAt, notes, tag) VALUES ('legacy-b', 5000, '', 'Watchlist')"
+        )
+        db.openHelper.writableDatabase.execSQL(
+            "INSERT INTO offers (id, propertyId, recipientName, recipientEmail, offerPrice, earnestMoney, " +
+                "inspectionPeriodDays, closingPeriodDays, contingencies, terms, conditions, expirationDate, " +
+                "generatedLetterContent, status, createdAt) VALUES ('offer-1', 'legacy-b', 'Seller', " +
+                "'seller@example.com', 500000.0, 5000.0, 10, 30, '', '', '', '2026-12-31', 'letter', 'DRAFT', 3000)"
+        )
+
+        val summary = importer.reconcileCanonicalKeys()
+
+        assertEquals(1, summary.mergedDuplicates)
+        assertEquals(1, db.propertyDao().getPropertiesCount())
+        val survivor = db.propertyDao().getPropertyById("legacy-a")
+        assertNotNull(survivor)
+        assertNotNull("the survivor must take the canonical key the loser held", survivor!!.canonicalKey)
+        assertTrue("saved state of the loser must survive the merge", survivor.isSaved)
+        assertNull(db.propertyDao().getPropertyById("legacy-b"))
+
+        assertEquals("legacy-a", scalarText("SELECT propertyId FROM offers WHERE id = 'offer-1'"))
+        assertEquals("legacy-a", scalarText("SELECT propertyId FROM saved_properties"))
+
+        val provenance = db.propertySourceDao().getProvenanceForProperty("legacy-a")
+        assertEquals("both source records must follow the survivor", 2, provenance.size)
+        assertEquals(
+            "exactly one source record may be primary after the merge",
+            1,
+            provenance.count { it.isPrimaryForProperty }
+        )
+    }
+
     // ── fixtures ────────────────────────────────────────────────────────────────────────────────
+
+    private fun scalarText(sql: String): String? =
+        db.openHelper.readableDatabase.query(sql).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
 
     private fun bundle(
         id: String = "prop-mls-001",
