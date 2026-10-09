@@ -1,6 +1,7 @@
 package com.example
 
 import android.app.Application
+import androidx.work.Configuration
 import com.example.data.adapter.OffMarketWholesaleAdapter
 import com.example.data.adapter.OnMarketMlsAdapter
 import com.example.data.adapter.PropertySourceManager
@@ -25,7 +26,15 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 
-class RealEstateAiApp : Application() {
+class RealEstateAiApp : Application(), Configuration.Provider {
+
+    // WorkManager is first touched in onCreate (WorkManagerAutomationScheduler). Providing the
+    // configuration here enables on-demand initialization, so WorkManager works even where the
+    // androidx.startup initializer has not run yet (for example Robolectric unit tests). The
+    // configuration is the library default, so production behaviour is unchanged.
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder().build()
+
 
     lateinit var database: AppDatabase
         private set
