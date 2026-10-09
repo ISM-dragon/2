@@ -29,8 +29,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 
-<<<<<<< HEAD
-class RealEstateAiApp : Application(), ImageLoaderFactory {
+class RealEstateAiApp : Application(), ImageLoaderFactory, Configuration.Provider {
 
     /**
      * Singleton image loader used by Coil's AsyncImage. Its HTTP client refuses non-public and redirected
@@ -40,17 +39,12 @@ class RealEstateAiApp : Application(), ImageLoaderFactory {
         ImageLoader.Builder(this)
             .okHttpClient(ImageFetchPolicy.createClient())
             .build()
-=======
-class RealEstateAiApp : Application(), Configuration.Provider {
 
     // WorkManager is first touched in onCreate (WorkManagerAutomationScheduler). Providing the
     // configuration here enables on-demand initialization, so WorkManager works even where the
-    // androidx.startup initializer has not run yet (for example Robolectric unit tests). The
-    // configuration is the library default, so production behaviour is unchanged.
+    // androidx.startup initializer has not run yet (for example Robolectric unit tests).
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder().build()
-
->>>>>>> refs/remotes/origin/arena/a8d68dc0-2
 
     lateinit var database: AppDatabase
         private set

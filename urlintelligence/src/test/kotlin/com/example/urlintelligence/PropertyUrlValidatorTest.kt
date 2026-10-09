@@ -105,11 +105,8 @@ class PropertyUrlValidatorTest {
     @Test
     fun `rejects loopback private and metadata hosts`() {
         val blocked = listOf(
-<<<<<<< HEAD
-=======
             // https: the default scheme policy rejects http before the host guard runs, so
             // plain http would never exercise the host checks this test is about.
->>>>>>> refs/remotes/origin/arena/a8d68dc0-2
             "https://localhost/admin",
             "https://127.0.0.1/x",
             "https://10.0.4.9/x",
