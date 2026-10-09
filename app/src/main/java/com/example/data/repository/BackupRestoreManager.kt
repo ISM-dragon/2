@@ -5,6 +5,7 @@ import androidx.room.withTransaction
 import com.example.data.local.AppDatabase
 import com.example.data.local.entity.*
 import com.example.domain.pdf.OfferPdfStorage
+import com.example.domain.propertyurl.normalize.ValueGuards
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -198,6 +199,10 @@ class BackupRestoreManager(
             val backupsDir = File(context.filesDir, "backups").apply { mkdirs() }
             val backupFile = File(backupsDir, "real_estate_ai_backup_${System.currentTimeMillis()}.json")
             backupFile.writeText(root.toString(2))
+            // Exports are plaintext: keep only the newest few so old copies do not accumulate.
+            backupsDir.listFiles()?.map { it.name }.orEmpty()
+                .let { names -> BackupRetention.namesToDelete(names) }
+                .forEach { name -> File(backupsDir, name).delete() }
 
             Pair(true, "Backup successfully exported to: ${backupFile.name} (${root.getJSONArray("properties").length()} properties, ${root.getJSONArray("offers").length()} offers)")
         } catch (cancelled: CancellationException) {
@@ -260,7 +265,9 @@ class BackupRestoreManager(
                                 lotSizeSqFt = obj.optInt("lotSizeSqFt", 5000),
                                 description = obj.optString("description", ""),
                                 status = obj.optString("status", "Active"),
-                                primaryImageUrl = obj.optString("primaryImageUrl", ""),
+                                // Restored files are untrusted input: the image URL is screened with the same rules as ingestion,
+                                // otherwise a crafted backup could make the image loader fetch a private or metadata host.
+                                primaryImageUrl = ValueGuards.imageUrlOrNull(obj.optString("primaryImageUrl", "")).orEmpty(),
                                 scannedAt = obj.optLong("scannedAt", System.currentTimeMillis()),
                                 isSaved = obj.optBoolean("isSaved", false),
                                 isSavedDeal = obj.optBoolean("isSavedDeal", false),

@@ -107,7 +107,9 @@ dependencies {
   implementation(libs.androidx.work.runtime.ktx)
   implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
-  implementation(libs.firebase.ai)
+  // Not referenced by any source set. Re-enable together with its consumer and a reviewed design
+  // (client-side Firebase AI would ship a Firebase-backed AI path inside the APK).
+  // implementation(libs.firebase.ai)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 
@@ -117,11 +119,15 @@ dependencies {
   // implementation(libs.androidx.credentials)
   // implementation(libs.androidx.credentials.play.services)
   // implementation(libs.googleid)
-  implementation(libs.firebase.appcheck.recaptcha)
+  // App Check is not initialised anywhere in the app; the release provider is therefore dead code.
+  // The debug provider stays debug-only (see above). Re-enable with a real App Check rollout.
+  // implementation(libs.firebase.appcheck.recaptcha)
   debugImplementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
-  implementation(libs.logging.interceptor)
+  // HTTP body/header logging is not used. Keeping the interceptor out of release avoids an easy path
+  // to logging OAuth tokens or API keys. Add it back only for debug builds, without request bodies.
+  // implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
   // implementation(libs.play.services.location)

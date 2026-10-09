@@ -213,8 +213,10 @@ class PropertyUrlResolver(
         val startedAt = clock.now()
         val trimmed = rawUrl.trim()
         val rawKey = IdempotencyKey.forUrl(trimmed.lowercase())
+        // The job is persisted before validation, so only the redacted form may be stored: the raw
+        // input can carry userinfo or token-like query values supplied by the user.
         var job = PropertyImportJob.create(
-            rawUrl = trimmed,
+            rawUrl = com.example.urlintelligence.url.JobUrlRedactor.redact(trimmed),
             idempotencyKey = rawKey,
             jobId = idGenerator(),
             maxAttempts = options.maxAttempts ?: retryPolicy.maxAttempts,
@@ -453,6 +455,17 @@ class PropertyUrlResolver(
             headers = sanitizeHeaders(options.headers),
             limits = options.limits
         )
+
+        // Enforce the response guard for every adapter, not only for adapters that call it: size,
+        // content-type, redirect, final-URL and soft-block checks must hold for third-party
+        // adapters too. A rejected document is never handed to the parser.
+        when (val guarded = com.example.urlintelligence.fetch.ResponseGuard(options.limits, validator).inspect(request, response)) {
+            is com.example.urlintelligence.fetch.ResponseGuardResult.Rejected -> {
+                job = failJob(job, ImportJobEvent.PARSE_FAILED, guarded.failure, "response guard rejected document")
+                return finishFailure(job, guarded.failure, outcome.attempts, startedAt, keys)
+            }
+            is com.example.urlintelligence.fetch.ResponseGuardResult.Usable -> Unit
+        }
 
         val warnings = ArrayList<String>()
         val draft = when (val parsed = adapter.parse(response, request)) {
