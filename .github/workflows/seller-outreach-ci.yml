@@ -56,6 +56,11 @@ jobs:
             --tests "com.example.domain.outreach.SellerOutreachEngineTest" \
             --tests "com.example.domain.outreach.OutreachSafetyTest"
 
+      - name: Publish failing unit tests
+        if: always()
+        shell: bash
+        run: python3 .github/scripts/summarize-junit-failures.py app/build/test-results/testDebugUnitTest
+
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v7

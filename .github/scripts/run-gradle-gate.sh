@@ -47,7 +47,7 @@ if [ "$status" -ne 0 ]; then
   # Emit each diagnostic line as an error annotation. Escape the characters that
   # GitHub's workflow-command parser treats specially.
   {
-    grep -E '(^FAILURE:|^\* What went wrong:|^Execution failed for task|^Caused by:|^[[:space:]]*e: |error:|Unresolved reference|Expecting an element|Could not resolve|Could not find|No tests found|tests completed|There were failing tests|Keystore file .* not found)' \
+    grep -E '(^FAILURE:|^\* What went wrong:|^Execution failed for task|^Caused by:|^[[:space:]]*e: |error:|Unresolved reference|Expecting an element|Could not resolve|Could not find|No tests found|tests completed|There were failing tests|Keystore file .* not found| FAILED$)' \
       "$log_file" | tail -n 30
     tail -n 5 "$log_file"
   } | awk '!seen[$0]++' | while IFS= read -r line; do
