@@ -17,6 +17,14 @@ local.properties
 .env
 debug.keystore
 
+# Release signing material must never be committed. app/build.gradle.kts reads the release keystore
+# from KEYSTORE_PATH (default: my-upload-key.jks in the repository root) and its passwords from env vars.
+*.jks
+*.keystore
+*.p12
+keystore.properties
+my-upload-key.jks
+
 # Python caches (oracle / tooling)
 __pycache__/
 *.pyc

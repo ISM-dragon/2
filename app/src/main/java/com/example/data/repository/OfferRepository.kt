@@ -17,6 +17,7 @@ import com.example.domain.gmail.GmailFailureKind
 import com.example.domain.gmail.GmailMimeBuilder
 import com.example.domain.gmail.GmailSendResult
 import com.example.domain.gmail.GmailSender
+import com.example.domain.gmail.OfferRecipientPolicy
 import com.example.domain.pdf.OfferPdfGenerator
 import com.example.domain.propertyurl.util.Redaction
 import kotlinx.coroutines.CancellationException
@@ -75,7 +76,7 @@ class OfferRepository(
         context = context,
         propertyId = propertyId,
         customPrice = customPrice,
-        recipientEmail = suggestedRecipientEmail ?: "agent@realestateteam.com"
+        recipientEmail = suggestedRecipientEmail ?: OfferRecipientPolicy.PLACEHOLDER_EMAIL
     )
 
     override suspend fun transmitOffer(context: Context, offerId: String): Boolean =
@@ -139,6 +140,12 @@ class OfferRepository(
             if (!GmailMimeBuilder.isSafeEmail(email)) {
                 return@withContext PreSendValidationResult(false, "Recipient email address is invalid.")
             }
+            if (OfferRecipientPolicy.isPlaceholder(email)) {
+                return@withContext PreSendValidationResult(
+                    false,
+                    "Recipient is an unconfirmed placeholder address. Set the real recipient before sending."
+                )
+            }
             if (GmailMimeBuilder.containsHeaderControls(offer.recipientName)) {
                 return@withContext PreSendValidationResult(false, "Recipient name contains invalid header characters.")
             }
@@ -169,7 +176,7 @@ class OfferRepository(
         propertyId: String,
         customPrice: Double? = null,
         recipientName: String = "Listing Agent / Seller",
-        recipientEmail: String = "agent@realestateteam.com"
+        recipientEmail: String = OfferRecipientPolicy.PLACEHOLDER_EMAIL
     ): OfferEntity = withContext(Dispatchers.IO) {
         val generationLock = offerGenerationLocks.getOrPut(propertyId) { Mutex() }
         generationLock.withLock {

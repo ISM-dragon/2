@@ -157,3 +157,16 @@
 - `urlintelligence/src/test/kotlin/com/example/urlintelligence/IngestionImageGuardTest.kt`: إسقاط الصور ذات المضيف الخاص/المحلي في `PropertyNormalizer`، ومنع ترقية صورة primary معادية، وإبقاء الصور العامة.
 
 **تعذّر تشغيل الاختبارات في هذه البيئة:** لا يوجد Java ولا Gradle ولا مترجم Kotlin في الـsandbox، ولا يمكن جلبها: `repo1.maven.org` و`dl.google.com` و`services.gradle.org` و`plugins.gradle.org` وأصول إصدارات GitHub كلها غير قابلة للوصول (الاتصال مسموح فقط بـgithub.com وcodeload وapi.github.com وPyPI). لذلك لم يُنفَّذ `testDebugUnitTest` ولا `:urlintelligence:test`. ما نُفِّذ فعلياً هنا: `git diff --check` (نظيف)، وفحص توازن الأقواس/السلاسل/التعليقات على كل ملف مُعدَّل (متوازن)، وتحقّق يدوي من وجود كل معرّف مستخدم ورؤيته (`ACCEPT`، `UrlParser` internal، `isBlockedHost` internal، `SourceCredentials`، `PropertySourceDefinition`، `JobCodec.encode`). يجب تشغيل `gradle :app:testDebugUnitTest :urlintelligence:test` قبل الدمج.
+
+---
+
+## Round 3 validation (2026-10)
+
+Full details, threat model, ranked findings, fixes and open release blockers are in
+[`docs/SECURITY_REVIEW_2026-10.md`](docs/SECURITY_REVIEW_2026-10.md). Summary of changes to the claims above:
+
+- **SEC-07 (partial):** the release build still contained the App Check reCAPTCHA provider and an unused `firebase-ai` SDK. Both were removed from the build, along with the unused logging interceptor.
+- **SEC-08 (partial):** the ingestion guard held, but backup restore bypassed it, and image loading followed redirects and resolved any hostname. Restore now applies the guard, and the Coil loader refuses redirects and non-public DNS answers.
+- **SEC-12 (partial):** the app's stored URLs were redacted, but the `urlintelligence` module's job store kept raw credentials. Fixed in the module.
+- **New:** offers were addressed to a hard-coded placeholder recipient. Sends to that address are now blocked, pending a recipient-entry UI (release blocker).
+- **Test status:** at base, 13 of 228 `urlintelligence` tests failed and CI did not run them. Module status after this round: 234 of 235 pass (one identity-key expectation remains open). Android/Robolectric tests were not run in this environment.

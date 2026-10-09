@@ -131,6 +131,17 @@ object ValueGuards {
         return ACCEPT
     }
 
+    /**
+     * Returns the trimmed URL when [imageUrl] accepts it, otherwise null.
+     *
+     * Use this at every boundary where an image URL enters persistence from a source that is not the
+     * ingestion pipeline (for example a restored backup file), so the same destination rules apply.
+     */
+    fun imageUrlOrNull(value: String?): String? {
+        val cleaned = value?.trim() ?: return null
+        return cleaned.takeIf { imageUrl(it).accepted }
+    }
+
     /** Rejects obvious non-address strings (placeholders that portals like to emit). */
     fun addressLine(value: String?): GuardResult {
         val cleaned = value?.trim() ?: return GuardResult(false, "missing")

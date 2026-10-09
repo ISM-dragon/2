@@ -246,7 +246,12 @@ object SourceFailureClassifier {
         }
         val signals = listOf(
             "are you a human", "verify you are human", "captcha", "recaptcha",
-            "px-captcha", "access denied", "request blocked", "unusual traffic"
+            "px-captcha", "access denied", "request blocked", "unusual traffic",
+            // Managed challenge interstitials (e.g. Cloudflare) served with HTTP 200. They are policy
+            // stops: parsing them would only produce a misleading parse error, and retrying them
+            // would keep requesting a page that asks for a human.
+            "just a moment...", "checking your browser before accessing", "cf-challenge",
+            "challenge-platform", "cf-chl-"
         )
         return if (signals.any { lowered.contains(it) }) {
             SourceFailure.Blocked(BlockReason.CAPTCHA, "anti-bot page served with HTTP 200")

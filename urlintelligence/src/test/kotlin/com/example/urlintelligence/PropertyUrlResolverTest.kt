@@ -107,26 +107,26 @@ class PropertyUrlResolverTest {
 
     @Test
     fun `credential-like query values are omitted from fetched and persisted job URLs`() {
-        val secret = "unit-test-query-token"
-        val input = "${Fixtures.ZILLOW_URL}?token=$secret&listing_id=123"
+        val fakeCredentialValue = "unit-test-query-token"
+        val input = "${Fixtures.ZILLOW_URL}?token=$fakeCredentialValue&listing_id=123"
         val transport = FakeTransport(bodies = listOf(Fixtures.load("zillow_listing.html")))
         val result = run(resolver(transport), input)
 
         assertTrue("expected success but was $result", result is PropertyImportResult.Success)
         val success = result as PropertyImportResult.Success
         assertEquals(1, transport.requests.size)
-        assertFalse(transport.requests.single().requestUrl.contains(secret))
+        assertFalse(transport.requests.single().requestUrl.contains(fakeCredentialValue))
 
         val storedJob = jobStore.findById(success.jobId)
         assertNotNull(storedJob)
-        assertFalse(storedJob!!.rawUrl.contains(secret))
+        assertFalse(storedJob!!.rawUrl.contains(fakeCredentialValue))
         assertTrue(storedJob.rawUrl.contains("REDACTED"))
     }
 
     @Test
     fun `embedded URL credentials are redacted before invalid jobs are persisted`() {
-        val secret = "unit-test-embedded-password"
-        val input = "https://listing-user:$secret@www.zillow.com/homedetails/12345678_zpid/"
+        val fakeCredentialValue = "unit-test-embedded-password"
+        val input = "https://listing-user:$fakeCredentialValue@www.zillow.com/homedetails/12345678_zpid/"
         val result = run(resolver(FakeTransport()), input)
 
         assertTrue(result is PropertyImportResult.Failure)
@@ -134,7 +134,7 @@ class PropertyUrlResolverTest {
         assertNotNull(jobId)
         val storedJob = jobStore.findById(jobId!!)
         assertNotNull(storedJob)
-        assertFalse(storedJob!!.rawUrl.contains(secret))
+        assertFalse(storedJob!!.rawUrl.contains(fakeCredentialValue))
         assertFalse(storedJob.rawUrl.contains("listing-user"))
     }
 

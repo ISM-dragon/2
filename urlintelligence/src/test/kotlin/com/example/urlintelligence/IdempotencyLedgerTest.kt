@@ -224,8 +224,8 @@ class IdempotencyLedgerTest {
             com.example.urlintelligence.idempotency.IdempotencyRecord(
                 key = IdempotencyKey.forUrl(canonical),
                 state = com.example.urlintelligence.idempotency.IdempotencyState.IN_FLIGHT,
-                createdAtEpochMillis = 0L,
-                updatedAtEpochMillis = 0L
+                createdAtEpochMillis = TestClock().now(),
+                updatedAtEpochMillis = TestClock().now()
             )
         )
         val result = runBlocking { h.resolver.resolve(zillowListing) }

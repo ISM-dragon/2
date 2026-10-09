@@ -1,6 +1,8 @@
 package com.example
 
 import android.app.Application
+import coil.ImageLoader
+import coil.ImageLoaderFactory
 import com.example.data.adapter.OffMarketWholesaleAdapter
 import com.example.data.adapter.OnMarketMlsAdapter
 import com.example.data.adapter.PropertySourceManager
@@ -17,6 +19,7 @@ import com.example.domain.propertyurl.pipeline.PropertyUrlIntelligenceFactory
 import com.example.domain.propertyurl.port.CredentialProvider
 import com.example.domain.propertyurl.store.FilePropertyImportJobStore
 import com.example.domain.gmail.GmailService
+import com.example.domain.image.ImageFetchPolicy
 import com.example.util.NetworkMonitor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,7 +28,16 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 
-class RealEstateAiApp : Application() {
+class RealEstateAiApp : Application(), ImageLoaderFactory {
+
+    /**
+     * Singleton image loader used by Coil's AsyncImage. Its HTTP client refuses non-public and redirected
+     * destinations (see [ImageFetchPolicy]); listing image URLs are untrusted input.
+     */
+    override fun newImageLoader(): ImageLoader =
+        ImageLoader.Builder(this)
+            .okHttpClient(ImageFetchPolicy.createClient())
+            .build()
 
     lateinit var database: AppDatabase
         private set

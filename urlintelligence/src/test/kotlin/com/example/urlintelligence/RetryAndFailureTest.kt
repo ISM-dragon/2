@@ -132,9 +132,9 @@ class SourceFailureClassifierTest {
 
     @Test
     fun `exception messages are not persisted in classified failures`() {
-        val secret = "unit-test-secret-value"
-        val failure = SourceFailureClassifier.fromThrowable(IOException("Authorization: Bearer $secret"))
-        assertFalse(failure.detail.contains(secret))
+        val fakeCredentialValue = "unit-test-placeholder-value"
+        val failure = SourceFailureClassifier.fromThrowable(IOException("Authorization: Bearer $fakeCredentialValue"))
+        assertFalse(failure.detail.contains(fakeCredentialValue))
         assertEquals("property request failed", failure.detail)
     }
 
