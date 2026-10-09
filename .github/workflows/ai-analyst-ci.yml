@@ -113,17 +113,16 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-      # --continue runs every requested task even if an earlier one fails, so one report shows
-      # all failing modules. The step still fails if any task fails.
-      - name: Run full build and module tests
+      # Each requested task has its own step so the outcome of every task is visible in the run.
+      # --continue lets all module test tasks run even if one of them fails; the step still fails.
+      - name: Run unit tests (app, urlintelligence, repairestimator)
         shell: bash
         run: |
-          bash .github/scripts/run-gradle-gate.sh full-app-gradle \
+          bash .github/scripts/run-gradle-gate.sh full-app-tests-gradle \
             --no-daemon --stacktrace --continue \
             :app:testDebugUnitTest \
             :urlintelligence:test \
-            :repairestimator:test \
-            :app:assembleDebug
+            :repairestimator:test
 
       - name: Publish failing unit tests
         if: always()
@@ -133,6 +132,16 @@ jobs:
             app/build/test-results/testDebugUnitTest \
             urlintelligence/build/test-results/test \
             repairestimator/build/test-results/test
+
+      # Runs even when tests fail, so the debug build is still verified and its APK is kept.
+      - name: Assemble debug APK
+        id: assemble
+        if: always()
+        shell: bash
+        run: |
+          bash .github/scripts/run-gradle-gate.sh full-app-assemble-gradle \
+            --no-daemon --stacktrace \
+            :app:assembleDebug
 
       - name: Upload test reports
         if: always()
@@ -146,11 +155,12 @@ jobs:
             urlintelligence/build/test-results/test
             repairestimator/build/reports/tests/test
             repairestimator/build/test-results/test
-            ${{ runner.temp }}/full-app-gradle.log
+            ${{ runner.temp }}/full-app-tests-gradle.log
+            ${{ runner.temp }}/full-app-assemble-gradle.log
           if-no-files-found: warn
 
       - name: Upload debug APK
-        if: success()
+        if: steps.assemble.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: app-debug-apk

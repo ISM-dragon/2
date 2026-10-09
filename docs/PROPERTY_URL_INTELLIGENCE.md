@@ -376,7 +376,7 @@ declaring its parser and expected outcome fails the build.
 Run them with:
 
 ```bash
-./gradlew :urlintelligence:test
+gradle :urlintelligence:test
 ```
 
 ## 15. Source behaviour that cannot be verified offline

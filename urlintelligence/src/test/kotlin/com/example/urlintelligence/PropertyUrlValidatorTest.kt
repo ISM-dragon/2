@@ -105,13 +105,15 @@ class PropertyUrlValidatorTest {
     @Test
     fun `rejects loopback private and metadata hosts`() {
         val blocked = listOf(
-            "http://localhost/admin",
-            "http://127.0.0.1/x",
-            "http://10.0.4.9/x",
-            "http://192.168.1.20/x",
-            "http://172.16.5.4/x",
-            "http://169.254.169.254/latest/meta-data",
-            "http://[::1]/x"
+            // https: the default scheme policy rejects http before the host guard runs, so
+            // plain http would never exercise the host checks this test is about.
+            "https://localhost/admin",
+            "https://127.0.0.1/x",
+            "https://10.0.4.9/x",
+            "https://192.168.1.20/x",
+            "https://172.16.5.4/x",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/x"
         )
         blocked.forEach { url ->
             val error = invalid(url)

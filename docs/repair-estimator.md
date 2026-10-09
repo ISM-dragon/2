@@ -294,9 +294,9 @@ Tests are in `repairestimator/src/test/kotlin/com/example/repairestimator/`:
 Run them with:
 
 ```
-./gradlew :repairestimator:test
+gradle :repairestimator:test
 ```
 
-`:repairestimator` is **not** part of the existing CI workflow, which runs only `:app:testDebugUnitTest`. Add `:repairestimator:test` to CI to gate changes to this module.
+`:repairestimator:test` runs in the `full-app-gate` job of `.github/workflows/ai-analyst-ci.yml`, alongside `:app:testDebugUnitTest`, `:urlintelligence:test` and `:app:assembleDebug`.
 
 Outside the repository, the arithmetic was also cross-checked against an independent reference implementation written from this document. It generated seeded random scopes covering every kind, condition, unit conversion, override, allowance, rule replacement and strategy, and compared every line status, amount and total. That check is a development aid and is not committed.
