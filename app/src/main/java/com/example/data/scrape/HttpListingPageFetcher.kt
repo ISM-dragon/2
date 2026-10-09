@@ -110,7 +110,7 @@ class HttpListingPageFetcher(
     /** Reads up to [limit] bytes and stops. A truncated body is still parseable for our purposes. */
     private fun readAtMost(body: ResponseBody, limit: Int): String {
         val out = ByteArrayOutputStream()
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        val buffer = ByteArray(READ_BUFFER_SIZE)
         body.byteStream().use { input ->
             while (out.size() < limit) {
                 val read = input.read(buffer, 0, minOf(buffer.size, limit - out.size()))
@@ -130,6 +130,9 @@ class HttpListingPageFetcher(
 
     companion object {
         private const val ROBOTS_LIMIT_BYTES = 64_000
+
+        /** stdlib's DEFAULT_BUFFER_SIZE is internal to kotlin.io, so this layer declares its own. */
+        private const val READ_BUFFER_SIZE = 8 * 1024
 
         fun create(settingsProvider: () -> PortalScrapeSettings): HttpListingPageFetcher {
             val client = OkHttpClient.Builder()
