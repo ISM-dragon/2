@@ -8,6 +8,7 @@ import com.example.data.local.entity.PropertyFinancialEntity
 import com.example.data.local.entity.PropertyImportStatus
 import com.example.data.local.entity.PropertyIngestionMethod
 import com.example.data.local.entity.PropertySourceDefaults
+import com.example.domain.finance.underwriting.ExpenseBasis
 import com.example.domain.gmail.GmailSendResult
 import com.example.domain.intelligence.job.JobStatus
 import com.example.domain.propertyurl.pipeline.ImportRequest
@@ -320,11 +321,33 @@ class PropertyToOfferWorkflowTest {
             analysis.renovationCost,
             0.001
         )
+        // Tax semantics (see docs/underwriting-engine.md, "Missing-data semantics"). The Zillow listing
+        // carries no tax figure, so the import bridge stores the 0.0 placeholder. That placeholder means
+        // "missing", not a verified zero tax, so the engine must not consume it as a fact.
         assertEquals(
-            "the tax record the pipeline stored is the tax the engine consumed",
+            "a listing without a tax figure stores the missing placeholder, not a verified zero",
+            0.0,
             requireNotNull(harness.database.propertyDao().getTaxRecord(propertyId)).annualTaxAmount,
+            0.001
+        )
+        // The engine resolves the missing tax to the named assumption: 1.20% of the 565,000 price
+        // = 6,780. The literal is computed by hand here, independently of the production constant.
+        assertEquals(
+            "a missing tax record resolves to the named 1.20%-of-price assumption",
+            6_780.0,
             analysis.propertyTaxAnnual,
             0.001
+        )
+        // The estimate must be visible, not presented as a stored fact.
+        val underwriting = harness.financials.underwriteProperty(propertyId)
+        assertTrue(
+            "the missing tax must be reported as a validation finding",
+            underwriting.validation.any { it.code == "MISSING_PROPERTY_TAX_RECORD" }
+        )
+        assertEquals(
+            "the tax line must be marked as a percent-of-price default, not a fixed annual amount",
+            ExpenseBasis.PERCENT_OF_PRICE,
+            underwriting.operating.expenseLines.single { it.key == "propertyTax" }.basis
         )
         assertTrue("persisted metrics must stay finite", analysis.noiAnnual.isFinite())
         assertTrue("persisted metrics must stay finite", analysis.monthlyCashFlow.isFinite())
