@@ -43,6 +43,10 @@ status=${PIPESTATUS[0]:-1}
 
 echo "Gradle exit status: $status"
 
+if [ "$status" -eq 0 ]; then
+  echo "Gradle gate succeeded."
+fi
+
 if [ "$status" -ne 0 ]; then
   # GitHub shows at most 10 error annotations per step, so the diagnostic lines are packed into
   # multi-line annotation messages. The complete log is in the uploaded artifact.
