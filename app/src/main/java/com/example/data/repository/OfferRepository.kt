@@ -237,7 +237,24 @@ class OfferRepository(
             createdAt = clock()
         )
 
-        val pdfFile = OfferPdfGenerator.generateOfferPdf(context, draftOffer, property)
+        val pdfFile = try {
+            OfferPdfGenerator.generateOfferPdf(context, draftOffer, property)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Record the failure so the audit trail captures why generation did not complete,
+            // then propagate.  No offer row is persisted, so no inconsistent state remains.
+            offerDao.insertAuditEvent(
+                OfferAuditEventEntity(
+                    offerId = offerId,
+                    eventType = "OFFER_GENERATION_FAILED",
+                    timestamp = clock(),
+                    status = "FAILED",
+                    details = "PDF generation failed: ${e.message?.take(200) ?: e.javaClass.simpleName}"
+                )
+            )
+            throw e
+        }
         val readyOffer = draftOffer.copy(pdfPath = pdfFile.absolutePath, status = "READY")
         val generatedAt = clock()
         offerDao.insertOfferWithDocumentAndAudit(
