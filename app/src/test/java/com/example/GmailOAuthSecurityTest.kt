@@ -9,6 +9,7 @@ import com.example.data.local.entity.GmailConfigurationEntity
 import com.example.data.local.entity.OfferTemplateEntity
 import com.example.data.repository.ConfigRepository
 import com.example.data.security.CryptoManager
+import com.example.domain.gmail.GmailFailureKind
 import com.example.domain.gmail.GmailSendResult
 import com.example.domain.gmail.GmailService
 import kotlinx.coroutines.flow.Flow
