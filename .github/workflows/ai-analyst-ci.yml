@@ -160,7 +160,9 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload debug APK
-        if: steps.assemble.outcome == 'success'
+        # always() is required: without a status function GitHub adds success(), which is false
+        # once the test step has failed. The APK is uploaded whenever the debug build itself succeeded.
+        if: always() && steps.assemble.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: app-debug-apk
