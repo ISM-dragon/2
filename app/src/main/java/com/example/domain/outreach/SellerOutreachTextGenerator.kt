@@ -155,7 +155,7 @@ object OutreachAiResponseParser {
         return (value as? JsonValues.Str)?.value
     }
 
-    private fun collectKeys(value: JsonValues, out: MutableList<String>) {
+    private fun collectKeys(value: JsonValues.Value, out: MutableList<String>) {
         when (value) {
             is JsonValues.Obj -> value.fields.forEach { (key, child) ->
                 out += key

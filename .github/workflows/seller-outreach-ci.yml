@@ -36,28 +36,33 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
+      # debug.keystore is gitignored, so CI creates the standard Android debug key for this run only.
+      - name: Create CI debug keystore
+        shell: bash
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$GITHUB_WORKSPACE/debug.keystore" \
+            -storepass android -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
       - name: Run seller outreach tests
         shell: bash
         run: |
-          set +e
-          gradle --no-daemon --stacktrace \
+          bash .github/scripts/run-gradle-gate.sh seller-outreach-gradle \
+            --no-daemon --stacktrace \
             :app:testDebugUnitTest \
             --tests "com.example.domain.outreach.SellerOutreachEngineTest" \
-            --tests "com.example.domain.outreach.OutreachSafetyTest" \
-            >"$RUNNER_TEMP/seller-outreach-gradle.log" 2>&1
-          status=$?
-          cat "$RUNNER_TEMP/seller-outreach-gradle.log"
-          if [ "$status" -ne 0 ]; then
-            echo "Gradle failed; publishing the last diagnostic lines as check annotations."
-            {
-              grep -E '(^FAILURE:|^\\* What went wrong:|^Execution failed for task|^Caused by:|^[[:space:]]*e: |error:|Unresolved reference|Expecting an element|Could not resolve|Could not find)' \
-                "$RUNNER_TEMP/seller-outreach-gradle.log" | tail -n 30
-              tail -n 5 "$RUNNER_TEMP/seller-outreach-gradle.log"
-            } | while IFS= read -r line; do
-              escaped="${line//'%'/'%25'}"
-              escaped="${escaped//$'\r'/'%0D'}"
-              escaped="${escaped//$'\n'/'%0A'}"
-              echo "::error::$escaped"
-            done
-          fi
-          exit "$status"
+            --tests "com.example.domain.outreach.OutreachSafetyTest"
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: seller-outreach-test-report
+          path: |
+            app/build/reports/tests/testDebugUnitTest
+            app/build/test-results/testDebugUnitTest
+            ${{ runner.temp }}/seller-outreach-gradle.log
+          if-no-files-found: warn
