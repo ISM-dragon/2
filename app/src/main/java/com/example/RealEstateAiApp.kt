@@ -1,6 +1,7 @@
 package com.example
 
 import android.app.Application
+import androidx.work.Configuration
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.example.data.adapter.OffMarketWholesaleAdapter
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 
+<<<<<<< HEAD
 class RealEstateAiApp : Application(), ImageLoaderFactory {
 
     /**
@@ -38,6 +40,17 @@ class RealEstateAiApp : Application(), ImageLoaderFactory {
         ImageLoader.Builder(this)
             .okHttpClient(ImageFetchPolicy.createClient())
             .build()
+=======
+class RealEstateAiApp : Application(), Configuration.Provider {
+
+    // WorkManager is first touched in onCreate (WorkManagerAutomationScheduler). Providing the
+    // configuration here enables on-demand initialization, so WorkManager works even where the
+    // androidx.startup initializer has not run yet (for example Robolectric unit tests). The
+    // configuration is the library default, so production behaviour is unchanged.
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder().build()
+
+>>>>>>> refs/remotes/origin/arena/a8d68dc0-2
 
     lateinit var database: AppDatabase
         private set

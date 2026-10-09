@@ -72,7 +72,7 @@ class LeadCrmServiceTest {
     // ── Capture ─────────────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `capturing a lead normalizes tags, schedules the cadence and assesses it`() = runBlocking {
+    fun `capturing a lead normalizes tags, schedules the cadence and assesses it`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val result = service(store).createLead(request(leadId = null), T0, ACTOR)
         assertTrue(result is LeadMutationResult.Applied)
@@ -92,7 +92,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `an injected id factory keeps creation reproducible and the caller's id wins`() = runBlocking {
+    fun `an injected id factory keeps creation reproducible and the caller's id wins`(): Unit = runBlocking<Unit> {
         val deterministic = LeadIdFactory { java.util.UUID.fromString("12345678-1234-5678-1234-567812345678") }
         val created = service(ids = deterministic).createLead(request(leadId = null), T0, ACTOR) as LeadMutationResult.Applied
         assertEquals("LEAD-123456781234", created.lead.id)
@@ -102,7 +102,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `a request without an actor is refused before anything is stored`() = runBlocking {
+    fun `a request without an actor is refused before anything is stored`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         assertThrows(IllegalArgumentException::class.java) {
             runBlocking { service(store).createLead(request(), T0, "  ") }
@@ -113,7 +113,7 @@ class LeadCrmServiceTest {
     // ── Evidence ────────────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `an outbound attempt moves a new lead to CONTACTED and re-arms the cadence`() = runBlocking {
+    fun `an outbound attempt moves a new lead to CONTACTED and re-arms the cadence`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -128,7 +128,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `a seller reply advances the lead without an explicit move`() = runBlocking {
+    fun `a seller reply advances the lead without an explicit move`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -145,7 +145,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `a do-not-contact request freezes the lead and stops any further stage move`() = runBlocking {
+    fun `a do-not-contact request freezes the lead and stops any further stage move`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -165,7 +165,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `operator evidence is stored with an audited revision`() = runBlocking {
+    fun `operator evidence is stored with an audited revision`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         val created = crm.createLead(request(), T0, ACTOR) as LeadMutationResult.Applied
@@ -214,7 +214,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `an invalid note or tag is refused by the aggregate, not silently saved`() = runBlocking {
+    fun `an invalid note or tag is refused by the aggregate, not silently saved`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -239,7 +239,7 @@ class LeadCrmServiceTest {
     // ── Pipeline ────────────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `moveTo applies a gated move and persists it`() = runBlocking {
+    fun `moveTo applies a gated move and persists it`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -263,7 +263,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `registering an offer records the bridge move and the contract completes it`() = runBlocking {
+    fun `registering an offer records the bridge move and the contract completes it`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -293,7 +293,7 @@ class LeadCrmServiceTest {
     // ── Qualification ───────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `qualification can be reassessed, decayed and overridden, and never writes raw`() = runBlocking {
+    fun `qualification can be reassessed, decayed and overridden, and never writes raw`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -328,7 +328,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `a qualification change that would corrupt the record is refused, and a no-op writes nothing`() = runBlocking {
+    fun `a qualification change that would corrupt the record is refused, and a no-op writes nothing`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -354,7 +354,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `the service exposes the derived priority and the validation report`() = runBlocking {
+    fun `the service exposes the derived priority and the validation report`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -373,7 +373,7 @@ class LeadCrmServiceTest {
     // ── Follow-up ───────────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `an explicit follow-up can be scheduled, listed when due and completed`() = runBlocking {
+    fun `an explicit follow-up can be scheduled, listed when due and completed`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -395,7 +395,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `a terminal lead takes no follow-up and no cadence means a refusal, not a crash`() = runBlocking {
+    fun `a terminal lead takes no follow-up and no cadence means a refusal, not a crash`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -409,7 +409,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `completing a follow-up that does not exist is refused with a stable code`() = runBlocking {
+    fun `completing a follow-up that does not exist is refused with a stable code`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store, policy = LeadCrmPolicy(automation = LeadAutomationPolicy(autoScheduleFollowUp = false)))
         crm.createLead(request(), T0, ACTOR)
@@ -421,7 +421,7 @@ class LeadCrmServiceTest {
     // ── Skip tracing ────────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `the skip-trace seam is disabled and never writes anything`() = runBlocking {
+    fun `the skip-trace seam is disabled and never writes anything`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         crm.createLead(request(), T0, ACTOR)
@@ -437,7 +437,7 @@ class LeadCrmServiceTest {
     // ── Store ───────────────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `the store lists open leads in priority then longest-waiting order`() = runBlocking {
+    fun `the store lists open leads in priority then longest-waiting order`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         store.save(crmLead(status = LeadPipelineStatus.NEW, leadId = "LEAD-LOW", priority = LeadPriority.LOW))
         store.save(crmLead(status = LeadPipelineStatus.NEW, leadId = "LEAD-HIGH", priority = LeadPriority.HIGH, at = T0 + day))
@@ -458,7 +458,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `the store answers follow-up queries and retains terminal leads last`() = runBlocking {
+    fun `the store answers follow-up queries and retains terminal leads last`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val live = crmLead(status = LeadPipelineStatus.NEW, at = T0)
             .withFollowUp(LeadFollowUpPlanner.schedule(LeadPipelineStatus.NEW, T0, ACTOR)!!, ACTOR, T0)
@@ -477,7 +477,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `bounded storage evicts terminal work before open deals`() = runBlocking {
+    fun `bounded storage evicts terminal work before open deals`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore(maxLeads = 2, retainTerminalLeads = 1)
         store.save(crmLead(status = LeadPipelineStatus.CLOSED, leadId = "LEAD-DEAD", at = T0))
         store.save(crmLead(status = LeadPipelineStatus.NEW, leadId = "LEAD-LIVE", at = T0 + day))
@@ -493,7 +493,7 @@ class LeadCrmServiceTest {
     // ── Automation switches ─────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `a conservative deployment can switch the automation off and still work by hand`() = runBlocking {
+    fun `a conservative deployment can switch the automation off and still work by hand`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val manual = LeadCrmPolicy(
             automation = LeadAutomationPolicy(
@@ -518,7 +518,7 @@ class LeadCrmServiceTest {
     }
 
     @Test
-    fun `an inconsistent write is refused instead of stored`() = runBlocking {
+    fun `an inconsistent write is refused instead of stored`(): Unit = runBlocking<Unit> {
         val store = InMemoryLeadStore()
         val crm = service(store)
         // The lead is already in a committed stage without a contract: the validator (not just the

@@ -13,6 +13,10 @@ concurrency:
   group: ai-analyst-ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Gradle is invoked as `gradle` with the version pinned below. The repository intentionally
+# does not commit a Gradle wrapper (gradlew / gradle-wrapper.jar), so ./gradlew must not be used.
+# Every Gradle invocation goes through .github/scripts/run-gradle-gate.sh, which returns Gradle's
+# own exit status and publishes failure diagnostics as annotations.
 jobs:
   ai-analyst-tests:
     name: AI Analyst unit tests
@@ -28,8 +32,6 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      # The repository intentionally does not commit a Gradle wrapper binary; the
-      # action provisions the exact distribution named in gradle/wrapper properties.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
@@ -38,41 +40,131 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
+      # debug.keystore is gitignored, so CI creates the standard Android debug key for this run only.
+      - name: Create CI debug keystore
+        shell: bash
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$GITHUB_WORKSPACE/debug.keystore" \
+            -storepass android -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
       # The CRM suite (com.example.domain.crm.*) is pure JVM (no Android/Room imports, see
       # LeadCrmIsolationTest), so it runs in the same invocation as the analyst tests.
       - name: Run AI Analyst test suite
         shell: bash
         run: |
-          set +e
-          gradle --no-daemon --stacktrace \
+          bash .github/scripts/run-gradle-gate.sh ai-analyst-gradle \
+            --no-daemon --stacktrace \
             :app:testDebugUnitTest \
             --tests "com.example.RealEstateAnalystOutputValidatorTest" \
             --tests "com.example.RealEstateAnalystInputFactoryTest" \
             --tests "com.example.RealEstateAnalystHardeningTest" \
             --tests "com.example.domain.crm.*" \
             --tests "com.example.RealEstateAnalystAdversarialContractTest"
-            >"$RUNNER_TEMP/ai-analyst-gradle.log" 2>&1
-          status=$?
-          cat "$RUNNER_TEMP/ai-analyst-gradle.log"
-          if [ "$status" -ne 0 ]; then
-            echo "Gradle failed; publishing the last diagnostic lines as check annotations."
-            {
-              grep -E '(^FAILURE:|^\\* What went wrong:|^Execution failed for task|^Caused by:|^[[:space:]]*e: |error:|Unresolved reference|Expecting an element|Could not resolve|Could not find)' \
-                "$RUNNER_TEMP/ai-analyst-gradle.log" | tail -n 30
-              tail -n 5 "$RUNNER_TEMP/ai-analyst-gradle.log"
-            } | while IFS= read -r line; do
-              escaped="${line//'%'/'%25'}"
-              escaped="${escaped//$'\r'/'%0D'}"
-              escaped="${escaped//$'\n'/'%0A'}"
-              echo "::error::$escaped"
-            done
-          fi
-          exit "$status"
+
+      - name: Publish failing unit tests
+        if: always()
+        shell: bash
+        run: python3 .github/scripts/summarize-junit-failures.py app/build/test-results/testDebugUnitTest
 
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ai-analyst-test-report
-          path: app/build/reports/tests/testDebugUnitTest
+          path: |
+            app/build/reports/tests/testDebugUnitTest
+            app/build/test-results/testDebugUnitTest
+            ${{ runner.temp }}/ai-analyst-gradle.log
           if-no-files-found: warn
+
+  full-app-gate:
+    name: Full app build and module test gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Create CI debug keystore
+        shell: bash
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$GITHUB_WORKSPACE/debug.keystore" \
+            -storepass android -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      # Each requested task has its own step so the outcome of every task is visible in the run.
+      # --continue lets all module test tasks run even if one of them fails; the step still fails.
+      - name: Run unit tests (app, urlintelligence, repairestimator)
+        shell: bash
+        run: |
+          bash .github/scripts/run-gradle-gate.sh full-app-tests-gradle \
+            --no-daemon --stacktrace --continue \
+            :app:testDebugUnitTest \
+            :urlintelligence:test \
+            :repairestimator:test
+
+      - name: Publish failing unit tests
+        if: always()
+        shell: bash
+        run: |
+          python3 .github/scripts/summarize-junit-failures.py \
+            app/build/test-results/testDebugUnitTest \
+            urlintelligence/build/test-results/test \
+            repairestimator/build/test-results/test
+
+      # Runs even when tests fail, so the debug build is still verified and its APK is kept.
+      - name: Assemble debug APK
+        id: assemble
+        if: always()
+        shell: bash
+        run: |
+          bash .github/scripts/run-gradle-gate.sh full-app-assemble-gradle \
+            --no-daemon --stacktrace \
+            :app:assembleDebug
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: full-app-test-reports
+          path: |
+            app/build/reports/tests/testDebugUnitTest
+            app/build/test-results/testDebugUnitTest
+            urlintelligence/build/reports/tests/test
+            urlintelligence/build/test-results/test
+            repairestimator/build/reports/tests/test
+            repairestimator/build/test-results/test
+            ${{ runner.temp }}/full-app-tests-gradle.log
+            ${{ runner.temp }}/full-app-assemble-gradle.log
+          if-no-files-found: warn
+
+      - name: Upload debug APK
+        # always() is required: without a status function GitHub adds success(), which is false
+        # once the test step has failed. The APK is uploaded whenever the debug build itself succeeded.
+        if: always() && steps.assemble.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

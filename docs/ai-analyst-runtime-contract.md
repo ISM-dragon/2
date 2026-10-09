@@ -6,7 +6,7 @@ invent property facts, and cannot hand an unvalidated response to callers or to 
 deterministic engine (`FinancialEngine`, `DeterministicFinancialEngine`, `DealScoringEngine`) remains
 the only owner of every number a user sees.
 
-CI gate: `.github/workflows/ai-analyst-ci.yml` runs
+CI gate: `.github/workflows/ai-analyst-ci.yml` runs the following (the full-app gate also runs every module's tests and `:app:assembleDebug`):
 
 ```
 gradle :app:testDebugUnitTest \

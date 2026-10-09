@@ -41,7 +41,8 @@ data class IntelligenceValue(
  */
 data class ModelInputBasis(
     val label: String,
-    val sourced: Boolean,
+    /** Defaults to false: an input is treated as not source-backed unless a stored fact proves otherwise. */
+    val sourced: Boolean = false,
     /** Table + record class of the stored fact, when [sourced] is true. */
     val sourceDetail: String = "",
     /** Why the input is not source-backed, when [sourced] is false. */

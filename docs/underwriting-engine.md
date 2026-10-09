@@ -38,7 +38,7 @@ cd tools/underwriting_oracle && python3 generate_golden_vectors.py
 cd tools/underwriting_oracle && python3 generate_golden_vectors.py --check
 
 # 4. the Kotlin port against the contract (needs a JDK + Android SDK)
-./gradlew :app:testDebugUnitTest --tests 'com.example.Underwriting*'
+gradle :app:testDebugUnitTest --tests 'com.example.Underwriting*'
 ```
 
 `selfcheck.py` is the source of truth when the two disagree; the parity test
