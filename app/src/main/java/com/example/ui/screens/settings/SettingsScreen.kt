@@ -435,6 +435,71 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            // Section 5: Regional & Language Preferences
+            item {
+                Text(
+                    text = "5. REGIONAL & LANGUAGE PREFERENCES (اللغة والإعدادات الإقليمية)",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Slate400,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+            }
+
+            item {
+                var selectedLanguage by remember { mutableStateOf("العربية / English") }
+                var selectedCurrency by remember { mutableStateOf("USD ($)") }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("Display Language & Terminology", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text("يدعم التطبيق المصطلحات العقارية الاستثمارية باللغتين العربية والإنجليزية.", fontSize = 11.sp, color = Slate400)
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("العربية / English", "English Only", "العربية فقط").forEach { lang ->
+                                FilterChip(
+                                    selected = selectedLanguage == lang,
+                                    onClick = { selectedLanguage = lang },
+                                    label = { Text(lang, fontSize = 11.sp) }
+                                )
+                            }
+                        }
+
+                        Divider(color = Slate800, modifier = Modifier.padding(vertical = 4.dp))
+
+                        Text("Preferred Currency (العملة الأساسية)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("USD ($)", "SAR (ر.س)", "AED (د.إ)").forEach { curr ->
+                                FilterChip(
+                                    selected = selectedCurrency == curr,
+                                    onClick = { selectedCurrency = curr },
+                                    label = { Text(curr, fontSize = 11.sp) }
+                                )
+                            }
+                        }
+
+                        Divider(color = Slate800, modifier = Modifier.padding(vertical = 4.dp))
+
+                        Text("Real Estate Terminology Glossary (دليل المصطلحات):", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = CyanPrimary)
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("• Cap Rate: معدل الرسملة (صافي الدخل السنوي ÷ قيمة العقار)", fontSize = 11.sp, color = Slate300)
+                            Text("• CoC ROI: العائد على النقد المستثمر (التدفق النقدي السنوي ÷ رأس المال المدفوع)", fontSize = 11.sp, color = Slate300)
+                            Text("• NOI: صافي الدخل التشغيلي قبل أقساط الرهن العقاري", fontSize = 11.sp, color = Slate300)
+                            Text("• DSCR: نسبة تغطية خدمة الدين (يجب أن تتجاوز 1.25x للموافقة البنكية)", fontSize = 11.sp, color = Slate300)
+                            Text("• BRRRR: استراتيجية الشراء والترميم والتأجير وإعادة التمويل لاسترداد رأس المال", fontSize = 11.sp, color = Slate300)
+                            Text("• MAO: الحد الأقصى للعرض المسموح به لضمان ربحية الصفقة", fontSize = 11.sp, color = Slate300)
+                        }
+                    }
+                }
+            }
         }
     }
 }

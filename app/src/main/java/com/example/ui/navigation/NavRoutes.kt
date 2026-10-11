@@ -20,4 +20,5 @@ sealed class Screen(val route: String) {
     object DealRoom : Screen("deal_room/{propertyId}") {
         fun createRoute(propertyId: String) = "deal_room/$propertyId"
     }
+    object UrlParser : Screen("url_parser")
 }
