@@ -72,35 +72,76 @@ enum class JobState {
                 this == OFFER_READY || this == FAILED_RETRYABLE
 
     /**
-     * Pure topology of the state machine. Same-state "transitions" are treated as idempotent
-     * no-ops (the caller decides whether work still needs to happen).
+     * Pure topology of the state machine.
+     *
+     * Rules encoded here:
+     *  - **Terminal states are absorbing**: [SENT], [DISQUALIFIED], [FAILED_TERMINAL] and
+     *    [CANCELLED] accept no outgoing edge, not even to themselves. A repeated worker delivery
+     *    of an already terminal job must be an idempotent no-op at the transition level
+     *    (see [com.example.domain.automation.JobStateMachine.transition]), never a second
+     *    side effect or a second audit record.
+     *  - **Same-state edges for non-terminal states** are allowed: they express a re-entry of the
+     *    same step (the transition level turns them into no-ops, so nothing is duplicated).
+     *  - **Evidence-based forward jumps** ([QUALIFIED] / [OFFER_GENERATION] / [OFFER_READY] ->
+     *    [SENT], [QUALIFIED] -> [OFFER_READY]) are legal *topologically*; their structural
+     *    preconditions (a persisted offer id before OFFER_READY, delivery evidence before SENT)
+     *    are enforced by [com.example.domain.automation.JobStateMachine.transition].
+     *  - **Recovery rewinds** ([ANALYZING] -> [DISCOVERED], [QUALIFYING] -> [ANALYZED],
+     *    [VALIDATING_SEND] -> [OFFER_READY] / [QUALIFIED], [SENDING] / [RECONCILING] ->
+     *    [QUALIFIED], [OFFER_GENERATION] -> [QUALIFIED]) are the documented crash-recovery
+     *    continuations of [com.example.domain.automation.AutomationRecoveryPolicy]: replay the
+     *    earliest step whose durable result is not proven. [OFFER_READY] -> [QUALIFIED] stays
+     *    forbidden: OFFER_READY itself is the milestone that proves an offer exists.
      */
     fun canTransitionTo(next: JobState): Boolean {
-        if (this == next) return true
+        if (this == next) return !isTerminal
         return when (this) {
             DISCOVERED -> next == ANALYZING || next == BLOCKED || next == FAILED_RETRYABLE ||
                     next == FAILED_TERMINAL || next == CANCELLED
-            ANALYZING -> next == ANALYZED || next == FAILED_RETRYABLE || next == FAILED_TERMINAL ||
-                    next == CANCELLED || next == BLOCKED
+
+            // ANALYZING -> DISCOVERED is the recovery rewind for "analysis never completed".
+            ANALYZING -> next == ANALYZED || next == DISCOVERED || next == FAILED_RETRYABLE ||
+                    next == FAILED_TERMINAL || next == CANCELLED || next == BLOCKED
+
             ANALYZED -> next == QUALIFYING || next == FAILED_RETRYABLE || next == FAILED_TERMINAL ||
                     next == CANCELLED || next == BLOCKED
-            QUALIFYING -> next == QUALIFIED || next == DISQUALIFIED || next == FAILED_RETRYABLE ||
-                    next == FAILED_TERMINAL || next == CANCELLED
-            QUALIFIED -> next == OFFER_GENERATION || next == FAILED_RETRYABLE ||
-                    next == FAILED_TERMINAL || next == CANCELLED || next == BLOCKED
+
+            // QUALIFYING -> ANALYZED is the recovery rewind for "qualification is pure; re-run it".
+            QUALIFYING -> next == QUALIFIED || next == DISQUALIFIED || next == ANALYZED ||
+                    next == FAILED_RETRYABLE || next == FAILED_TERMINAL || next == CANCELLED
+
+            // QUALIFIED -> OFFER_READY / SENT are evidence-based resumes (the offer was already
+            // persisted / already delivered by an earlier attempt).
+            QUALIFIED -> next == OFFER_GENERATION || next == OFFER_READY || next == SENT ||
+                    next == FAILED_RETRYABLE || next == FAILED_TERMINAL || next == CANCELLED ||
+                    next == BLOCKED
+
             DISQUALIFIED -> next == CANCELLED
+
             // OFFER_GENERATION -> QUALIFIED is the crash-recovery path: the offer was never
             // persisted, so the step must be replayed from the last durable milestone.
-            OFFER_GENERATION -> next == OFFER_READY || next == QUALIFIED || next == FAILED_RETRYABLE ||
-                    next == FAILED_TERMINAL || next == CANCELLED || next == BLOCKED
-            OFFER_READY -> next == VALIDATING_SEND || next == BLOCKED || next == FAILED_RETRYABLE ||
-                    next == FAILED_TERMINAL || next == CANCELLED
-            VALIDATING_SEND -> next == SENDING || next == BLOCKED || next == FAILED_RETRYABLE ||
-                    next == FAILED_TERMINAL || next == CANCELLED
-            SENDING -> next == SENT || next == RECONCILING || next == FAILED_RETRYABLE ||
-                    next == FAILED_TERMINAL || next == CANCELLED
-            RECONCILING -> next == SENT || next == OFFER_READY || next == FAILED_RETRYABLE ||
-                    next == FAILED_TERMINAL || next == CANCELLED
+            // OFFER_GENERATION -> SENT is the evidence-based completion of an already delivered offer.
+            OFFER_GENERATION -> next == OFFER_READY || next == QUALIFIED || next == SENT ||
+                    next == FAILED_RETRYABLE || next == FAILED_TERMINAL || next == CANCELLED ||
+                    next == BLOCKED
+
+            // OFFER_READY -> SENT is the evidence-based completion of an already delivered offer.
+            OFFER_READY -> next == VALIDATING_SEND || next == SENT || next == BLOCKED ||
+                    next == FAILED_RETRYABLE || next == FAILED_TERMINAL || next == CANCELLED
+
+            // Recovery rewinds: re-validate (OFFER_READY) or replay offer generation
+            // (QUALIFIED) when the offer artifact is missing.
+            VALIDATING_SEND -> next == SENDING || next == OFFER_READY || next == QUALIFIED ||
+                    next == BLOCKED || next == FAILED_RETRYABLE || next == FAILED_TERMINAL ||
+                    next == CANCELLED
+
+            // SENDING / RECONCILING -> QUALIFIED replays offer generation when the offer is gone.
+            SENDING -> next == SENT || next == RECONCILING || next == QUALIFIED ||
+                    next == FAILED_RETRYABLE || next == FAILED_TERMINAL || next == CANCELLED
+            RECONCILING -> next == SENT || next == OFFER_READY || next == QUALIFIED ||
+                    next == FAILED_RETRYABLE || next == FAILED_TERMINAL || next == CANCELLED
+
+            // Absorbing terminal states.
             SENT -> false
             FAILED_RETRYABLE -> next == DISCOVERED || next == ANALYZING || next == ANALYZED ||
                     next == QUALIFYING || next == QUALIFIED || next == OFFER_GENERATION ||
@@ -108,9 +149,14 @@ enum class JobState {
                     next == RECONCILING || next == FAILED_RETRYABLE || next == FAILED_TERMINAL ||
                     next == CANCELLED || next == BLOCKED
             FAILED_TERMINAL -> next == CANCELLED
-            BLOCKED -> next == VALIDATING_SEND || next == OFFER_READY || next == ANALYZING ||
-                    next == QUALIFIED || next == FAILED_RETRYABLE || next == FAILED_TERMINAL ||
+
+            // An operator unblocking a job may resume it at any working step (or restart it).
+            BLOCKED -> next == DISCOVERED || next == ANALYZING || next == ANALYZED ||
+                    next == QUALIFYING || next == QUALIFIED || next == OFFER_GENERATION ||
+                    next == OFFER_READY || next == VALIDATING_SEND || next == SENDING ||
+                    next == RECONCILING || next == FAILED_RETRYABLE || next == FAILED_TERMINAL ||
                     next == CANCELLED
+
             CANCELLED -> false
         }
     }

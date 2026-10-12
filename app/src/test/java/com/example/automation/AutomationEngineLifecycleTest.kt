@@ -388,4 +388,73 @@ class AutomationEngineLifecycleTest {
         assertTrue(transitions.any { it.stateAfter == JobState.OFFER_READY.name })
         assertTrue(transitions.all { it.runId != null })
     }
+
+    @Test
+    fun `audit history agrees with persisted state - one event per committed transition`() = runBlocking {
+        harness.seedRules(testRules(autoSendOffers = true))
+        harness.engine.executeCycle(CycleRequest())
+        val job = harness.jobs().single()
+        assertEquals(JobState.SENT, job.state())
+
+        val transitions = harness.dao.getLogsForJobFlow(job.jobId).first().filter { it.tag == "STATE_TRANSITION" }
+
+        // DISCOVERED -> ANALYZING -> ANALYZED -> QUALIFYING -> QUALIFIED -> OFFER_GENERATION
+        // -> OFFER_READY -> VALIDATING_SEND -> SENDING -> SENT: nine committed transitions.
+        assertEquals("exactly one audit event per committed transition", 9, transitions.size)
+        assertEquals(JobState.DISCOVERED.name, transitions.first().stateBefore)
+        assertEquals(JobState.SENT.name, transitions.last().stateAfter)
+        assertEquals("the audit trail must end in the persisted state", job.currentState, transitions.last().stateAfter)
+        transitions.zipWithNext().forEach { (earlier, later) ->
+            assertEquals("the chain must be contiguous", earlier.stateAfter, later.stateBefore)
+        }
+        assertTrue(
+            "a no-op must never masquerade as a transition",
+            transitions.none { it.stateBefore == it.stateAfter }
+        )
+    }
+
+    @Test
+    fun `retry exhaustion produces exactly one job and one terminal outcome`() = runBlocking {
+        harness.seedRules(testRules(autoSendOffers = true, maxRetries = 2, retryBackoffBaseSeconds = 1))
+        harness.offers.sendSucceeds = false
+
+        harness.engine.executeCycle(CycleRequest())
+        assertEquals(JobState.FAILED_RETRYABLE, harness.jobs().single().state())
+
+        harness.clock.advance(5_000L)
+        harness.engine.executeCycle(CycleRequest())
+
+        // The retry is due exactly once: one job row, one terminal outcome.
+        val terminal = harness.jobs().single()
+        assertEquals(JobState.FAILED_TERMINAL, terminal.state())
+        assertEquals(2, terminal.attempts)
+        assertNotNull(terminal.completedAt)
+
+        // Later cycles (and re-discovery of the same listing) must not grow a twin or re-send.
+        harness.clock.advance(10 * 60_000L)
+        harness.engine.executeCycle(CycleRequest())
+        val jobs = harness.jobs()
+        assertEquals("one property, one job", 1, jobs.size)
+        assertEquals("exactly one terminal outcome", 1, jobs.count { it.state().isTerminal })
+        assertEquals("no delivery may happen after exhaustion", 2, harness.offers.sendAttempts)
+    }
+
+    @Test
+    fun `a property with a terminal job is never re-discovered into a twin job`() = runBlocking {
+        harness.seedRules(testRules(autoGenerateOffers = false))
+        harness.financial.failure = IllegalStateException("deterministic underwriting defect")
+
+        harness.engine.executeCycle(CycleRequest())
+        assertEquals(JobState.FAILED_TERMINAL, harness.jobs().single().state())
+
+        // The feed keeps serving the same listing across cycles; the terminal outcome stays final.
+        repeat(2) {
+            harness.clock.advance(60_000L)
+            harness.engine.executeCycle(CycleRequest())
+        }
+
+        val jobs = harness.jobs()
+        assertEquals("one property, one job, one terminal outcome", 1, jobs.size)
+        assertEquals(JobState.FAILED_TERMINAL, jobs.single().state())
+    }
 }

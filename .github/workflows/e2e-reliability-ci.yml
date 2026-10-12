@@ -125,6 +125,7 @@ jobs:
             --tests "com.example.HardeningRecoveryScenariosTest" \
             --tests "com.example.DealAnalysisOrchestratorTest" \
             --tests "com.example.Automation*" \
+            --tests "com.example.automation.*" \
             >"$RUNNER_TEMP/app-integration-gradle.log" 2>&1
           status=$?
           tail -n 40 "$RUNNER_TEMP/app-integration-gradle.log"

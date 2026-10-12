@@ -301,4 +301,268 @@ class JobStateMachineTest {
         assertEquals(JobState.RECONCILING, AutomationSteps.nextStateAfter(JobState.SENDING))
         assertEquals(JobState.SENT, AutomationSteps.nextStateAfter(JobState.SENT))
     }
+
+    // ------------------------------------------------------------------ full transition table
+    //
+    // The complete topology as an explicit data set: every pair (from, to) is asserted, so any
+    // future edge that sneaks in without documentation fails this test.
+
+    private val allowedEdges = setOf(
+        // forward pipeline
+        JobState.DISCOVERED to JobState.ANALYZING,
+        JobState.ANALYZING to JobState.ANALYZED,
+        JobState.ANALYZED to JobState.QUALIFYING,
+        JobState.QUALIFYING to JobState.QUALIFIED,
+        JobState.QUALIFYING to JobState.DISQUALIFIED,
+        JobState.QUALIFIED to JobState.OFFER_GENERATION,
+        JobState.OFFER_GENERATION to JobState.OFFER_READY,
+        JobState.OFFER_READY to JobState.VALIDATING_SEND,
+        JobState.VALIDATING_SEND to JobState.SENDING,
+        JobState.SENDING to JobState.SENT,
+        JobState.SENDING to JobState.RECONCILING,
+        JobState.RECONCILING to JobState.SENT,
+
+        // evidence-based forward jumps (structural preconditions enforced in transition())
+        JobState.QUALIFIED to JobState.OFFER_READY,
+        JobState.QUALIFIED to JobState.SENT,
+        JobState.OFFER_GENERATION to JobState.SENT,
+        JobState.OFFER_READY to JobState.SENT,
+
+        // recovery rewinds (documented continuations of AutomationRecoveryPolicy)
+        JobState.ANALYZING to JobState.DISCOVERED,
+        JobState.QUALIFYING to JobState.ANALYZED,
+        JobState.OFFER_GENERATION to JobState.QUALIFIED,
+        JobState.VALIDATING_SEND to JobState.OFFER_READY,
+        JobState.VALIDATING_SEND to JobState.QUALIFIED,
+        JobState.SENDING to JobState.QUALIFIED,
+        JobState.RECONCILING to JobState.OFFER_READY,
+        JobState.RECONCILING to JobState.QUALIFIED,
+
+        // failure / parking / cancellation paths
+        JobState.DISCOVERED to JobState.BLOCKED,
+        JobState.DISCOVERED to JobState.FAILED_RETRYABLE,
+        JobState.DISCOVERED to JobState.FAILED_TERMINAL,
+        JobState.DISCOVERED to JobState.CANCELLED,
+        JobState.ANALYZING to JobState.BLOCKED,
+        JobState.ANALYZING to JobState.FAILED_RETRYABLE,
+        JobState.ANALYZING to JobState.FAILED_TERMINAL,
+        JobState.ANALYZING to JobState.CANCELLED,
+        JobState.ANALYZED to JobState.BLOCKED,
+        JobState.ANALYZED to JobState.FAILED_RETRYABLE,
+        JobState.ANALYZED to JobState.FAILED_TERMINAL,
+        JobState.ANALYZED to JobState.CANCELLED,
+        JobState.QUALIFYING to JobState.FAILED_RETRYABLE,
+        JobState.QUALIFYING to JobState.FAILED_TERMINAL,
+        JobState.QUALIFYING to JobState.CANCELLED,
+        JobState.QUALIFIED to JobState.BLOCKED,
+        JobState.QUALIFIED to JobState.FAILED_RETRYABLE,
+        JobState.QUALIFIED to JobState.FAILED_TERMINAL,
+        JobState.QUALIFIED to JobState.CANCELLED,
+        JobState.DISQUALIFIED to JobState.CANCELLED,
+        JobState.OFFER_GENERATION to JobState.BLOCKED,
+        JobState.OFFER_GENERATION to JobState.FAILED_RETRYABLE,
+        JobState.OFFER_GENERATION to JobState.FAILED_TERMINAL,
+        JobState.OFFER_GENERATION to JobState.CANCELLED,
+        JobState.OFFER_READY to JobState.BLOCKED,
+        JobState.OFFER_READY to JobState.FAILED_RETRYABLE,
+        JobState.OFFER_READY to JobState.FAILED_TERMINAL,
+        JobState.OFFER_READY to JobState.CANCELLED,
+        JobState.VALIDATING_SEND to JobState.BLOCKED,
+        JobState.VALIDATING_SEND to JobState.FAILED_RETRYABLE,
+        JobState.VALIDATING_SEND to JobState.FAILED_TERMINAL,
+        JobState.VALIDATING_SEND to JobState.CANCELLED,
+        JobState.SENDING to JobState.FAILED_RETRYABLE,
+        JobState.SENDING to JobState.FAILED_TERMINAL,
+        JobState.SENDING to JobState.CANCELLED,
+        JobState.RECONCILING to JobState.FAILED_RETRYABLE,
+        JobState.RECONCILING to JobState.FAILED_TERMINAL,
+        JobState.RECONCILING to JobState.CANCELLED,
+
+        // retryable failure can resume anywhere work happens (plus escalate or park)
+        JobState.FAILED_RETRYABLE to JobState.DISCOVERED,
+        JobState.FAILED_RETRYABLE to JobState.ANALYZING,
+        JobState.FAILED_RETRYABLE to JobState.ANALYZED,
+        JobState.FAILED_RETRYABLE to JobState.QUALIFYING,
+        JobState.FAILED_RETRYABLE to JobState.QUALIFIED,
+        JobState.FAILED_RETRYABLE to JobState.OFFER_GENERATION,
+        JobState.FAILED_RETRYABLE to JobState.OFFER_READY,
+        JobState.FAILED_RETRYABLE to JobState.VALIDATING_SEND,
+        JobState.FAILED_RETRYABLE to JobState.SENDING,
+        JobState.FAILED_RETRYABLE to JobState.RECONCILING,
+        JobState.FAILED_RETRYABLE to JobState.FAILED_RETRYABLE,
+        JobState.FAILED_RETRYABLE to JobState.FAILED_TERMINAL,
+        JobState.FAILED_RETRYABLE to JobState.BLOCKED,
+        JobState.FAILED_RETRYABLE to JobState.CANCELLED,
+
+        // terminal failure and operator parking can still be cancelled / resumed
+        JobState.FAILED_TERMINAL to JobState.CANCELLED,
+        JobState.BLOCKED to JobState.DISCOVERED,
+        JobState.BLOCKED to JobState.ANALYZING,
+        JobState.BLOCKED to JobState.ANALYZED,
+        JobState.BLOCKED to JobState.QUALIFYING,
+        JobState.BLOCKED to JobState.QUALIFIED,
+        JobState.BLOCKED to JobState.OFFER_GENERATION,
+        JobState.BLOCKED to JobState.OFFER_READY,
+        JobState.BLOCKED to JobState.VALIDATING_SEND,
+        JobState.BLOCKED to JobState.SENDING,
+        JobState.BLOCKED to JobState.RECONCILING,
+        JobState.BLOCKED to JobState.FAILED_RETRYABLE,
+        JobState.BLOCKED to JobState.FAILED_TERMINAL,
+        JobState.BLOCKED to JobState.CANCELLED
+    )
+
+    private fun expectedEdge(from: JobState, to: JobState): Boolean {
+        if (from == to) return !from.isTerminal
+        return (from to to) in allowedEdges
+    }
+
+    @Test
+    fun `every allowed and forbidden transition is pinned by the transition table`() {
+        JobState.entries.forEach { from ->
+            JobState.entries.forEach { to ->
+                val expected = expectedEdge(from, to)
+                assertEquals(
+                    "transition table mismatch for $from -> $to",
+                    expected,
+                    from.canTransitionTo(to)
+                )
+                assertEquals(
+                    expected,
+                    JobStateMachine.canTransition(from, to)
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `terminal states are absorbing - SENT and CANCELLED accept no edge at all`() {
+        listOf(JobState.SENT, JobState.CANCELLED).forEach { absorbing ->
+            JobState.entries.forEach { to ->
+                assertFalse("$absorbing must not transition to $to", absorbing.canTransitionTo(to))
+            }
+        }
+        // DISQUALIFIED and FAILED_TERMINAL are final for the engine; the only edge they keep is
+        // the operator burying them as CANCELLED.
+        JobState.entries.forEach { to ->
+            if (to != JobState.CANCELLED) {
+                assertFalse("DISQUALIFIED must not transition to $to", JobState.DISQUALIFIED.canTransitionTo(to))
+                assertFalse("FAILED_TERMINAL must not transition to $to", JobState.FAILED_TERMINAL.canTransitionTo(to))
+            }
+        }
+    }
+
+    @Test
+    fun `evidence based resumes are legal only with their structural preconditions`() {
+        // OFFER_READY is reachable from the states that can legitimately have an offer already
+        // persisted - but never without the offer id itself.
+        val offerReadyStates = listOf(
+            JobState.QUALIFIED,
+            JobState.OFFER_GENERATION,
+            JobState.RECONCILING,
+            JobState.FAILED_RETRYABLE,
+            JobState.BLOCKED
+        )
+        offerReadyStates.forEach { from ->
+            assertTrue("$from -> OFFER_READY must be a legal edge", from.canTransitionTo(JobState.OFFER_READY))
+            val job = testJob(state = from, offerId = null, lastSuccessful = from)
+            val rejected = JobStateMachine.transition(job, JobState.OFFER_READY, now, policy)
+            assertFalse("OFFER_READY without a persisted offer id must be rejected from $from", rejected.applied)
+            assertTrue(
+                "the rejection must name the missing offerId (was: ${rejected.rejectionReason})",
+                rejected.rejectionReason?.contains("offerId") == true
+            )
+            val accepted = JobStateMachine.transition(job, JobState.OFFER_READY, now, policy, offerId = "OFFER-9")
+            assertTrue("a persisted offer id unlocks $from -> OFFER_READY", accepted.applied)
+            assertEquals("OFFER-9", accepted.job.offerId)
+        }
+    }
+
+    @Test
+    fun `sent entry is only legal with delivery evidence`() {
+        val sentStates = listOf(
+            JobState.SENDING,
+            JobState.RECONCILING,
+            JobState.QUALIFIED,
+            JobState.OFFER_GENERATION,
+            JobState.OFFER_READY
+        )
+        sentStates.forEach { from ->
+            val bare = testJob(state = from, offerId = null, emailMessageId = null)
+            val rejected = JobStateMachine.transition(bare, JobState.SENT, now, policy)
+            assertFalse("SENT without delivery evidence must be rejected from $from", rejected.applied)
+
+            val withMessage = JobStateMachine.transition(
+                testJob(state = from, offerId = null, emailMessageId = null),
+                JobState.SENT,
+                now,
+                policy,
+                emailMessageId = "GMAIL-1"
+            )
+            assertTrue("an email message id is delivery evidence for $from -> SENT", withMessage.applied)
+            assertEquals(JobState.SENT, withMessage.job.state())
+        }
+    }
+
+    @Test
+    fun `recovery rewinds replay the earliest unproven step`() {
+        val rewinds = listOf(
+            JobState.ANALYZING to JobState.DISCOVERED,
+            JobState.QUALIFYING to JobState.ANALYZED,
+            JobState.OFFER_GENERATION to JobState.QUALIFIED,
+            JobState.VALIDATING_SEND to JobState.OFFER_READY,
+            JobState.VALIDATING_SEND to JobState.QUALIFIED,
+            JobState.SENDING to JobState.QUALIFIED,
+            JobState.RECONCILING to JobState.QUALIFIED
+        )
+        rewinds.forEach { (from, to) ->
+            assertTrue("$from -> $to must be a legal recovery rewind", from.canTransitionTo(to))
+        }
+        // The one rewind that stays forbidden: OFFER_READY proves the offer exists.
+        assertFalse(JobState.OFFER_READY.canTransitionTo(JobState.QUALIFIED))
+    }
+
+    @Test
+    fun `retry exhaustion produces exactly one terminal outcome`() {
+        val job = testJob(state = JobState.SENDING, attempts = 2, maxRetries = 3)
+        val first = JobStateMachine.transition(
+            job = job,
+            target = JobState.FAILED_RETRYABLE,
+            now = now,
+            retryPolicy = policy,
+            error = "boom",
+            failedStep = AutomationSteps.SEND_OFFER,
+            failureKind = FailureKind.RETRYABLE
+        )
+        assertEquals(JobState.FAILED_TERMINAL, first.job.state())
+        assertEquals(3, first.job.attempts)
+
+        // Every further *automatic* attempt to move or fail the terminal row is refused and
+        // changes nothing; the only edge left is an operator cancelling the dead job.
+        JobState.entries.forEach { target ->
+            val again = JobStateMachine.transition(first.job, target, now + 1_000L, policy)
+            if (target == JobState.CANCELLED) {
+                assertTrue("an operator may bury the dead job as CANCELLED", again.applied)
+                assertEquals(JobState.CANCELLED, again.job.state())
+            } else {
+                assertFalse("terminal job must not move to $target", again.applied)
+                assertEquals("the row must be untouched", first.job, again.job)
+            }
+        }
+        val escalatedAgain = JobStateMachine.escalatedOutcome(first.job, now + 2_000L, "again")
+        assertFalse(escalatedAgain.applied)
+        assertEquals(first.job, escalatedAgain.job)
+    }
+
+    @Test
+    fun `duplicate delivery of the same transition is an idempotent no-op`() {
+        val job = testJob(state = JobState.SENDING, offerId = "OFFER-1")
+        val applied = JobStateMachine.transition(job, JobState.SENT, now, policy, emailMessageId = "GMAIL-1")
+        assertTrue(applied.applied)
+
+        // The very same transition delivered again (redelivered work request, replayed worker):
+        // nothing is applied and the persisted row is returned byte-identical.
+        val duplicate = JobStateMachine.transition(applied.job, JobState.SENT, now + 5_000L, policy, emailMessageId = "GMAIL-2")
+        assertFalse(duplicate.applied)
+        assertEquals(applied.job, duplicate.job)
+    }
 }

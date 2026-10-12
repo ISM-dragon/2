@@ -132,8 +132,11 @@ data class TransitionOutcome(
  * Pure, side-effect free implementation of the job state machine.
  *
  * Responsibilities:
- *  - reject illegal transitions,
- *  - enforce structural preconditions (e.g. OFFER_READY requires an offer id),
+ *  - reject illegal transitions (see [JobState.canTransitionTo] for the full topology),
+ *  - treat same-state transitions as idempotent no-ops (nothing is mutated, so a duplicated
+ *    worker delivery can never create a second side effect or a second audit record),
+ *  - enforce structural preconditions (OFFER_READY requires a persisted offer id; SENT
+ *    requires delivery evidence) *before* the state can be entered,
  *  - derive retry semantics (attempts, backoff, terminal escalation),
  *  - maintain the real start/completion timestamps and the last successful milestone,
  *  - keep a recovery counter so a job that keeps crashing cannot loop forever.
@@ -164,8 +167,11 @@ object JobStateMachine {
     ): TransitionOutcome {
         val from = job.state()
 
+        // Idempotent no-op: a duplicated transition never mutates the row, so it can never
+        // duplicate a side effect or an audit record. The engine treats `applied = false` with an
+        // unchanged row as "nothing to persist, nothing to audit".
         if (from == target) {
-            return TransitionOutcome(job, applied = false, rejectionReason = "job is already in $target")
+            return TransitionOutcome(job, applied = false, rejectionReason = "idempotent no-op: job is already in $target")
         }
         if (!from.canTransitionTo(target)) {
             return TransitionOutcome(job, applied = false, rejectionReason = "illegal transition $from -> $target")

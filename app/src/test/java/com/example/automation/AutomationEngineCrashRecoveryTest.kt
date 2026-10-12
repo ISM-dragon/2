@@ -35,7 +35,10 @@ class AutomationEngineCrashRecoveryTest {
     fun setUp() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         harness = EngineTestHarness(context)
-        harness.seedRules(testRules(autoSendOffers = true))
+        // Recovery semantics are exercised without automatic sending: a job parked at OFFER_READY
+        // must wait for the operator (or an engine that explicitly arms autoSendOffers, as
+        // `work interrupted by process death` does for its final phase) instead of being auto-sent.
+        harness.seedRules(testRules())
     }
 
     @After

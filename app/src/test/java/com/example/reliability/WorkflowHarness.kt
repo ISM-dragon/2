@@ -79,8 +79,15 @@ class WorkflowHarness(
     /**
      * Total time budget of one pipeline import call. A test shrinks this to make the layer schedule a
      * retry instead of finishing inside the call, which is how an interrupted job is produced.
+     *
+     * The knob is live: changing it rebuilds the pipeline, so the layer actually sees the new budget
+     * instead of silently keeping the value captured at construction time.
      */
     var maxTotalImportMillis: Long = 90_000
+        set(value) {
+            field = value
+            if (::pipeline.isInitialized) rebuildPipeline()
+        }
 
     private val jobStoreRoot = File(context.filesDir, "reliability-jobs/$dbName")
 
@@ -146,6 +153,23 @@ class WorkflowHarness(
 
         // A new store instance per start(): the file directory is the only state that survives.
         jobStore = FilePropertyImportJobStore(jobStoreRoot)
+        rebuildPipeline()
+        offers = OfferRepository(
+            offerDao = database.offerDao(),
+            propertyDao = database.propertyDao(),
+            configRepository = configRepository,
+            geminiManager = GeminiManager(database.configDao()),
+            gmailService = gmail,
+            clock = { clock.get() }
+        )
+    }
+
+    /**
+     * (Re)builds the URL-intelligence pipeline and everything that hangs off it. Called by
+     * [start] and whenever [maxTotalImportMillis] changes, so the injected budget is never a
+     * dead knob (a stale budget used to burn retries inline where a deferred retry was expected).
+     */
+    private fun rebuildPipeline() {
         pipeline = PropertyUrlIntelligenceFactory.create(
             jobStore = jobStore,
             httpFetcher = fetcher,
@@ -167,14 +191,6 @@ class WorkflowHarness(
             enrichmentDao = database.propertyEnrichmentDao(),
             financialDao = database.propertyFinancialDao(),
             intelligenceDao = database.intelligenceDao()
-        )
-        offers = OfferRepository(
-            offerDao = database.offerDao(),
-            propertyDao = database.propertyDao(),
-            configRepository = configRepository,
-            geminiManager = GeminiManager(database.configDao()),
-            gmailService = gmail,
-            clock = { clock.get() }
         )
     }
 
