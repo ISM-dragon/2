@@ -108,6 +108,10 @@ object PersonalizationNormalizer {
                 dropped += "verifiedFacts[$index]"
                 return@forEachIndexed
             }
+            if (!OutreachSafetyRules.isTrustedSource(source)) {
+                dropped += "verifiedFacts[$index]"
+                return@forEachIndexed
+            }
             kept += VerifiedPropertyFact(fact.key, value, source)
         }
         return kept
