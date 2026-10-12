@@ -6,6 +6,7 @@ import com.example.data.local.dao.PropertyDao
 import com.example.data.local.dao.PropertyFinancialDao
 import com.example.data.local.entity.PropertyFinancialDataSource
 import com.example.data.local.entity.PropertyFinancialEntity
+import com.example.domain.finance.underwriting.UnderwritingAssumptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -51,8 +52,12 @@ class PropertyFinancialRepository(
             val tax = propertyDao.getTaxRecord(propertyId)
             val rent = propertyDao.getRentEstimate(propertyId)
 
-            val assessedValue = tax?.assessedValue ?: 0.0
-            val annualTax = tax?.annualTaxAmount ?: (property.price * DEFAULT_TAX_RATE_PCT / 100.0)
+            // A stored tax of 0 (or non-finite) is the import placeholder for "no tax figure", not an
+            // observed zero. It falls back to the named assumption and is labelled ESTIMATE, matching
+            // PropertyUnderwritingFactory so the asset facts and the underwriting input agree.
+            val observedTax = tax?.annualTaxAmount?.takeIf { it.isFinite() && it > 0.0 }
+            val assessedValue = tax?.assessedValue?.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+            val annualTax = observedTax ?: (property.price * UnderwritingAssumptions.PROPERTY_TAX_PCT_OF_PRICE / 100.0)
             val effectiveTaxRate = if (assessedValue > 0) (annualTax / assessedValue) * 100.0 else 0.0
             val monthlyRent = rent?.estimatedRent ?: 0.0
             val annualRent = monthlyRent * 12.0
@@ -68,7 +73,7 @@ class PropertyFinancialRepository(
             PropertyFinancialEntity(
                 propertyId = propertyId,
                 assessedValue = assessedValue,
-                assessmentYear = tax?.assessmentYear ?: 0,
+                assessmentYear = if (observedTax != null) tax?.assessmentYear ?: 0 else 0,
                 annualPropertyTax = annualTax,
                 effectiveTaxRatePct = effectiveTaxRate,
                 annualInsurance = estimatedInsurance(property.price),
@@ -84,7 +89,7 @@ class PropertyFinancialRepository(
                 grossYieldPct = grossYield,
                 operatingExpenseRatioPct = expenseRatio,
                 vacancyRatePct = rent?.let { DEFAULT_VACANCY_PCT } ?: 0.0,
-                dataSource = if (tax != null) PropertyFinancialDataSource.RECORDS else PropertyFinancialDataSource.ESTIMATE,
+                dataSource = if (observedTax != null) PropertyFinancialDataSource.RECORDS else PropertyFinancialDataSource.ESTIMATE,
                 provenanceId = null,
                 lastUpdatedAt = clock()
             )
@@ -104,7 +109,6 @@ class PropertyFinancialRepository(
         if (price <= 0) 0.0 else (price * INSURANCE_RATE_PCT / 100.0)
 
     private companion object {
-        const val DEFAULT_TAX_RATE_PCT = 1.2
         const val INSURANCE_RATE_PCT = 0.45
         const val CAPEX_RESERVE_PCT = 5.0
         const val MAINTENANCE_RESERVE_PCT = 5.0
