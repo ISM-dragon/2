@@ -638,7 +638,11 @@ fun AddPropertyDialog(
                     val b = bedsText.toIntOrNull() ?: 3
                     val ba = bathsText.toDoubleOrNull() ?: 2.0
                     val s = sqftText.toIntOrNull() ?: 1500
-                    onAdd(address.ifBlank { "123 Sample St" }, city.ifBlank { "Austin" }, stateCode.ifBlank { "TX" }, zipCode.ifBlank { "78701" }, p, propertyType, b, ba, s, r, sourceType)
+                    val finalAddr = address.ifBlank { "512 Congress Ave" }
+                    val finalCity = city.ifBlank { "Austin" }
+                    val finalState = stateCode.ifBlank { "TX" }
+                    val finalZip = zipCode.ifBlank { "78701" }
+                    onAdd(finalAddr, finalCity, finalState, finalZip, p, propertyType, b, ba, s, r, sourceType)
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
             ) {

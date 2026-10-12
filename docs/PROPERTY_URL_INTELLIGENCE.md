@@ -91,9 +91,12 @@ remaining query sorted. Two things follow:
 * the canonical URL stays **faithful to the host the provider serves** (`www.zillow.com` is what
   the pipeline fetches, and what that origin's robots.txt governs — a share link that spells the
   host differently must not silently redirect our traffic),
-* the **identity keys** (`IdempotencyKey.forUrl` and the `canonicalPropertyId` URL fallback) are
-  deliberately insensitive to a leading `www.`, so `?utm_source=x`, `#photos`, casing variants
-  and `www.`/bare spellings of one listing collapse to one import.
+* the **identity keys** (`IdempotencyKey.forUrl` and the `canonicalPropertyId` URL fallback) hash
+  `IdempotencyKey.identityOf(canonical)`: scheme and host lowercased, a leading `www.` dropped, and
+  the path, query and any non-default port kept exactly as canonicalised. So `?utm_source=x`,
+  `#photos` and `www.`/bare spellings of one listing collapse to one import, while a different
+  path, query value or port stays a different listing. Path case is not folded, because case can
+  separate listings.
 
 ## 3. Source detection & registry
 

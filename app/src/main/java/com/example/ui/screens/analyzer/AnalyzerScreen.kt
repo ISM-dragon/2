@@ -1,31 +1,33 @@
 package com.example.ui.screens.analyzer
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.domain.finance.FinancialResult
-import com.example.ui.components.CashFlowBreakdownBar
+import com.example.domain.finance.strategy.InvestmentStrategyType
 import com.example.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -40,18 +42,16 @@ fun AnalyzerScreen(
     }
 
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val res = state.result
-    val input = state.input
-
-    var savedFeedback by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var showCopyFeedback by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Column {
-                        Text("Deterministic Financial Engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Text(state.property?.address ?: "Property Underwriting", fontSize = 11.sp, color = Slate400)
+                        Text("Institutional Underwriting Engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text(state.property?.address ?: "Property Analysis", fontSize = 11.sp, color = Slate400)
                     }
                 },
                 navigationIcon = {
@@ -62,11 +62,20 @@ fun AnalyzerScreen(
                 actions = {
                     IconButton(
                         onClick = {
-                            viewModel.saveAnalysis()
-                            savedFeedback = true
+                            val memo = generateDealMemo(state)
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Deal Memo", memo))
+                            showCopyFeedback = true
                         }
                     ) {
-                        Icon(if (savedFeedback) Icons.Filled.Check else Icons.Filled.Bookmark, contentDescription = "Save Analysis", tint = CyanPrimary)
+                        Icon(Icons.Filled.Share, contentDescription = "Share Memo", tint = CyanPrimary)
+                    }
+                    IconButton(
+                        onClick = {
+                            viewModel.saveAnalysis()
+                        }
+                    ) {
+                        Icon(Icons.Filled.Bookmark, contentDescription = "Save Analysis", tint = AmberAccent)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
@@ -81,285 +90,515 @@ fun AnalyzerScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Core Returns Highlight Card
+            // Strategy Selection Tabs
             item {
-                Card(
+                LazyRow(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = Slate900),
-                    shape = RoundedCornerShape(16.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "PROJECTED ANNUAL RETURNS",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Slate400,
-                            letterSpacing = 1.sp
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column {
-                                Text("Monthly Cash Flow", fontSize = 11.sp, color = Slate400)
-                                Text(
-                                    text = "$${String.format("%,.0f", res.monthlyCashFlow)}",
-                                    style = MaterialTheme.typography.headlineSmall,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = if (res.monthlyCashFlow > 0) EmeraldGain else CrimsonAlert
-                                )
-                                Text(
-                                    text = "$${String.format("%,.0f", res.annualCashFlow)}/yr",
-                                    fontSize = 11.sp,
-                                    color = Slate400
-                                )
-                            }
-
-                            Column(horizontalAlignment = Alignment.End) {
-                                Text("Cap Rate", fontSize = 11.sp, color = Slate400)
-                                Text(
-                                    text = "${String.format("%.2f", res.capRate)}%",
-                                    style = MaterialTheme.typography.headlineSmall,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = CyanPrimary
-                                )
-                                Text(
-                                    text = "NOI: $${String.format("%,.0f", res.noiAnnual)}/yr",
-                                    fontSize = 11.sp,
-                                    color = Slate400
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(14.dp))
-                        HorizontalDivider(color = Slate800)
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Secondary Metrics Grid
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            ReturnItem(label = "Cash-on-Cash", value = "${String.format("%.2f", res.cashOnCashReturn)}%", color = EmeraldGain)
-                            ReturnItem(label = "DSCR Coverage", value = String.format("%.2f", res.dscr), color = AmberAccent)
-                            ReturnItem(label = "Break-Even", value = "${String.format("%.1f", res.breakEvenOccupancyPct)}%", color = Slate200)
-                            ReturnItem(label = "Cash Needed", value = "$${String.format("%,.0f", res.totalCashRequired)}", color = Slate200)
-                        }
-
-                        Spacer(modifier = Modifier.height(16.dp))
-                        CashFlowBreakdownBar(result = res)
-                    }
-                }
-            }
-
-            // Financing Scenarios Comparison Carousel
-            item {
-                Column {
-                    Text(
-                        text = "FINANCING SCENARIO COMPARISON",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = Slate400,
-                        letterSpacing = 1.sp
+                    val strategies = listOf(
+                        Triple(InvestmentStrategyType.BUY_AND_HOLD, "🏢 Long-Term Rental", "تأجير طويل المدى"),
+                        Triple(InvestmentStrategyType.BRRRR, "🔨 BRRRR Strategy", "شراء-ترميم-إعادة تمويل"),
+                        Triple(InvestmentStrategyType.FIX_AND_FLIP, "🔄 Fix & Flip", "شراء وتجديد وبيع"),
+                        Triple(InvestmentStrategyType.WHOLESALE, "🏷️ Wholesale MAO", "وساطة وعرض أقصى")
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
 
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        items(state.comparisonScenarios) { (scenarioName, sRes) ->
-                            ScenarioComparisonCard(
-                                name = scenarioName,
-                                result = sRes,
-                                isCurrent = input.downPaymentPct == sRes.input.downPaymentPct
+                    items(strategies) { (strat, title, arabic) ->
+                        val isSelected = state.selectedStrategy == strat
+                        Card(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { viewModel.setStrategy(strat) },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isSelected) CyanPrimary else MaterialTheme.colorScheme.surfaceVariant
                             )
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                Text(
+                                    text = title,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSelected) Slate950 else MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = arabic,
+                                    fontSize = 9.sp,
+                                    color = if (isSelected) Slate900 else Slate400
+                                )
+                            }
                         }
                     }
                 }
             }
 
-            // Section 1: Purchase & Renovation
-            item {
-                FinancialInputSection(title = "1. PURCHASE & ACQUISITION") {
-                    NumberField(
-                        label = "Purchase Price ($)",
-                        value = input.purchasePrice,
-                        onValueChange = { viewModel.updateInput(input.copy(purchasePrice = it)) }
-                    )
-                    NumberField(
-                        label = "Closing Costs ($)",
-                        value = input.closingCosts,
-                        onValueChange = { viewModel.updateInput(input.copy(closingCosts = it)) }
-                    )
-                    NumberField(
-                        label = "Renovation / Rehab ($)",
-                        value = input.renovationCost,
-                        onValueChange = { viewModel.updateInput(input.copy(renovationCost = it)) }
-                    )
+            // Strategy Display Body
+            when (state.selectedStrategy) {
+                InvestmentStrategyType.BUY_AND_HOLD -> {
+                    val bnh = state.buyAndHoldResult
+                    val inputs = state.buyAndHoldInputs
+
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Slate900),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("PROJECTED CASH FLOW & RETURN", style = MaterialTheme.typography.labelMedium, color = Slate400, fontWeight = FontWeight.Bold)
+                                    if (bnh.onePercentRuleMet) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(EmeraldGain.copy(alpha = 0.2f))
+                                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                                        ) {
+                                            Text("1% RULE MET", color = EmeraldGain, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(14.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column {
+                                        Text("Monthly Net Cash Flow", fontSize = 11.sp, color = Slate400)
+                                        Text(
+                                            text = "$${String.format("%,.0f", bnh.monthlyCashFlow)}/mo",
+                                            fontSize = 24.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (bnh.monthlyCashFlow >= 0) EmeraldGain else CrimsonAlert
+                                        )
+                                    }
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text("Cash-on-Cash ROI", fontSize = 11.sp, color = Slate400)
+                                        Text(
+                                            text = "${String.format("%.2f", bnh.cashOnCashReturn)}%",
+                                            fontSize = 24.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = CyanPrimary
+                                        )
+                                    }
+                                }
+
+                                Divider(color = Slate800, modifier = Modifier.padding(vertical = 14.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    KeyMetricColumn(label = "Cap Rate", value = "${String.format("%.2f", bnh.capRate)}%")
+                                    KeyMetricColumn(label = "DSCR Coverage", value = String.format("%.2f", bnh.dscr))
+                                    KeyMetricColumn(label = "Gross Rent Mult.", value = "${String.format("%.1f", bnh.grossRentMultiplier)}x")
+                                    KeyMetricColumn(label = "Total Cash In", value = "$${String.format("%,.0f", bnh.totalCashInvested)}")
+                                }
+                            }
+                        }
+                    }
+
+                    // Interactive Sensitivity Sliders
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Text("INTERACTIVE STRESS-TEST & SENSITIVITY", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Slate400)
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                // Interest Rate Slider
+                                Text("Mortgage Interest Rate: ${String.format("%.2f", inputs.interestRatePct)}%", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = inputs.interestRatePct.toFloat(),
+                                    onValueChange = { viewModel.updateSensitivity(interestRate = it.toDouble()) },
+                                    valueRange = 4.0f..11.0f,
+                                    colors = SliderDefaults.colors(thumbColor = CyanPrimary, activeTrackColor = CyanPrimary)
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                // Vacancy Rate Slider
+                                Text("Vacancy Allowance: ${String.format("%.1f", inputs.vacancyRatePct)}%", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = inputs.vacancyRatePct.toFloat(),
+                                    onValueChange = { viewModel.updateSensitivity(vacancyRate = it.toDouble()) },
+                                    valueRange = 0.0f..15.0f,
+                                    colors = SliderDefaults.colors(thumbColor = AmberAccent, activeTrackColor = AmberAccent)
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                // Down Payment Slider
+                                Text("Down Payment: ${String.format("%.0f", inputs.downPaymentPct)}% ($${String.format("%,.0f", inputs.purchasePrice * inputs.downPaymentPct / 100.0)})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = inputs.downPaymentPct.toFloat(),
+                                    onValueChange = { viewModel.updateSensitivity(downPaymentPct = it.toDouble()) },
+                                    valueRange = 0.0f..50.0f,
+                                    colors = SliderDefaults.colors(thumbColor = EmeraldGain, activeTrackColor = EmeraldGain)
+                                )
+                            }
+                        }
+                    }
+
+                    // 10-Year Wealth Growth Forecast
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Slate900),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Text("10-YEAR WEALTH ACCUMULATION FORECAST", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Slate400)
+                                Text("Amortization paydown + 4% appreciation + 3% rent growth", fontSize = 11.sp, color = Slate400)
+                                Spacer(modifier = Modifier.height(14.dp))
+
+                                val milestonesToShow = state.wealthForecast.filter { it.year in listOf(1, 3, 5, 7, 10) }
+                                milestonesToShow.forEach { ms ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 6.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("Year ${ms.year}", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = CyanPrimary)
+                                        Text("Val: $${String.format("%,.0f", ms.propertyValue)}", fontSize = 11.sp, color = Slate400)
+                                        Text("Equity: $${String.format("%,.0f", ms.totalEquity)}", fontSize = 11.sp, color = Slate200)
+                                        Text(
+                                            text = "Wealth: $${String.format("%,.0f", ms.totalWealthCreated)}",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            color = EmeraldGain
+                                        )
+                                    }
+                                    if (ms.year != 10) Divider(color = Slate800, modifier = Modifier.padding(vertical = 2.dp))
+                                }
+                            }
+                        }
+                    }
                 }
-            }
 
-            // Section 2: Income
-            item {
-                FinancialInputSection(title = "2. RENTAL INCOME") {
-                    NumberField(
-                        label = "Monthly Rent ($)",
-                        value = input.monthlyRent,
-                        onValueChange = { viewModel.updateInput(input.copy(monthlyRent = it)) }
-                    )
-                    NumberField(
-                        label = "Other Monthly Income ($)",
-                        value = input.otherMonthlyIncome,
-                        onValueChange = { viewModel.updateInput(input.copy(otherMonthlyIncome = it)) }
-                    )
-                    NumberField(
-                        label = "Vacancy Rate (%)",
-                        value = input.vacancyRatePct,
-                        onValueChange = { viewModel.updateInput(input.copy(vacancyRatePct = it)) }
-                    )
+                InvestmentStrategyType.BRRRR -> {
+                    val brrrr = state.brrrrResult
+                    val inputs = state.brrrrInputs
+
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Slate900),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Text("BRRRR CAPITAL RECYCLING SUMMARY", style = MaterialTheme.typography.labelMedium, color = Slate400, fontWeight = FontWeight.Bold)
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column {
+                                        Text("Net Capital Left in Deal", fontSize = 11.sp, color = Slate400)
+                                        Text(
+                                            text = if (brrrr.isInfiniteReturn) "$0 (100% Cash Out!)" else "$${String.format("%,.0f", brrrr.netCapitalLeftInDeal)}",
+                                            fontSize = 20.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (brrrr.isInfiniteReturn) EmeraldGain else CyanPrimary
+                                        )
+                                    }
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text("Post-Refi Monthly Cash Flow", fontSize = 11.sp, color = Slate400)
+                                        Text(
+                                            text = "$${String.format("%,.0f", brrrr.postRefiMonthlyCashFlow)}/mo",
+                                            fontSize = 20.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = EmeraldGain
+                                        )
+                                    }
+                                }
+
+                                Divider(color = Slate800, modifier = Modifier.padding(vertical = 14.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    KeyMetricColumn(label = "Initial Invested", value = "$${String.format("%,.0f", brrrr.totalInitialCashInvested)}")
+                                    KeyMetricColumn(label = "New Refi Loan", value = "$${String.format("%,.0f", brrrr.newLoanAmount)}")
+                                    KeyMetricColumn(label = "Instant Equity", value = "$${String.format("%,.0f", brrrr.instantEquityCreated)}")
+                                    KeyMetricColumn(label = "Capital Recovered", value = "${String.format("%.1f", brrrr.capitalRecoveryPct)}%")
+                                }
+                            }
+                        }
+                    }
+
+                    // BRRRR Sliders
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Text("RENOVATION & ARV CALIBRATION", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Slate400)
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                Text("Estimated Rehab Budget: $${String.format("%,.0f", inputs.rehabCost)}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = inputs.rehabCost.toFloat(),
+                                    onValueChange = { viewModel.updateBrrrrInputs(rehabCost = it.toDouble()) },
+                                    valueRange = 10000.0f..150000.0f,
+                                    colors = SliderDefaults.colors(thumbColor = AmberAccent, activeTrackColor = AmberAccent)
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Text("Post-Rehab ARV: $${String.format("%,.0f", inputs.arv)}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = inputs.arv.toFloat(),
+                                    onValueChange = { viewModel.updateBrrrrInputs(arv = it.toDouble()) },
+                                    valueRange = 250000.0f..850000.0f,
+                                    colors = SliderDefaults.colors(thumbColor = CyanPrimary, activeTrackColor = CyanPrimary)
+                                )
+                            }
+                        }
+                    }
                 }
-            }
 
-            // Section 3: Operating Expenses
-            item {
-                FinancialInputSection(title = "3. OPERATING EXPENSES") {
-                    NumberField(
-                        label = "Annual Property Tax ($)",
-                        value = input.propertyTaxAnnual,
-                        onValueChange = { viewModel.updateInput(input.copy(propertyTaxAnnual = it)) }
-                    )
-                    NumberField(
-                        label = "Annual Insurance ($)",
-                        value = input.insuranceAnnual,
-                        onValueChange = { viewModel.updateInput(input.copy(insuranceAnnual = it)) }
-                    )
-                    NumberField(
-                        label = "Maintenance (% of Rent)",
-                        value = input.maintenancePct,
-                        onValueChange = { viewModel.updateInput(input.copy(maintenancePct = it)) }
-                    )
-                    NumberField(
-                        label = "Property Management (%)",
-                        value = input.managementPct,
-                        onValueChange = { viewModel.updateInput(input.copy(managementPct = it)) }
-                    )
-                    NumberField(
-                        label = "Utilities / Common ($/mo)",
-                        value = input.utilitiesMonthly,
-                        onValueChange = { viewModel.updateInput(input.copy(utilitiesMonthly = it)) }
-                    )
+                InvestmentStrategyType.FIX_AND_FLIP -> {
+                    val flip = state.fixAndFlipResult
+                    val inputs = state.fixAndFlipInputs
+
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Slate900),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Text("FIX & FLIP PROFITABILITY STATEMENT", style = MaterialTheme.typography.labelMedium, color = Slate400, fontWeight = FontWeight.Bold)
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column {
+                                        Text("Net Projected Profit", fontSize = 11.sp, color = Slate400)
+                                        Text(
+                                            text = "$${String.format("%,.0f", flip.netProfit)}",
+                                            fontSize = 24.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (flip.isProfitable) EmeraldGain else CrimsonAlert
+                                        )
+                                    }
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text("Return on Investment (ROI)", fontSize = 11.sp, color = Slate400)
+                                        Text(
+                                            text = "${String.format("%.1f", flip.returnOnInvestmentPct)}%",
+                                            fontSize = 24.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = CyanPrimary
+                                        )
+                                    }
+                                }
+
+                                Divider(color = Slate800, modifier = Modifier.padding(vertical = 14.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    KeyMetricColumn(label = "Annualized ROI", value = "${String.format("%.1f", flip.annualizedRoiPct)}%")
+                                    KeyMetricColumn(label = "70% Rule MAO", value = "$${String.format("%,.0f", flip.seventyPercentRuleMao)}")
+                                    KeyMetricColumn(label = "Financing Fees", value = "$${String.format("%,.0f", flip.financingFees)}")
+                                    KeyMetricColumn(label = "Selling Fees", value = "$${String.format("%,.0f", flip.sellingCosts)}")
+                                }
+                            }
+                        }
+                    }
+
+                    // Flip Sliders
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Text("FLIP PARAMETERS ADJUSTMENT", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Slate400)
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                Text("Rehab Budget: $${String.format("%,.0f", inputs.rehabBudget)}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = inputs.rehabBudget.toFloat(),
+                                    onValueChange = { viewModel.updateFlipInputs(rehabBudget = it.toDouble()) },
+                                    valueRange = 10000.0f..120000.0f,
+                                    colors = SliderDefaults.colors(thumbColor = AmberAccent, activeTrackColor = AmberAccent)
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Text("Expected Sale Price (ARV): $${String.format("%,.0f", inputs.expectedSalePrice)}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = inputs.expectedSalePrice.toFloat(),
+                                    onValueChange = { viewModel.updateFlipInputs(salePrice = it.toDouble()) },
+                                    valueRange = 250000.0f..800000.0f,
+                                    colors = SliderDefaults.colors(thumbColor = CyanPrimary, activeTrackColor = CyanPrimary)
+                                )
+                            }
+                        }
+                    }
                 }
-            }
 
-            // Section 4: Financing Details
-            item {
-                FinancialInputSection(title = "4. FINANCING & DEBT STRUCTURE") {
-                    NumberField(
-                        label = "Down Payment (%)",
-                        value = input.downPaymentPct,
-                        onValueChange = { viewModel.updateInput(input.copy(downPaymentPct = it)) }
-                    )
-                    NumberField(
-                        label = "Interest Rate (% APR)",
-                        value = input.interestRatePct,
-                        onValueChange = { viewModel.updateInput(input.copy(interestRatePct = it)) }
-                    )
-                    NumberField(
-                        label = "Loan Term (Years)",
-                        value = input.loanTermYears.toDouble(),
-                        onValueChange = { viewModel.updateInput(input.copy(loanTermYears = it.toInt())) }
-                    )
+                InvestmentStrategyType.WHOLESALE -> {
+                    val ws = state.wholesaleResult
+                    val inputs = state.wholesaleInputs
 
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Slate900)
-                            .padding(10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Calculated Monthly P&I Debt:", fontSize = 12.sp, color = Slate400)
-                        Text("$${String.format("%,.0f", res.monthlyDebtService)}/mo", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = CyanPrimary)
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Slate900),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Text("WHOLESALE MAXIMUM ALLOWABLE OFFER (MAO)", style = MaterialTheme.typography.labelMedium, color = Slate400, fontWeight = FontWeight.Bold)
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column {
+                                        Text("Maximum Allowable Offer (MAO)", fontSize = 11.sp, color = Slate400)
+                                        Text(
+                                            text = "$${String.format("%,.0f", ws.maxAllowableOffer)}",
+                                            fontSize = 24.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = EmeraldGain
+                                        )
+                                    }
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text("Your Assignment Fee", fontSize = 11.sp, color = Slate400)
+                                        Text(
+                                            text = "$${String.format("%,.0f", ws.assignmentFee)}",
+                                            fontSize = 24.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = AmberAccent
+                                        )
+                                    }
+                                }
+
+                                Divider(color = Slate800, modifier = Modifier.padding(vertical = 14.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    KeyMetricColumn(label = "End-Buyer Price", value = "$${String.format("%,.0f", ws.buyerPurchasePrice)}")
+                                    KeyMetricColumn(label = "Investor Spread", value = "$${String.format("%,.0f", ws.targetInvestorEquity)}")
+                                    KeyMetricColumn(label = "Low Offer Target", value = "$${String.format("%,.0f", ws.recommendedOfferRangeLow)}")
+                                    KeyMetricColumn(label = "High Offer Cap", value = "$${String.format("%,.0f", ws.recommendedOfferRangeHigh)}")
+                                }
+                            }
+                        }
+                    }
+
+                    // Wholesale Sliders
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Text("ASSIGNMENT FEE & REPAIR ESTIMATES", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Slate400)
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                Text("Desired Wholesale Fee: $${String.format("%,.0f", inputs.desiredAssignmentFee)}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = inputs.desiredAssignmentFee.toFloat(),
+                                    onValueChange = { viewModel.updateWholesaleInputs(fee = it.toDouble()) },
+                                    valueRange = 5000.0f..35000.0f,
+                                    colors = SliderDefaults.colors(thumbColor = AmberAccent, activeTrackColor = AmberAccent)
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Text("Estimated Repairs: $${String.format("%,.0f", inputs.estimatedRepairs)}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = inputs.estimatedRepairs.toFloat(),
+                                    onValueChange = { viewModel.updateWholesaleInputs(repairs = it.toDouble()) },
+                                    valueRange = 10000.0f..100000.0f,
+                                    colors = SliderDefaults.colors(thumbColor = CyanPrimary, activeTrackColor = CyanPrimary)
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
     }
-}
 
-@Composable
-private fun ReturnItem(label: String, value: String, color: Color) {
-    Column {
-        Text(text = label, fontSize = 10.sp, color = Slate400)
-        Text(text = value, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = color)
-    }
-}
-
-@Composable
-private fun FinancialInputSection(
-    title: String,
-    content: @Composable ColumnScope.() -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        shape = RoundedCornerShape(16.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = CyanPrimary)
-            content()
-        }
-    }
-}
-
-@Composable
-private fun NumberField(
-    label: String,
-    value: Double,
-    onValueChange: (Double) -> Unit
-) {
-    var textVal by remember(value) { mutableStateOf(String.format(if (value % 1.0 == 0.0) "%.0f" else "%.2f", value)) }
-
-    OutlinedTextField(
-        value = textVal,
-        onValueChange = {
-            textVal = it
-            it.toDoubleOrNull()?.let { num -> onValueChange(num) }
-        },
-        label = { Text(label, fontSize = 12.sp) },
-        modifier = Modifier.fillMaxWidth(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-        singleLine = true,
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedContainerColor = MaterialTheme.colorScheme.surface,
-            unfocusedContainerColor = MaterialTheme.colorScheme.surface
+    if (showCopyFeedback) {
+        AlertDialog(
+            onDismissRequest = { showCopyFeedback = false },
+            title = { Text("Deal Memo Copied", fontWeight = FontWeight.Bold) },
+            text = { Text("The full institutional financial deal memo has been copied to your clipboard, ready to send via Email or WhatsApp.") },
+            confirmButton = {
+                Button(onClick = { showCopyFeedback = false }, colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)) {
+                    Text("Done", color = Slate950)
+                }
+            }
         )
-    )
+    }
 }
 
 @Composable
-private fun ScenarioComparisonCard(
-    name: String,
-    result: FinancialResult,
-    isCurrent: Boolean
-) {
-    Card(
-        modifier = Modifier
-            .width(180.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isCurrent) CyanDark.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceVariant
-        ),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text(name, fontWeight = FontWeight.Bold, fontSize = 12.sp, color = if (isCurrent) CyanPrimary else Slate200)
-            Spacer(modifier = Modifier.height(6.dp))
-            Text("Cash Flow: $${result.monthlyCashFlow.toInt()}/mo", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = if (result.monthlyCashFlow > 0) EmeraldGain else CrimsonAlert)
-            Text("Cap Rate: ${String.format("%.1f", result.capRate)}%", fontSize = 11.sp, color = Slate300)
-            Text("Cash-on-Cash: ${String.format("%.1f", result.cashOnCashReturn)}%", fontSize = 11.sp, color = Slate300)
-            Text("Cash Needed: $${String.format("%,.0f", result.totalCashRequired)}", fontSize = 11.sp, color = Slate400)
-        }
+private fun KeyMetricColumn(label: String, value: String) {
+    Column {
+        Text(label, fontSize = 10.sp, color = Slate400)
+        Text(value, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Slate200)
     }
+}
+
+private fun generateDealMemo(state: AnalyzerUiState): String {
+    val prop = state.property
+    val bnh = state.buyAndHoldResult
+    return """
+        ====================================================
+        REAL ESTATE AI - INSTITUTIONAL DEAL MEMO
+        ====================================================
+        Property: ${prop?.address ?: "Target Property"}
+        Location: ${prop?.city ?: ""}, ${prop?.state ?: ""}
+        Purchase Price: $${String.format("%,.0f", state.buyAndHoldInputs.purchasePrice)}
+        Estimated Rent: $${String.format("%,.0f", state.buyAndHoldInputs.monthlyRent)}/month
+
+        KEY FINANCIAL RETURNS (BUY & HOLD):
+        ----------------------------------------------------
+        * Monthly Net Cash Flow: $${String.format("%,.0f", bnh.monthlyCashFlow)}/mo
+        * Annual Net Cash Flow:  $${String.format("%,.0f", bnh.annualCashFlow)}/yr
+        * Cap Rate:              ${String.format("%.2f", bnh.capRate)}%
+        * Cash-on-Cash Return:   ${String.format("%.2f", bnh.cashOnCashReturn)}%
+        * Debt Coverage (DSCR):  ${String.format("%.2f", bnh.dscr)}
+        * Gross Rent Multiplier: ${String.format("%.1f", bnh.grossRentMultiplier)}x
+
+        BRRRR / VALUE-ADD METRICS:
+        ----------------------------------------------------
+        * Target ARV:            $${String.format("%,.0f", state.brrrrInputs.arv)}
+        * Post-Refi Cash Flow:   $${String.format("%,.0f", state.brrrrResult.postRefiMonthlyCashFlow)}/mo
+        * Instant Equity:        $${String.format("%,.0f", state.brrrrResult.instantEquityCreated)}
+
+        WHOLESALE MAO:
+        ----------------------------------------------------
+        * Max Allowable Offer:   $${String.format("%,.0f", state.wholesaleResult.maxAllowableOffer)}
+        ====================================================
+    """.trimIndent()
 }

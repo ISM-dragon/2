@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import android.database.sqlite.SQLiteConstraintException
 import androidx.room.withTransaction
 import com.example.data.adapter.NormalizedPropertyBundle
 import com.example.data.local.AppDatabase
@@ -266,85 +267,98 @@ class PropertyImportRepository(
         bundle: NormalizedPropertyBundle,
         jobId: String? = null
     ): ImportResult = withContext(Dispatchers.IO) {
+        try {
+            importBundleInTransaction(bundle, jobId)
+        } catch (conflict: SQLiteConstraintException) {
+            // Another writer committed the same listing between our read and our insert. The
+            // transaction rolled back, so deciding again now matches that row and merges into it.
+            importBundleInTransaction(bundle, jobId)
+        }
+    }
+
+    private suspend fun importBundleInTransaction(
+        bundle: NormalizedPropertyBundle,
+        jobId: String?
+    ): ImportResult = database.withTransaction {
         val now = clock()
         val sourceId = resolveSourceId(bundle.sourceId)
         val incomingPriority = sourcePriority(sourceId)
         val incomingEntity = PropertyMapper.canonicalized(bundle.property)
         val externalId = bundle.externalId.ifBlank { incomingEntity.id }
 
-        database.withTransaction {
-            val provenance = sourceDao.findProvenance(sourceId, externalId)
-            val canonicalIncoming = PropertyMapper.toCanonical(incomingEntity)
+        val provenance = sourceDao.findProvenance(sourceId, externalId)
+        val canonicalIncoming = PropertyMapper.toCanonical(incomingEntity)
 
-            if (provenance != null) {
-                // Level 1: the exact source record was already imported.
-                val existing = propertyDao.getPropertyById(provenance.propertyId)
-                if (existing != null) {
-                    val updated = mergeIntoExisting(existing, incomingEntity, canonicalIncoming, incomingPriority, now)
-                    propertyDao.updateProperty(updated)
-                    writeSatellites(updated.id, bundle)
-                    touchProvenance(existing.id, sourceId, externalId, bundle, jobId, now, makePrimary = false)
-                    return@withTransaction ImportResult(
-                        propertyId = updated.id,
-                        outcome = ImportOutcome.UPDATED,
-                        strategy = DedupStrategy.EXACT_SOURCE_RECORD,
-                        confidence = 1.0,
-                        reason = "source record $sourceId/$externalId refreshed",
-                        property = updated
-                    )
-                }
+        if (provenance != null) {
+            // Level 1: the exact source record was already imported.
+            val existing = propertyDao.getPropertyById(provenance.propertyId)
+            if (existing != null) {
+                val updated = mergeIntoExisting(existing, incomingEntity, canonicalIncoming, incomingPriority, now)
+                propertyDao.updateProperty(updated)
+                writeSatellites(updated.id, bundle)
+                touchProvenance(existing.id, sourceId, externalId, bundle, jobId, now, makePrimary = false)
+                return@withTransaction ImportResult(
+                    propertyId = updated.id,
+                    outcome = ImportOutcome.UPDATED,
+                    strategy = DedupStrategy.EXACT_SOURCE_RECORD,
+                    confidence = 1.0,
+                    reason = "source record $sourceId/$externalId refreshed",
+                    property = updated
+                )
             }
-
-            val decision = decideDedup(canonicalIncoming)
-            if (decision.matched && decision.matchedPropertyId != null) {
-                val existing = propertyDao.getPropertyById(decision.matchedPropertyId)
-                if (existing != null) {
-                    val updated = mergeIntoExisting(existing, incomingEntity, canonicalIncoming, incomingPriority, now)
-                    propertyDao.updateProperty(updated)
-                    writeSatellites(updated.id, bundle)
-                    touchProvenance(
-                        propertyId = updated.id,
-                        sourceId = sourceId,
-                        externalId = externalId,
-                        bundle = bundle,
-                        jobId = jobId,
-                        now = now,
-                        makePrimary = decision.strategy != DedupStrategy.FUZZY_ADDRESS &&
-                            updated.primarySourceId != sourceId && incomingPriority < sourcePriority(updated.primarySourceId)
-                    )
-                    return@withTransaction ImportResult(
-                        propertyId = updated.id,
-                        outcome = if (decision.strategy == DedupStrategy.CANONICAL_KEY) {
-                            ImportOutcome.UPDATED
-                        } else {
-                            ImportOutcome.MERGED
-                        },
-                        strategy = decision.strategy,
-                        confidence = decision.confidence,
-                        reason = decision.reason,
-                        property = updated
-                    )
-                }
-            }
-
-            // New canonical property.
-            val entity = incomingEntity.copy(
-                primarySourceId = sourceId,
-                listingStatusUpdatedAt = if (incomingEntity.listingStatusUpdatedAt == 0L) now else incomingEntity.listingStatusUpdatedAt,
-                lastVerifiedAt = if (incomingEntity.lastVerifiedAt == 0L) now else incomingEntity.lastVerifiedAt
-            )
-            propertyDao.insertProperty(entity)
-            writeSatellites(entity.id, bundle)
-            touchProvenance(entity.id, sourceId, externalId, bundle, jobId, now, makePrimary = true)
-            ImportResult(
-                propertyId = entity.id,
-                outcome = ImportOutcome.INSERTED,
-                strategy = DedupStrategy.NONE,
-                confidence = 0.0,
-                reason = decision.reason,
-                property = entity
-            )
         }
+
+        val decision = decideDedup(canonicalIncoming)
+        if (decision.matched && decision.matchedPropertyId != null) {
+            val existing = propertyDao.getPropertyById(decision.matchedPropertyId)
+            if (existing != null) {
+                val updated = mergeIntoExisting(existing, incomingEntity, canonicalIncoming, incomingPriority, now)
+                propertyDao.updateProperty(updated)
+                writeSatellites(updated.id, bundle)
+                touchProvenance(
+                    propertyId = updated.id,
+                    sourceId = sourceId,
+                    externalId = externalId,
+                    bundle = bundle,
+                    jobId = jobId,
+                    now = now,
+                    makePrimary = decision.strategy != DedupStrategy.FUZZY_ADDRESS &&
+                        updated.primarySourceId != sourceId && incomingPriority < sourcePriority(updated.primarySourceId)
+                )
+                return@withTransaction ImportResult(
+                    propertyId = updated.id,
+                    outcome = if (decision.strategy == DedupStrategy.CANONICAL_KEY) {
+                        ImportOutcome.UPDATED
+                    } else {
+                        ImportOutcome.MERGED
+                    },
+                    strategy = decision.strategy,
+                    confidence = decision.confidence,
+                    reason = decision.reason,
+                    property = updated
+                )
+            }
+        }
+
+        // New canonical property.
+        val entity = incomingEntity.copy(
+            primarySourceId = sourceId,
+            listingStatusUpdatedAt = if (incomingEntity.listingStatusUpdatedAt == 0L) now else incomingEntity.listingStatusUpdatedAt,
+            lastVerifiedAt = if (incomingEntity.lastVerifiedAt == 0L) now else incomingEntity.lastVerifiedAt,
+            // A key another row already holds stays unclaimed; reconcile resolves it later.
+            canonicalKey = claimableKey(incomingEntity.canonicalKey, ownedBy = null)
+        )
+        database.propertyIdentityDao().insertNewProperty(entity)
+        writeSatellites(entity.id, bundle)
+        touchProvenance(entity.id, sourceId, externalId, bundle, jobId, now, makePrimary = true)
+        ImportResult(
+            propertyId = entity.id,
+            outcome = ImportOutcome.INSERTED,
+            strategy = DedupStrategy.NONE,
+            confidence = 0.0,
+            reason = decision.reason,
+            property = entity
+        )
     }
 
     /** Builds the candidate set and asks the pure deduplicator for a decision. */
@@ -404,7 +418,7 @@ class PropertyImportRepository(
             } else {
                 existing.propertyType
             },
-            canonicalKey = existing.canonicalKey ?: incoming.canonicalKey,
+            canonicalKey = existing.canonicalKey ?: claimableKey(incoming.canonicalKey, ownedBy = existing.id),
             // Promotion of the primary source is owned by touchProvenance so the property row and
             // the provenance flag can never disagree.
             primarySourceId = existing.primarySourceId ?: incoming.primarySourceId,
@@ -533,8 +547,8 @@ class PropertyImportRepository(
 
     /**
      * Claims canonical keys for legacy rows and merges duplicates that the v2 schema allowed.
-     * Idempotent and safe to run on every app start; the oldest row always survives so ids that
-     * offers/conversations already point at stay valid.
+     * Idempotent and safe to run on every app start. The row seen first survives, so ids that
+     * offers and conversations already point at stay valid. The whole pass runs in one transaction.
      */
     suspend fun reconcileCanonicalKeys(limit: Int = RECONCILE_BATCH): ReconcileSummary =
         withContext(Dispatchers.IO) {
@@ -545,15 +559,17 @@ class PropertyImportRepository(
 
             database.withTransaction {
                 val pending = propertyDao.getPropertiesWithoutCanonicalKey(limit)
-                for (entity in pending) {
+                for (pendingRow in pending) {
                     scanned++
+                    // An earlier merge in this pass may already have deleted this row or keyed it.
+                    val entity = propertyDao.getPropertyById(pendingRow.id) ?: continue
                     val canonical = PropertyMapper.toCanonical(entity)
                     val key = UsPropertyNormalizer.canonicalKey(canonical.address)
 
                     val owner = propertyDao.getPropertyByCanonicalKey(key)
                     if (owner != null && owner.id != entity.id) {
                         val (survivor, loser) = oldestFirst(entity, owner)
-                        mergeDuplicate(loser, survivor)
+                        mergeDuplicate(loser.id, survivor.id)
                         mergedDuplicates++
                         reasons += "key already owned by ${survivor.id}"
                         continue
@@ -572,7 +588,7 @@ class PropertyImportRepository(
                     if (matchedId != null) {
                         val matched = siblings.first { it.id == matchedId }
                         val (survivor, loser) = oldestFirst(entity, matched)
-                        mergeDuplicate(loser, survivor)
+                        mergeDuplicate(loser.id, survivor.id)
                         mergedDuplicates++
                         reasons += decision.reason
                         continue
@@ -600,24 +616,34 @@ class PropertyImportRepository(
         if (a.scannedAt <= b.scannedAt) Pair(a, b) else Pair(b, a)
 
     /**
-     * Merges the losing duplicate into the surviving row, moving everything that would otherwise be
-     * lost, then deletes the loser (cascades clean up the rest).
+     * Merges [loserId] into [survivorId] and deletes the loser. Nothing the loser owns is lost silently.
+     *
+     * The order is deliberate:
+     * 1. every child row is re-pointed (or copied) to the survivor first, because deleting the loser
+     *    cascades into everything that still points at it;
+     * 2. the loser is deleted before the survivor takes a canonical key, because the key is unique and
+     *    the loser may hold it (writing the key first is the constraint failure this order prevents);
+     * 3. the survivor is written last, from freshly read rows.
+     *
+     * Where a row would duplicate one the survivor already has (same source record, comp, enrichment or
+     * saved state), the survivor's version wins and the loser's copy goes with the loser.
      */
-    private suspend fun mergeDuplicate(loser: PropertyEntity, survivor: PropertyEntity) {
-        if (loser.id == survivor.id) return
+    private suspend fun mergeDuplicate(loserId: String, survivorId: String) {
+        if (loserId == survivorId) return
+        val loser = propertyDao.getPropertyById(loserId) ?: return
+        val survivor = propertyDao.getPropertyById(survivorId) ?: return
+        val refs = database.propertyIdentityDao()
 
-        sourceDao.repointProvenance(loser.id, survivor.id)
-
+        // 1. Move references.
+        refs.repointProvenance(loser.id, survivor.id)
+        refs.repointEnrichments(loser.id, survivor.id)
+        refs.repointCompTargets(loser.id, survivor.id)
+        refs.repointCompLinks(loser.id, survivor.id)
         if (propertyDao.getImagesListForProperty(survivor.id).isEmpty()) {
             propertyDao.repointImages(loser.id, survivor.id)
         }
         if (propertyDao.getSalesHistoryListForProperty(survivor.id).isEmpty()) {
             propertyDao.repointSalesHistory(loser.id, survivor.id)
-        }
-        if (propertyDao.getCompsListForProperty(survivor.id).isEmpty()) {
-            propertyDao.repointComps(loser.id, survivor.id)
-        } else {
-            propertyDao.deleteCompsByPropertyId(loser.id)
         }
         if (propertyDao.getMarketData(survivor.id) == null) {
             propertyDao.getMarketData(loser.id)?.let { propertyDao.insertMarketData(it.copy(propertyId = survivor.id)) }
@@ -634,30 +660,55 @@ class PropertyImportRepository(
         if (analysisDao.getAnalysis(survivor.id) == null) {
             analysisDao.getAnalysis(loser.id)?.let { analysisDao.insertAnalysis(it.copy(propertyId = survivor.id)) }
         }
-        if (analysisDao.getScenariosListForProperty(survivor.id).isEmpty()) {
-            analysisDao.insertScenarios(
-                analysisDao.getScenariosListForProperty(loser.id).map { it.copy(id = 0, propertyId = survivor.id) }
-            )
-        }
-        if (enrichmentDao.countForProperty(survivor.id) == 0) {
-            val moved = enrichmentDao.getForProperty(loser.id)
-            if (moved.isNotEmpty()) {
-                enrichmentDao.upsertAll(moved.map { it.copy(id = 0, propertyId = survivor.id) })
-            }
+        refs.repointFinancingScenarios(loser.id, survivor.id)
+        refs.repointSavedProperties(loser.id, survivor.id)
+        refs.repointSavedDeals(loser.id, survivor.id)
+        refs.repointOffers(loser.id, survivor.id)
+        refs.repointConversations(loser.id, survivor.id)
+        refs.repointAutomationJobs(loser.id, survivor.id)
+        refs.repointAiAnalysis(loser.id, survivor.id)
+        refs.deleteAiAnalysis(loser.id)
+        refs.repointSourceLinks(loser.id, survivor.id)
+
+        // Exactly one primary source record on the survivor.
+        val records = sourceDao.getProvenanceForProperty(survivor.id)
+        if (records.isNotEmpty()) {
+            val preferredSource = survivor.primarySourceId ?: loser.primarySourceId
+            val primary = records.firstOrNull { it.sourceId == preferredSource } ?: records.first()
+            sourceDao.clearPrimaryProvenance(survivor.id)
+            sourceDao.markPrimaryProvenance(primary.id)
         }
 
+        // 2. Remove the loser. Only rows that were dropped on purpose are left for the cascade.
+        propertyDao.deletePropertyById(loser.id)
+
+        // 3. The survivor takes the first usable key: its own, the loser's (now free), or one derived
+        //    from its own address. A key another row holds is skipped, never forced.
+        val canonicalKey = listOf(survivor.canonicalKey, loser.canonicalKey, canonicalKeyOf(survivor))
+            .firstNotNullOfOrNull { claimableKey(it, ownedBy = survivor.id) }
         propertyDao.updateProperty(
             survivor.copy(
-                // The survivor inherits the identity if it had not claimed one yet; otherwise the
-                // merged row would keep no canonical key at all after the loser is deleted.
-                canonicalKey = survivor.canonicalKey ?: loser.canonicalKey,
+                canonicalKey = canonicalKey,
                 normalizedAddress = survivor.normalizedAddress.ifBlank { loser.normalizedAddress },
+                primarySourceId = survivor.primarySourceId ?: loser.primarySourceId,
                 isSaved = survivor.isSaved || loser.isSaved,
                 isSavedDeal = survivor.isSavedDeal || loser.isSavedDeal,
                 dealScore = maxOf(survivor.dealScore, loser.dealScore)
             )
         )
-        propertyDao.deletePropertyById(loser.id)
+    }
+
+    private fun canonicalKeyOf(entity: PropertyEntity): String =
+        UsPropertyNormalizer.canonicalKey(PropertyMapper.toCanonical(entity).address)
+
+    /**
+     * Returns [key] when no row other than [ownedBy] holds it; null otherwise. Checked before any
+     * write that sets a canonical key, so a claim never collides with the unique index.
+     */
+    private suspend fun claimableKey(key: String?, ownedBy: String?): String? {
+        if (key.isNullOrBlank()) return null
+        val owner = propertyDao.getPropertyByCanonicalKey(key)
+        return if (owner == null || owner.id == ownedBy) key else null
     }
 
     /**

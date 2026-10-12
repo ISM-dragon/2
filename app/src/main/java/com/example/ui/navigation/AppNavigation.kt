@@ -23,6 +23,7 @@ import com.example.ui.screens.property.PropertyDetailScreen
 import com.example.ui.screens.saved.SavedScreen
 import com.example.ui.screens.settings.SettingsScreen
 import com.example.ui.screens.splash.SplashScreen
+import com.example.ui.screens.urlintelligence.UrlIntelligenceParserScreen
 import com.example.ui.theme.CyanPrimary
 import com.example.ui.theme.Slate400
 import com.example.ui.theme.Slate900
@@ -113,7 +114,8 @@ fun AppNavigation() {
                     onNavigateToAi = { propId -> navController.navigate(Screen.AiIntelligence.createRoute(propId)) },
                     onNavigateToOffers = { navController.navigate(Screen.Offers.route) },
                     onNavigateToAutomation = { navController.navigate(Screen.Automation.route) },
-                    onNavigateToSettings = { navController.navigate(Screen.Settings.route) }
+                    onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
+                    onNavigateToUrlParser = { navController.navigate(Screen.UrlParser.route) }
                 )
             }
 
@@ -204,6 +206,15 @@ fun AppNavigation() {
             composable(Screen.Settings.route) {
                 SettingsScreen(
                     onBack = { navController.popBackStack() }
+                )
+            }
+
+            // URL Intelligence Parser Form & Metadata Explorer
+            composable(Screen.UrlParser.route) {
+                UrlIntelligenceParserScreen(
+                    onBack = { navController.popBackStack() },
+                    onNavigateToAnalyzer = { propId -> navController.navigate(Screen.Analyzer.createRoute(propId)) },
+                    onNavigateToDealRoom = { propId -> navController.navigate(Screen.DealRoom.createRoute(propId)) }
                 )
             }
         }

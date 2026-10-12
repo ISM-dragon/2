@@ -154,3 +154,20 @@ Pre-existing issues **not** changed here (out of scope, reported for follow-up):
 | `PropertySourceDeduplicationIntegrationTest` | `PropertySourceManager` end-to-end: cross-provider sync, duplicate URLs, idempotent re-imports, priority-based catalog merges, review/conflict paths |
 | `PropertyDeduplicatorHardeningTest` | URL-intelligence deduplicator: no silent fuzzy/nearby merges, DAO-order independence, conflict on duplicate rows |
 | `domain.property.PropertyDeduplicatorTest`, `UsPropertyNormalizerTest` | legacy import ladder + normalization primitives |
+
+## Database guarantees for canonical rows (Room catalog)
+
+* **One canonical row per key.** `properties.canonicalKey` is UNIQUE. New rows are written with
+  `PropertyIdentityDao.insertNewProperty` (`OnConflictStrategy.ABORT`), never the replacing insert,
+  so a conflicting write cannot silently delete a row and cascade into its satellites. A race that
+  loses that arbitration rolls the transaction back and the import re-decides once, which then
+  matches the committed row and merges into it.
+* **A key is claimed only when free.** Import and reconcile check the owner before they set a key
+  (`claimableKey`); a key another row holds stays unclaimed and is resolved by reconcile.
+* **Merging a legacy duplicate** (`PropertyImportRepository.reconcileCanonicalKeys`) runs in one
+  transaction, in this order: move every referencing row to the survivor (provenance, enrichments,
+  comps, financing scenarios, saved state, offers, conversations, automation jobs, AI analysis,
+  source links); delete the loser; then the survivor claims the canonical key. Rows that would
+  duplicate one the survivor already has (same source record, comp, enrichment) are dropped and the
+  survivor's version is kept. Nothing is dropped where the survivor has no counterpart.
+* Automation jobs and offers keep their own ids and history; only their `propertyId` reference moves.

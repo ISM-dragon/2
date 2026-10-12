@@ -53,7 +53,7 @@ jobs:
 
       # The CRM suite (com.example.domain.crm.*) is pure JVM (no Android/Room imports, see
       # LeadCrmIsolationTest), so it runs in the same invocation as the analyst tests.
-      - name: Run AI Analyst test suite
+      - name: Run targeted AI Analyst test suite
         shell: bash
         run: |
           bash .github/scripts/run-gradle-gate.sh ai-analyst-gradle \
@@ -115,7 +115,7 @@ jobs:
 
       # Each requested task has its own step so the outcome of every task is visible in the run.
       # --continue lets all module test tasks run even if one of them fails; the step still fails.
-      - name: Run unit tests (app, urlintelligence, repairestimator)
+      - name: Run full-app module unit tests (app, urlintelligence, repairestimator)
         shell: bash
         run: |
           bash .github/scripts/run-gradle-gate.sh full-app-tests-gradle \
@@ -134,7 +134,7 @@ jobs:
             repairestimator/build/test-results/test
 
       # Runs even when tests fail, so the debug build is still verified and its APK is kept.
-      - name: Assemble debug APK
+      - name: Assemble full-app debug APK
         id: assemble
         if: always()
         shell: bash

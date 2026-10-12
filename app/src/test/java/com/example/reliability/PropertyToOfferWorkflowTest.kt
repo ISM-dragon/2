@@ -127,7 +127,9 @@ class PropertyToOfferWorkflowTest {
             firstProvenance.lastSeenAt,
             provenance.single().lastSeenAt
         )
-        assertEquals(1, harness.database.propertyDao().getImagesListForProperty(propertyId).size)
+        // The fixture's structured data lists two photos. A repeated import rewrites the gallery
+        // rather than growing it, so the count is the same after the second import.
+        assertEquals(2, harness.database.propertyDao().getImagesListForProperty(propertyId).size)
     }
 
     @Test

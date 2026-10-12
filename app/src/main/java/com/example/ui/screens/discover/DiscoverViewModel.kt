@@ -244,4 +244,20 @@ class DiscoverViewModel(application: Application) : AndroidViewModel(application
             app.financialRepository.analyzeProperty(propId)
         }
     }
+
+    fun scanMarketCity(city: com.example.domain.market.MarketCity, count: Int = 3) {
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            try {
+                for (i in 1..count) {
+                    val bundle = com.example.domain.market.MarketScannerService.generateScannedMarketBundle(city, "Single Family", i)
+                    propertyRepo.insertBundle(bundle)
+                    app.financialRepository.analyzeProperty(bundle.property.id)
+                }
+            } finally {
+                _isRefreshing.value = false
+            }
+        }
+    }
 }
+

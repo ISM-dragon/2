@@ -93,7 +93,8 @@ class DatabaseMigrationTest {
             val job = runBlocking { database.automationDao().getJobById("legacy-job") }
             assertNotNull("legacy automation job was lost by the v2 -> v3 upgrade", job)
             assertTrue("legacy job has no idempotency key", job!!.idempotencyKey.isNotBlank())
-            assertEquals("legacy-job", job.propertyId)
+            // The job belongs to the legacy property it was created for, not to itself.
+            assertEquals("legacy-1", job.propertyId)
 
             val rules = runBlocking { database.automationDao().getRules() }
             assertNotNull(rules)
@@ -442,7 +443,7 @@ class DatabaseMigrationTest {
             insertRow(legacy, "automation_runs", mapOf("id" to 1, "startTime" to 1000L, "endTime" to 2000L, "status" to "COMPLETED", "summary" to "legacy run"))
             insertRow(legacy, "automation_logs", mapOf("id" to 1, "runId" to 1, "timestamp" to 1000L, "level" to "INFO", "tag" to "START", "message" to "legacy"))
             insertRow(legacy, "automation_state", mapOf("id" to 1, "lastActivityTime" to 1000L))
-            insertRow(legacy, "automation_rules", mapOf("id" to "default"))
+            insertRow(legacy, "automation_rules", mapOf("id" to "DEFAULT"))
 
             legacy.version = 2
         } finally {
