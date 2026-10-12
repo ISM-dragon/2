@@ -18,7 +18,7 @@ data class IdempotencyKey(val value: String) {
         const val DEFAULT_NAMESPACE: String = "property-url"
 
         fun forUrl(canonicalUrl: String, namespace: String = DEFAULT_NAMESPACE): IdempotencyKey {
-            val normalized = canonicalUrl.trim().lowercase()
+            val normalized = identityCanonical(canonicalUrl)
             return IdempotencyKey("$namespace:" + sha256(normalized))
         }
 
@@ -36,11 +36,18 @@ data class IdempotencyKey(val value: String) {
         ): String {
             val id = sourcePropertyId?.trim().orEmpty()
             return if (id.isBlank()) {
-                "${sourceId.lowercase()}:url-hash:" + sha256(canonicalUrl.trim().lowercase()).take(16)
+                "${sourceId.lowercase()}:url-hash:" + sha256(identityCanonical(canonicalUrl)).take(16)
             } else {
                 "${sourceId.lowercase()}:${id.lowercase()}"
             }
         }
+
+        /**
+         * Normalizes only identity-equivalent host spelling. The fetch URL remains untouched so
+         * provider routing and robots.txt continue to use the host supplied by the source.
+         */
+        private fun identityCanonical(canonicalUrl: String): String =
+            canonicalUrl.trim().lowercase().replaceFirst(Regex("^(https?://)www\\."), "$1")
 
         private fun sha256(input: String): String {
             val digest = java.security.MessageDigest.getInstance("SHA-256")

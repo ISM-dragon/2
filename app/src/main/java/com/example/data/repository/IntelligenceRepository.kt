@@ -10,6 +10,7 @@ import com.example.data.local.entity.*
 import com.example.domain.intelligence.job.JobProgressState
 import com.example.domain.intelligence.job.JobStatus
 import com.example.domain.propertyurl.pipeline.ImportOutcome
+import com.example.domain.propertyurl.pipeline.ImportRequest
 import kotlinx.coroutines.flow.*
 
 /**
@@ -74,7 +75,8 @@ class IntelligenceRepository(
             currentStepDescription = "Starting import..."
         )
         try {
-            val outcome = propertyUrlImporter.importAndStore(url)
+            val request = if (forceRefresh) ImportRequest.FORCE_REFRESH else ImportRequest.DEFAULT
+            val outcome = propertyUrlImporter.importAndStore(url, request)
             val propertyId = outcome.propertyOrNull()?.canonicalId
             // A suppressed duplicate is an idempotent success: the listing is already stored, the
             // canonical record is carried on the suppressed job, and re-importing must not look like
@@ -112,7 +114,8 @@ class IntelligenceRepository(
         }
     }
 
-    fun cancelJob(jobId: String) {
+    suspend fun cancelJob(jobId: String) {
+        propertyUrlImporter.cancel(jobId)
         _currentJobProgress.value = null
     }
 

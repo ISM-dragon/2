@@ -125,7 +125,7 @@ class DiscoverViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun cancelJob(jobId: String) {
-        intelligenceRepo.cancelJob(jobId)
+        viewModelScope.launch { intelligenceRepo.cancelJob(jobId) }
     }
 
     fun clearJob() {
