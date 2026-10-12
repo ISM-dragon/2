@@ -10,6 +10,8 @@ import com.example.data.adapter.PropertySourceManager
 import com.example.data.adapter.PropertyUrlImportBridge
 import com.example.data.local.AppDatabase
 import com.example.data.repository.*
+import com.example.data.scrape.HttpListingPageFetcher
+import com.example.data.scrape.PortalScrapeSettingsStore
 import com.example.domain.ai.GeminiManager
 import com.example.domain.ai.analyst.RealEstateAnalyst
 import com.example.domain.automation.AutomationEngine
@@ -106,6 +108,14 @@ class RealEstateAiApp : Application(), ImageLoaderFactory, Configuration.Provide
     lateinit var intelligenceRepository: IntelligenceRepository
         private set
 
+    /** Device policy for direct portal retrieval (consent, robots.txt mode, pacing). */
+    lateinit var portalScrapeSettingsStore: PortalScrapeSettingsStore
+        private set
+
+    /** Live portal search: fetches a portal's own search page and files listings into the store. */
+    lateinit var listingScrapeRepository: ListingScrapeRepository
+        private set
+
     override fun onCreate() {
         super.onCreate()
         database = AppDatabase.getInstance(this)
@@ -177,6 +187,17 @@ class RealEstateAiApp : Application(), ImageLoaderFactory, Configuration.Provide
             enrichmentDao = database.propertyEnrichmentDao(),
             financialDao = database.propertyFinancialDao(),
             intelligenceDao = database.intelligenceDao()
+        )
+
+        // Live portal search. Consent lives in the settings store and defaults to OFF, so nothing is
+        // fetched from a portal until the user reads the notice and switches it on.
+        portalScrapeSettingsStore = PortalScrapeSettingsStore(this)
+        listingScrapeRepository = ListingScrapeRepository(
+            fetcher = HttpListingPageFetcher.create { portalScrapeSettingsStore.current() },
+            settingsStore = portalScrapeSettingsStore,
+            propertyRepository = propertyRepository,
+            financialRepository = financialRepository,
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         )
 
         offerRepository = OfferRepository(
