@@ -1,10 +1,7 @@
 package com.example.domain.gmail
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.util.Base64
-import androidx.core.content.FileProvider
 import com.example.data.local.entity.GmailAuthStatus
 import com.example.data.local.entity.GmailConfigurationEntity
 import com.example.data.repository.ConfigRepository
@@ -488,32 +485,6 @@ class GmailService(
     private fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(StandardCharsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
-
-    fun createGmailIntent(
-        context: Context,
-        recipientEmail: String,
-        subject: String,
-        bodyText: String,
-        pdfFile: File?
-    ): Intent {
-        return Intent(Intent.ACTION_SEND).apply {
-            type = if (pdfFile != null && pdfFile.isFile) "application/pdf" else "message/rfc822"
-            putExtra(Intent.EXTRA_EMAIL, arrayOf(recipientEmail))
-            putExtra(Intent.EXTRA_SUBJECT, subject)
-            putExtra(Intent.EXTRA_TEXT, bodyText)
-            setPackage("com.google.android.gm")
-
-            if (pdfFile != null && pdfFile.isFile) {
-                val uri: Uri = FileProvider.getUriForFile(
-                    context,
-                    "${context.packageName}.fileprovider",
-                    pdfFile
-                )
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-        }
-    }
 
     companion object {
         private const val GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"

@@ -10,9 +10,9 @@ import androidx.lifecycle.viewModelScope
 import com.example.RealEstateAiApp
 import com.example.data.local.entity.OfferEntity
 import com.example.data.local.entity.PropertyEntity
+import com.example.domain.pdf.OfferPdfStorage
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import java.io.File
 
 data class OffersUiState(
     val selectedStatus: String = "ALL", // "ALL", "READY", "SENT", "OPENED", "SIGNED", "FAILED"
@@ -92,22 +92,29 @@ class OffersViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * Opens a stored offer PDF in an external viewer.
+     *
+     * The path is resolved by [OfferPdfStorage] before a URI grant is handed out, so this entry point
+     * shares exactly the files the send path is allowed to attach: a real file, directly inside
+     * `filesDir/offers/`, with a `.pdf` extension. `FileProvider` alone only rejects paths outside its
+     * configured root and would throw for them, leaving the check implicit; resolving first also
+     * rejects non-PDF files, nested directories and symlinks that point out of the directory.
+     */
     fun openPdf(context: Context, pdfPath: String) {
+        val file = OfferPdfStorage.resolveExistingPdf(context, pdfPath) ?: return
         try {
-            val file = File(pdfPath)
-            if (file.exists()) {
-                val uri: Uri = FileProvider.getUriForFile(
-                    context,
-                    "${context.packageName}.fileprovider",
-                    file
-                )
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, "application/pdf")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(intent)
+            val uri: Uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/pdf")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            context.startActivity(intent)
         } catch (e: Exception) {
             // Error opening PDF
         }

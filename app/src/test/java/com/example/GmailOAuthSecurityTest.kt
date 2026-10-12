@@ -9,6 +9,7 @@ import com.example.data.local.entity.GmailConfigurationEntity
 import com.example.data.local.entity.OfferTemplateEntity
 import com.example.data.repository.ConfigRepository
 import com.example.data.security.CryptoManager
+import com.example.domain.gmail.GmailFailureKind
 import com.example.domain.gmail.GmailSendResult
 import com.example.domain.gmail.GmailService
 import kotlinx.coroutines.flow.Flow
@@ -16,6 +17,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import org.json.JSONObject
+import java.io.File
+import java.nio.file.Files
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -354,6 +357,63 @@ class GmailOAuthSecurityTest {
         assertFalse("Empty message id must be marked as failure", sendResult.success)
         assertNull(sendResult.messageId)
         assertTrue(sendResult.error!!.contains("did not contain a valid message id"))
+    }
+
+    /**
+     * Attachment approval is what keeps the Gmail path from reading arbitrary app files. It must hold
+     * for a real PDF stored outside `files/offers/`, for a non-PDF file stored inside it, and for a
+     * symlink inside the directory that resolves outside it.
+     */
+    @Test
+    fun sendRefusesAttachmentsThatAreNotApprovedOfferPdfs() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = ConfigRepository(InMemoryConfigDao())
+        val service = GmailService(repository)
+        repository.saveGmailConfig(
+            GmailConfigurationEntity(
+                id = 1,
+                accountEmail = "acquisitions@example.com",
+                senderName = "Acquisitions",
+                isConnected = true,
+                accessToken = "test-only-access-token",
+                refreshToken = "test-only-refresh-token",
+                expiresAt = System.currentTimeMillis() + 3_600_000L,
+                authStatus = GmailAuthStatus.AUTH_REQUIRED
+            )
+        )
+
+        // Rejection happens before any network call, so this test stays hermetic. The positive case
+        // (a real PDF directly inside files/offers/) is covered by GmailMimeAndRetryPolicyTest.
+        val pdfHeader = byteArrayOf(0x25, 0x50, 0x44, 0x46, 0x2d, 0x31)
+        val offersDirectory = File(context.filesDir, "offers").apply { mkdirs() }
+        val outside = File(context.filesDir, "outside.pdf").apply { writeBytes(pdfHeader) }
+        val notAPdf = File(offersDirectory, "notes.txt").apply { writeText("not a document") }
+        val link = File(offersDirectory, "escape.pdf")
+        val linkCreated = try {
+            Files.createSymbolicLink(link.toPath(), outside.toPath())
+            true
+        } catch (_: Exception) {
+            false
+        }
+
+        val unapproved: List<File?> = listOf(outside, notAPdf, link.takeIf { linkCreated }, null)
+        for (candidate in unapproved) {
+            val outcome = service.sendOfferEmail(
+                context = context,
+                recipientEmail = "broker@example.com",
+                recipientName = "Broker",
+                subject = "Offer",
+                htmlBody = "<p>Offer</p>",
+                pdfFile = candidate
+            )
+            assertEquals(
+                "unapproved attachment must be rejected before any network call",
+                GmailFailureKind.VALIDATION,
+                outcome.failureKind
+            )
+            assertFalse(outcome.success)
+            assertNull("no message id is invented for a rejected send", outcome.messageId)
+        }
     }
 
     @Test
